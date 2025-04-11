@@ -31,9 +31,9 @@ const (
 	// Timing constants
 	timeHeartbeatOn     = 5 * time.Second
 	timeCmd             = 100 * time.Millisecond
-	timeCmdSlow         = 500 * time.Millisecond
-	timeCmdFirstOpened  = 500 * time.Millisecond
-	timeCmdFirstAsleep  = 500 * time.Millisecond
+	timeCmdSlow         = 300 * time.Millisecond
+	timeCmdFirstOpened  = 200 * time.Millisecond
+	timeCmdFirstAsleep  = 200 * time.Millisecond
 	timePresence        = 10 * time.Second
 	timeCheckReader     = 10 * time.Second
 	timeDeparture      = 500 * time.Millisecond
