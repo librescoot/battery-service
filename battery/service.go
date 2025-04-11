@@ -302,6 +302,7 @@ func (r *BatteryReader) handleTagPresent() {
 	defer r.Unlock()
 
 	if !r.data.Present {
+		r.data.Present = true // Mark as present immediately upon detection
 		r.justInserted = true
 		// We'll log the battery info after reading status
 	}
