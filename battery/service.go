@@ -8,8 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"battery-service/nfc/hal"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func min(a, b int) int {
@@ -545,6 +546,25 @@ func (r *BatteryReader) updateRedisStatus() error {
 		"serial-number":     string(bytes.TrimRight(r.data.SerialNumber[:], "\x00")),
 		"manufacturing-date": r.data.ManufacturingDate,
 		"fw-version":        r.data.FWVersion,
+		// Add detailed fault information
+		"faults:charge-temp-over-high": fmt.Sprintf("%v", r.data.Faults.ChargeTempOverHigh),
+		"faults:charge-temp-over-low": fmt.Sprintf("%v", r.data.Faults.ChargeTempOverLow),
+		"faults:discharge-temp-over-high": fmt.Sprintf("%v", r.data.Faults.DischargeTempOverHigh),
+		"faults:discharge-temp-over-low": fmt.Sprintf("%v", r.data.Faults.DischargeTempOverLow),
+		"faults:signal-wire-broken": fmt.Sprintf("%v", r.data.Faults.SignalWireBroken),
+		"faults:second-level-over-temp": fmt.Sprintf("%v", r.data.Faults.SecondLevelOverTemp),
+		"faults:pack-voltage-high": fmt.Sprintf("%v", r.data.Faults.PackVoltageHigh),
+		"faults:mos-temp-over-high": fmt.Sprintf("%v", r.data.Faults.MOSTempOverHigh),
+		"faults:cell-voltage-high": fmt.Sprintf("%v", r.data.Faults.CellVoltageHigh),
+		"faults:pack-voltage-low": fmt.Sprintf("%v", r.data.Faults.PackVoltageLow),
+		"faults:cell-voltage-low": fmt.Sprintf("%v", r.data.Faults.CellVoltageLow),
+		"faults:charge-over-current": fmt.Sprintf("%v", r.data.Faults.ChargeOverCurrent),
+		"faults:discharge-over-current": fmt.Sprintf("%v", r.data.Faults.DischargeOverCurrent),
+		"faults:short-circuit": fmt.Sprintf("%v", r.data.Faults.ShortCircuit),
+		"faults:not-following-command": fmt.Sprintf("%v", r.data.Faults.NotFollowingCommand),
+		"faults:zero-data": fmt.Sprintf("%v", r.data.Faults.ZeroData),
+		"faults:communication-error": fmt.Sprintf("%v", r.data.Faults.CommunicationError),
+		"faults:reader-error": fmt.Sprintf("%v", r.data.Faults.ReaderError),
 	}
 
 	// Set all fields in the hash
@@ -606,6 +626,74 @@ func (r *BatteryReader) readBatteryStatus() error {
 	r.data.Temperature[1] = int8(data[13])
 	r.data.StateOfHealth = data[14]
 	r.data.LowSOC = data[15] != 0
+
+	// Initialize faults struct
+	r.data.Faults = BatteryFaults{}
+
+	// Parse fault code bitmask
+	faultCode := r.data.FaultCode
+	r.data.Faults.ChargeTempOverHigh = (faultCode>>0)&1 != 0
+	r.data.Faults.ChargeTempOverLow = (faultCode>>1)&1 != 0
+	r.data.Faults.DischargeTempOverHigh = (faultCode>>2)&1 != 0
+	r.data.Faults.DischargeTempOverLow = (faultCode>>3)&1 != 0
+	r.data.Faults.SignalWireBroken = (faultCode>>4)&1 != 0
+	r.data.Faults.SecondLevelOverTemp = (faultCode>>5)&1 != 0
+	r.data.Faults.PackVoltageHigh = (faultCode>>6)&1 != 0
+	r.data.Faults.MOSTempOverHigh = (faultCode>>7)&1 != 0
+	r.data.Faults.CellVoltageHigh = (faultCode>>8)&1 != 0
+	r.data.Faults.PackVoltageLow = (faultCode>>9)&1 != 0
+	r.data.Faults.CellVoltageLow = (faultCode>>10)&1 != 0
+	r.data.Faults.ChargeOverCurrent = (faultCode>>11)&1 != 0
+	r.data.Faults.DischargeOverCurrent = (faultCode>>12)&1 != 0
+	r.data.Faults.ShortCircuit = (faultCode>>13)&1 != 0
+	// Bits 14 and 15 are reserved
+
+	// Log specific faults if present
+	if r.data.Faults.ChargeTempOverHigh {
+		r.logCallback(hal.LogLevelWarning, "Fault: Charge Temperature Over High")
+	}
+	if r.data.Faults.ChargeTempOverLow {
+		r.logCallback(hal.LogLevelWarning, "Fault: Charge Temperature Over Low")
+	}
+	if r.data.Faults.DischargeTempOverHigh {
+		r.logCallback(hal.LogLevelWarning, "Fault: Discharge Temperature Over High")
+	}
+	if r.data.Faults.DischargeTempOverLow {
+		r.logCallback(hal.LogLevelWarning, "Fault: Discharge Temperature Over Low")
+	}
+	if r.data.Faults.SignalWireBroken {
+		r.logCallback(hal.LogLevelWarning, "Fault: Signal Wire Broken")
+	}
+	if r.data.Faults.SecondLevelOverTemp {
+		r.logCallback(hal.LogLevelWarning, "Fault: Second Level Over Temperature")
+	}
+	if r.data.Faults.PackVoltageHigh {
+		r.logCallback(hal.LogLevelWarning, "Fault: Pack Voltage High")
+	}
+	if r.data.Faults.MOSTempOverHigh {
+		r.logCallback(hal.LogLevelWarning, "Fault: MOS Temperature Over High")
+	}
+	if r.data.Faults.CellVoltageHigh {
+		r.logCallback(hal.LogLevelWarning, "Fault: Cell Voltage High")
+	}
+	if r.data.Faults.PackVoltageLow {
+		r.logCallback(hal.LogLevelWarning, "Fault: Pack Voltage Low")
+	}
+	if r.data.Faults.CellVoltageLow {
+		r.logCallback(hal.LogLevelWarning, "Fault: Cell Voltage Low")
+	}
+	if r.data.Faults.ChargeOverCurrent {
+		r.logCallback(hal.LogLevelWarning, "Fault: Charge Over Current")
+	}
+	if r.data.Faults.DischargeOverCurrent {
+		r.logCallback(hal.LogLevelWarning, "Fault: Discharge Over Current")
+	}
+	if r.data.Faults.ShortCircuit {
+		r.logCallback(hal.LogLevelWarning, "Fault: Short Circuit")
+	}
+	// Note: Faults like NotFollowingCommand, ZeroData, CommunicationError, and ReaderError
+	// are detected and logged elsewhere in the code based on communication outcomes,
+	// not directly from the battery's fault code bitmask.
 
 	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Status0 decoded: voltage=%dmV current=%dmA fw_version=%s remaining_cap=%dmAh full_cap=%dmAh charge=%d%% fault=0x%04x temp1=%d°C temp2=%d°C soh=%d%% low_soc=%v",
 		r.data.Voltage, r.data.Current, r.data.FWVersion, r.data.RemainingCapacity, r.data.FullCapacity, r.data.Charge, r.data.FaultCode,
@@ -932,4 +1020,4 @@ func (s *Service) updateSeatboxState() {
 	enabled := state == "closed"
 	s.logger.Printf("[Redis] Setting battery 0 enabled state to: %v", enabled)
 	s.SetEnabled(0, enabled)
-} 
+}
