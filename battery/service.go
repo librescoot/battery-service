@@ -222,7 +222,7 @@ func (r *BatteryReader) monitorTags() {
 			return
 		default:
 			// For battery 1, only poll every 10 minutes
-			if r.index == 1 && r.data.Present {
+			if r.index == 1 {
 				if time.Since(lastBattery1Poll) < timeBattery1Poll {
 					time.Sleep(time.Second) // Sleep for a second before checking again
 					continue
