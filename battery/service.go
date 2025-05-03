@@ -338,6 +338,12 @@ func (r *BatteryReader) handleTagPresent() {
 		r.logCallback(hal.LogLevelDebug, "Sending inserted command for new battery")
 		r.sendCommand(BatteryCommandInsertedInScooter)
 		r.justInserted = false
+		
+		// Force immediate activation attempt after insertion
+		r.Unlock() // Unlock before calling activateBattery to avoid deadlock
+		r.activateBattery()
+		r.Lock() // Re-acquire lock
+		return // Skip the regular updateBatteryState call this cycle
 	}
 
 	// Calculate temperature state
