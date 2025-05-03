@@ -562,31 +562,64 @@ func (r *BatteryReader) updateRedisStatus() error {
 		"serial-number":     string(bytes.TrimRight(r.data.SerialNumber[:], "\x00")),
 		"manufacturing-date": r.data.ManufacturingDate,
 		"fw-version":        r.data.FWVersion,
-		// Add detailed fault information
-		"faults:charge-temp-over-high": fmt.Sprintf("%v", r.data.Faults.ChargeTempOverHigh),
-		"faults:charge-temp-over-low": fmt.Sprintf("%v", r.data.Faults.ChargeTempOverLow),
-		"faults:discharge-temp-over-high": fmt.Sprintf("%v", r.data.Faults.DischargeTempOverHigh),
-		"faults:discharge-temp-over-low": fmt.Sprintf("%v", r.data.Faults.DischargeTempOverLow),
-		"faults:signal-wire-broken": fmt.Sprintf("%v", r.data.Faults.SignalWireBroken),
-		"faults:second-level-over-temp": fmt.Sprintf("%v", r.data.Faults.SecondLevelOverTemp),
-		"faults:pack-voltage-high": fmt.Sprintf("%v", r.data.Faults.PackVoltageHigh),
-		"faults:mos-temp-over-high": fmt.Sprintf("%v", r.data.Faults.MOSTempOverHigh),
-		"faults:cell-voltage-high": fmt.Sprintf("%v", r.data.Faults.CellVoltageHigh),
-		"faults:pack-voltage-low": fmt.Sprintf("%v", r.data.Faults.PackVoltageLow),
-		"faults:cell-voltage-low": fmt.Sprintf("%v", r.data.Faults.CellVoltageLow),
-		"faults:charge-over-current": fmt.Sprintf("%v", r.data.Faults.ChargeOverCurrent),
-		"faults:discharge-over-current": fmt.Sprintf("%v", r.data.Faults.DischargeOverCurrent),
-		"faults:short-circuit": fmt.Sprintf("%v", r.data.Faults.ShortCircuit),
-		"faults:not-following-command": fmt.Sprintf("%v", r.data.Faults.NotFollowingCommand),
-		"faults:zero-data": fmt.Sprintf("%v", r.data.Faults.ZeroData),
-		"faults:communication-error": fmt.Sprintf("%v", r.data.Faults.CommunicationError),
-		"faults:reader-error": fmt.Sprintf("%v", r.data.Faults.ReaderError),
 	}
 
-	// Set all fields in the hash
+	// Set all non-fault fields in the hash
 	key := fmt.Sprintf("battery:%d", r.index)
 	if err := r.service.redis.HMSet(r.service.ctx, key, status).Err(); err != nil {
 		return fmt.Errorf("failed to update Redis status: %v", err)
+	}
+
+	// Handle fault fields - only write true values, clear false values
+	// Define all possible fault fields
+	faultFields := []struct {
+		field string
+		value bool
+	}{
+		{"faults:charge-temp-over-high", r.data.Faults.ChargeTempOverHigh},
+		{"faults:charge-temp-over-low", r.data.Faults.ChargeTempOverLow},
+		{"faults:discharge-temp-over-high", r.data.Faults.DischargeTempOverHigh},
+		{"faults:discharge-temp-over-low", r.data.Faults.DischargeTempOverLow},
+		{"faults:signal-wire-broken", r.data.Faults.SignalWireBroken},
+		{"faults:second-level-over-temp", r.data.Faults.SecondLevelOverTemp},
+		{"faults:pack-voltage-high", r.data.Faults.PackVoltageHigh},
+		{"faults:mos-temp-over-high", r.data.Faults.MOSTempOverHigh},
+		{"faults:cell-voltage-high", r.data.Faults.CellVoltageHigh},
+		{"faults:pack-voltage-low", r.data.Faults.PackVoltageLow},
+		{"faults:cell-voltage-low", r.data.Faults.CellVoltageLow},
+		{"faults:charge-over-current", r.data.Faults.ChargeOverCurrent},
+		{"faults:discharge-over-current", r.data.Faults.DischargeOverCurrent},
+		{"faults:short-circuit", r.data.Faults.ShortCircuit},
+		{"faults:not-following-command", r.data.Faults.NotFollowingCommand},
+		{"faults:zero-data", r.data.Faults.ZeroData},
+		{"faults:communication-error", r.data.Faults.CommunicationError},
+		{"faults:reader-error", r.data.Faults.ReaderError},
+	}
+
+	// Process each fault field
+	for _, fault := range faultFields {
+		if fault.value {
+			// If fault is true, set it in Redis
+			if err := r.service.redis.HSet(r.service.ctx, key, fault.field, "true").Err(); err != nil {
+				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to set fault %s: %v", fault.field, err))
+			}
+		} else {
+			// If fault is false, check if it exists in Redis and delete it if it does
+			exists, err := r.service.redis.HExists(r.service.ctx, key, fault.field).Result()
+			if err != nil {
+				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to check if fault %s exists: %v", fault.field, err))
+				continue
+			}
+			
+			if exists {
+				// Delete the fault field if it exists but is now false
+				if err := r.service.redis.HDel(r.service.ctx, key, fault.field).Err(); err != nil {
+					r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to clear fault %s: %v", fault.field, err))
+				} else {
+					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Cleared fault %s", fault.field))
+				}
+			}
+		}
 	}
 
 	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Updated Redis status for battery:%d", r.index))
