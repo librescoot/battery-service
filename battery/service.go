@@ -31,15 +31,15 @@ const (
 
 	// Timing constants
 	timeHeartbeatOn     = 5 * time.Second
-	timeCmd             = 100 * time.Millisecond
-	timeCmdSlow         = 300 * time.Millisecond
-	timeCmdFirstOpened  = 200 * time.Millisecond
-	timeCmdFirstAsleep  = 200 * time.Millisecond
+	timeCmd             = 200 * time.Millisecond
+	timeCmdSlow         = 800 * time.Millisecond
+	timeCmdFirstOpened  = 500 * time.Millisecond
+	timeCmdFirstAsleep  = 500 * time.Millisecond
 	timePresence        = 10 * time.Second
 	timeCheckReader     = 10 * time.Second
 	timeDeparture      = 500 * time.Millisecond
 	timeBattery1Poll    = 10 * time.Minute  // Special polling interval for battery 1
-	timeStateVerify     = 500 * time.Millisecond // Time to wait before verifying state change
+	timeStateVerify     = 1000 * time.Millisecond // Time to wait before verifying state change
 	timeActivationRetry = 2 * time.Second   // Time between activation retry attempts
 
 	// Constants for temperature limits
