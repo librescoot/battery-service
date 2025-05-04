@@ -30,18 +30,20 @@ const (
 	addrSession = 0x03B0
 
 	// Timing constants
-	timeHeartbeatOn     = 3 * time.Second
+	timeHeartbeatIntervalScooter = 1 * time.Second     // Interval for ScooterHeartbeat when present (Changed from 400ms)
+	timeHeartbeatTimeoutScooter  = 800 * time.Millisecond // Timeout for battery's internal safety check
+	timeReadyToScootTimeout    = 350 * time.Millisecond // Max time to wait for BatteryReadyToScoot response
+	timePeriodicOnInterval     = 3 * time.Second     // Interval to send BatteryOn when seatbox closed
 	timeCmd             = 200 * time.Millisecond
 	timeCmdSlow         = 800 * time.Millisecond
-	timeCmdFirstOpened  = 500 * time.Millisecond
-	timeCmdFirstAsleep  = 500 * time.Millisecond
+	timeCmdFirstOpened  = 500 * time.Millisecond // Used after SeatboxClosed/Opened?
 	timePresence        = 10 * time.Second
 	timeCheckReader     = 10 * time.Second
 	timeDeparture      = 500 * time.Millisecond
 	timeBattery1Poll    = 10 * time.Minute  // Special polling interval for battery 1
 	timeStateVerify     = 1000 * time.Millisecond // Time to wait before verifying state change
 	timeActivationRetry = 2 * time.Second   // Time between activation retry attempts
-	timeHALTimeout      = 5 * time.Second // Timeout for individual HAL operations
+	timeHALTimeout      = 7 * time.Second // Timeout for individual HAL operations (Increased from 5s)
 	timeActiveStatusPoll = 10 * time.Second // Interval to poll status when battery is active
 
 	// Constants for temperature limits
@@ -49,8 +51,8 @@ const (
 	temperatureStateHotLimit  = 60  // Celsius
 
 	// Retry constants
-	maxReadRetries     = 2
-	maxWriteRetries    = 2
+	maxReadRetries     = 3 // Increased from 2
+	maxWriteRetries    = 3 // Increased from 2
 	maxActivationRetries = 3 // Maximum number of times to retry activation sequence
 )
 
@@ -66,6 +68,7 @@ type BatteryReader struct {
 	lastCmd   time.Time
 	justInserted bool
 	justOpened   bool
+	readyToScoot bool          // Flag indicating battery responded with ReadyToScoot
 	stopChan     chan struct{} // Channel to signal goroutine shutdown
 	nfcMutex     sync.Mutex    // Serializes access to NFC HAL operations
 }
@@ -80,6 +83,7 @@ type Service struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	debug    bool // Add debug flag here
+	seatboxOpen bool // Track current seatbox state
 }
 
 // NewService creates a new battery service
@@ -292,9 +296,10 @@ func (r *BatteryReader) calculateTemperatureState() BatteryTemperatureState {
 // startHeartbeat starts the heartbeat goroutine
 func (r *BatteryReader) startHeartbeat() {
 	go func() {
-		ticker := time.NewTicker(timeHeartbeatOn)
+		ticker := time.NewTicker(timeHeartbeatIntervalScooter)
 		defer ticker.Stop()
 		var lastStatusPoll time.Time // Track time of last status poll when active
+		var lastBattery0Poll time.Time // Track time of last general poll for battery 0
 
 		for {
 			select {
@@ -305,39 +310,86 @@ func (r *BatteryReader) startHeartbeat() {
 				// Read state variables while holding the lock
 				present := r.data.Present
 				state := r.data.State
-				enabled := r.enabled
-				lowSOC := r.data.LowSOC
+				seatboxOpen := r.service.seatboxOpen // Keep reading it for logging/potential future use
+				// This check is specifically for ACTIVE batteries
 				shouldPollStatus := present && state == BatteryStateActive && time.Since(lastStatusPoll) >= timeActiveStatusPoll
+				r.Unlock() // Release lock before potentially blocking IO
 
+				if present {
+					if seatboxOpen {
+						// --- Seatbox OPEN Logic --- 
+						// Send ScooterHeartbeat periodically
+						r.logCallback(hal.LogLevelDebug, "Sending ScooterHeartbeat (Seatbox Open: true)")
+						if err := r.sendCommand(r.service.ctx, BatteryCommandScooterHeartbeat); err != nil {
+							r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to send SCOOTER_HEARTBEAT: %v", err))
+						}
+					} else {
+						// --- Seatbox CLOSED Logic (Implements diagram's heartbeat substate) --- 
+						r.logCallback(hal.LogLevelDebug, "Heartbeat tick: Running closed seatbox maintenance cycle")
+						
+						// 1. Send SEATBOX_CLOSED
+						if err := r.sendCommand(r.service.ctx, BatteryCommandUserClosedSeatbox); err != nil {
+							r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to send SEATBOX_CLOSED in maint: %v", err))
+							// Optional: goto nextIteration if this fails?
+						}
+						
+						time.Sleep(timeCmd) // tm_closed equivalent
+						
+						// 2. Determine and Send ON/OFF Command
+						_, expectedState, err := r.determineAndSendCommandOnOff()
+						if err != nil {
+							r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to send ON/OFF command in maint: %v", err))
+							// Optional: goto nextIteration if this fails?
+						}
+						
+						time.Sleep(timeCmd) // tm_on_off equivalent
+						
+						// 3. Read status and check state correctness
+						if !r.checkStateCorrectAfterRead(expectedState) {
+							// State is incorrect, attempt recovery
+							r.logCallback(hal.LogLevelWarning, "State incorrect after ON/OFF, attempting recovery...")
+							// 4. Send INSERTED_IN_SCOOTER (Recovery attempt)
+							if err := r.sendCommand(r.service.ctx, BatteryCommandInsertedInScooter); err != nil {
+								r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to send INSERTED_IN_SCOOTER for recovery: %v", err))
+							}
+							
+							time.Sleep(timeCmd) // tm_inserted_closed equivalent
+							
+							// The loop will restart on the next tick, implicitly going back to send_closed
+						} else {
+							// State is correct, wait for next tick (wait_update equivalent)
+							r.logCallback(hal.LogLevelDebug, "State correct, waiting for next maint cycle.")
+						}
+					}
+				}
+
+				// Separately, handle periodic status polling IF ACTIVE (for any battery)
 				if shouldPollStatus {
 					r.logCallback(hal.LogLevelDebug, "Polling active battery status due to interval")
-					lastStatusPoll = time.Now() // Update time *before* unlocking
-					r.Unlock() // Release lock before IO
-
-					// Send heartbeat first (primary ticker purpose)
-					_ = r.sendCommand(r.service.ctx, BatteryCommandHeartbeatScooter)
-
-					// Then poll status
+					lastStatusPoll = time.Now()
 					if err := r.readBatteryStatus(); err != nil {
 						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Error during periodic status poll: %v", err))
 					}
-				} else if present && state == BatteryStateActive {
-					// Active and present, but not time to poll status - just send heartbeat
-					r.logCallback(hal.LogLevelDebug, "Sending heartbeat command")
-					r.Unlock() // Release lock before IO
-					_ = r.sendCommand(r.service.ctx, BatteryCommandHeartbeatScooter)
-				} else if present && enabled && !lowSOC {
-					// Present, enabled, not low SOC, but not active - try to activate
-					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery not active during heartbeat (state=%s), attempting activation", state))
-					r.Unlock() // Release lock before calling activateBattery
-					r.activateBattery() // Manages its own locking
-				} else if present {
-					// Present, but not active and not activating (e.g., disabled or low SOC)
-					r.logCallback(hal.LogLevelDebug, "Battery present, continuing heartbeat loop")
-					r.Unlock() // Release lock, nothing else to do
-				} else {
-					// Not present
-					r.Unlock() // Release lock
+				}
+
+				// Additionally, poll battery 0 every 10 seconds regardless of state, if present
+				r.Lock() // Re-acquire lock briefly to check index and presence
+				presentForB0Poll := r.data.Present
+				indexIs0 := r.index == 0
+				r.Unlock()
+
+				if indexIs0 && presentForB0Poll && time.Since(lastBattery0Poll) >= timeActiveStatusPoll {
+					// Avoid polling if we *just* polled because it was active
+					if !shouldPollStatus || time.Since(lastStatusPoll) > 1*time.Second { // Add small buffer
+						r.logCallback(hal.LogLevelDebug, "Polling battery 0 status due to 10s interval")
+						lastBattery0Poll = time.Now()
+						if err := r.readBatteryStatus(); err != nil {
+							r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Error during battery 0 periodic poll: %v", err))
+						}
+					} else {
+						// Active poll just ran, update general poll time to avoid immediate re-poll
+						lastBattery0Poll = lastStatusPoll
+					}
 				}
 			}
 		}
@@ -346,68 +398,116 @@ func (r *BatteryReader) startHeartbeat() {
 
 // handleTagPresent handles a present tag
 func (r *BatteryReader) handleTagPresent() {
+	const maxInsertionRetries = 3
 	r.Lock()
 
 	if !r.data.Present {
-		r.data.Present = true // Mark as present immediately upon detection
+		r.data.Present = true // Mark as present immediately
 		r.justInserted = true
-		// We'll log the battery info after reading status
-	}
+		r.readyToScoot = false // Reset flag on new insertion
+		// Unlock before potentially blocking IO/polling
+		r.Unlock()
 
-	// Read status ONLY if just inserted to get initial data
-	if r.justInserted {
-		// Need to release lock before potentially blocking IO or calling activateBattery
-		r.Unlock() // <-- Unlock before potential blocking calls
+		r.logCallback(hal.LogLevelInfo, "Battery inserted, attempting initialization sequence...")
 
-		if err := r.readBatteryStatus(); err != nil {
-			r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to read battery status: %v", err))
-			// Re-acquire lock briefly to update fault count
+		// --- Insertion Sequence --- (Retry loop)
+		var insertionSuccess bool
+		for attempt := 0; attempt < maxInsertionRetries; attempt++ {
+			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Insertion attempt %d/%d", attempt+1, maxInsertionRetries))
+
+			// 1. Send BatteryInsertedInScooter command
+			if err := r.sendCommand(r.service.ctx, BatteryCommandInsertedInScooter); err != nil {
+				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to send INSERTED command: %v. Retrying...", err))
+				time.Sleep(timeCmdSlow) // Wait before retrying command
+				continue
+			}
+
+			// Add delay before polling for response
+			time.Sleep(timeCmd)
+
+			// 2. Wait for BatteryReadyToScoot response
+			ready, err := r.readCommandRegisterWithTimeout(r.service.ctx, timeReadyToScootTimeout, BatteryCommandReadyToScoot)
+			if err != nil {
+				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Error waiting for READY_TO_SCOOT: %v. Retrying sequence...", err))
+				// No need to sleep here, sendCommand already enforces delay, and timeout adds delay
+				continue
+			}
+
+			if ready {
+				r.logCallback(hal.LogLevelInfo, "Battery reported READY_TO_SCOOT.")
+				insertionSuccess = true
+				break // Success!
+			} else {
+				// This case should theoretically be covered by the timeout error in readCommandRegisterWithTimeout
+				r.logCallback(hal.LogLevelWarning, "Did not receive READY_TO_SCOOT within timeout. Retrying sequence...")
+				// Continue to next attempt
+			}
+		}
+
+		// --- Post-Insertion --- 
+		if !insertionSuccess {
+			r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed insertion sequence after %d attempts.", maxInsertionRetries))
+			// Re-acquire lock briefly to update fault/state
 			r.Lock()
-			r.data.EmptyOr0Data++
+			r.data.Present = false // Mark as not present if sequence failed
+			r.data.Faults.CommunicationError = true
+			_ = r.updateRedisStatus() // Update redis about the failure
 			r.Unlock()
-			// No need to re-lock before return
 			return
 		}
 
-		r.Lock() // Re-acquire lock for logging and sending command
-		r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery inserted: serial_number=%s, fw_version=%s, charge=%d, state=%s",
-			string(r.data.SerialNumber[:]), r.data.FWVersion, r.data.Charge, r.data.State))
-
-		// Send INSERTED command only once when battery is first detected
-		r.logCallback(hal.LogLevelDebug, "Sending inserted command for new battery")
-		// Store command error but continue to activation attempt
-		cmdErr := r.sendCommand(r.service.ctx, BatteryCommandInsertedInScooter)
-		r.justInserted = false
-		r.Unlock() // <-- Unlock before calling activateBattery
-
-		if cmdErr != nil {
-			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to send INSERTED command: %v", cmdErr))
-			// Still attempt activation even if INSERTED failed
+		// Insertion successful, now read initial status
+		if err := r.readBatteryStatus(); err != nil {
+			r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to read battery status after insertion: %v", err))
+			// Re-acquire lock briefly to update fault
+			r.Lock()
+			r.data.EmptyOr0Data++ // Or maybe CommunicationError?
+			_ = r.updateRedisStatus()
+			r.Unlock()
+			// Proceed even if status read fails initially? Spec implies battery is Idle.
 		}
 
-		// Force immediate activation attempt after insertion
-		r.activateBattery() // Called without holding the lock
-		// No need to re-lock before return
-		return // Skip the regular updateBatteryState call this cycle
+		// Re-acquire lock to update state and log
+		r.Lock()
+		r.justInserted = false
+		r.readyToScoot = true
+		r.data.State = BatteryStateIdle // Per spec step 6
+		r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery initialized: serial_number=%s, fw_version=%s, charge=%d, state=%s",
+			string(r.data.SerialNumber[:]), r.data.FWVersion, r.data.Charge, r.data.State))
+		// Update Redis with initial state (Idle)
+		if err := r.updateRedisStatus(); err != nil {
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after insertion: %v", err))
+		}
+		
+		// Get current seatbox state AFTER updating reader state
+		seatboxIsOpen := r.service.seatboxOpen
+		shouldActivateNow := r.index == 0 && !seatboxIsOpen && r.readyToScoot
+		
+		r.Unlock() // Unlock before potentially calling activateBattery
+
+		// If seatbox is already closed and this is battery 0, activate now
+		if shouldActivateNow {
+			r.logCallback(hal.LogLevelInfo, "Battery 0 ready and seatbox closed. Activating immediately.")
+			r.activateBattery()
+		}
+
+		return // Initial insertion handling complete for this cycle
 	}
 
-	// --- Handle case where tag was already present ---
+	// --- Handle case where tag was already present --- 
 
 	// Calculate temperature state (safe to do under lock)
 	oldTempState := r.data.TemperatureState
 	r.data.TemperatureState = r.calculateTemperatureState()
 	if oldTempState != r.data.TemperatureState {
 		r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery temperature-state: %s", r.data.TemperatureState))
+		// Update redis if temp state changed?
+		if err := r.updateRedisStatus(); err != nil {
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis for temp state: %v", err))
+		}
 	}
 
-	// Unlock *before* calling updateBatteryState to prevent deadlock
-	r.Unlock() // <-- Unlock before calling updateBatteryState
-
-	// The activateBattery function (called by updateBatteryState)
-	// will handle state transitions and necessary status reads.
-	r.updateBatteryState() // Called without holding the lock
-
-	// No need to re-lock after this, as the function ends here.
+	r.Unlock() // Unlock as we are done with reader data for now
 }
 
 // handleTagAbsent handles an absent tag
@@ -424,6 +524,51 @@ func (r *BatteryReader) handleTagAbsent() {
 		// Update Redis to reflect the battery is no longer present
 		if err := r.updateRedisStatus(); err != nil {
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after battery removal: %v", err))
+		}
+	}
+}
+
+// readCommandRegisterWithTimeout attempts to read the command register within a timeout,
+// specifically looking for a target command response written by the battery.
+func (r *BatteryReader) readCommandRegisterWithTimeout(ctx context.Context, timeout time.Duration, targetCmd BatteryCommand) (bool, error) {
+	readCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(50 * time.Millisecond) // Poll frequency
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-readCtx.Done():
+			return false, fmt.Errorf("timeout waiting for command 0x%X: %w", targetCmd, readCtx.Err())
+		case <-ticker.C:
+			// Use readRegisterWithRetry but specifically for addrCommand
+			// We need the raw data, not just verification success
+			// Let's simplify for now: try a direct read within the overall timeout
+			// halCtx, halCancel := context.WithTimeout(readCtx, timeHALTimeout) // Unused, ReadBinary doesn't take context
+			r.nfcMutex.Lock()
+			data, err := r.hal.ReadBinary(addrCommand) // ReadBinary uses its own internal timeouts/handling
+			r.nfcMutex.Unlock()
+			// halCancel() // Removed corresponding cancel
+
+			if err != nil {
+				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Error reading command register: %v", err))
+				// Don't return error immediately, let the timeout handle persistent failures
+				continue
+			}
+
+			// Check if response matches target command (expecting 4 bytes)
+			if len(data) >= 4 {
+				readCmd := BatteryCommand(uint32(data[3])<<24 | uint32(data[2])<<16 | uint32(data[1])<<8 | uint32(data[0]))
+				if readCmd == targetCmd {
+					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Received expected command response: 0x%X", targetCmd))
+					return true, nil
+				} else {
+					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Read command register: 0x%X (expected 0x%X)", readCmd, targetCmd))
+				}
+			} else {
+				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Read command register (short): %X", data))
+			}
 		}
 	}
 }
@@ -447,21 +592,19 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 		default:
 		}
 
-		// Create a context with timeout for this specific HAL call attempt
-		halCtx, cancel := context.WithTimeout(ctx, timeHALTimeout)
-
 		// First read attempt
 		r.nfcMutex.Lock()
 		data, lastErr = r.hal.ReadBinary(addr)
 		r.nfcMutex.Unlock()
-		cancel()
 
 		if lastErr != nil {
 			// Check if context timed out externally (if HAL call didn't respect it internally)
 			select {
-			case <-halCtx.Done():
-				if halCtx.Err() == context.DeadlineExceeded {
-					lastErr = fmt.Errorf("hal.ReadBinary timeout on retry %d: %w", retry+1, halCtx.Err())
+			case <-ctx.Done():
+				if ctx.Err() == context.DeadlineExceeded {
+					lastErr = fmt.Errorf("context deadline exceeded during read on retry %d: %w", retry+1, ctx.Err())
+				} else {
+					lastErr = fmt.Errorf("context error during read on retry %d: %w", retry+1, ctx.Err())
 				}
 			default:
 			}
@@ -473,7 +616,7 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 				time.Sleep(timeCmdFirstOpened)
 				if r.hal.GetState() == hal.StateDiscovering {
 					// Wait for potential rediscovery
-					time.Sleep(timeCmdFirstAsleep)
+					time.Sleep(timeCmdSlow) // Replaced timeCmdFirstAsleep
 				}
 				continue
 			}
@@ -952,151 +1095,151 @@ func (r *BatteryReader) readBatteryStatus() error {
 	return nil
 }
 
-// activateBattery implements a persistent retry mechanism to activate the battery
+// activateBattery now simply sends the ON command. It's called when appropriate
+// (e.g., for battery 0 when seatbox closes and battery is ready).
 func (r *BatteryReader) activateBattery() {
-	// For battery 1, never enable it - only poll status
+	// For battery 1, never send ON command
 	if r.index == 1 {
+		r.logCallback(hal.LogLevelDebug, "activateBattery called for battery 1 - skipping ON command.")
 		return
 	}
 
 	r.Lock()
-	defer r.Unlock()
+	state := r.data.State
+	ready := r.readyToScoot
+	lowSOC := r.data.LowSOC
+	enabled := r.enabled // Keep enabled check? Spec doesn't mention it explicitly here.
+	r.Unlock()
 
-	if !r.enabled {
-		if r.data.State != BatteryStateAsleep && r.data.State != BatteryStateIdle {
-			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sending OFF command (disabled): current_state=%s", r.data.State))
-			r.sendCommand(r.service.ctx, BatteryCommandOff)
+	if !enabled {
+		r.logCallback(hal.LogLevelDebug, "activateBattery: reader disabled, skipping ON command.")
+		// Should we send OFF here if it's not Idle/Asleep? Let's keep it simple for now.
+		return
+	}
+
+	if lowSOC {
+		r.logCallback(hal.LogLevelDebug, "activateBattery: Low SOC, skipping ON command.")
+		// Send OFF if not Idle/Asleep?
+		if state != BatteryStateAsleep && state != BatteryStateIdle {
+			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sending OFF command (low SOC activation blocked): current_state=%s", state))
+			_ = r.sendCommand(r.service.ctx, BatteryCommandOff)
 		}
 		return
 	}
 
-	if r.data.LowSOC {
-		if r.data.State != BatteryStateAsleep && r.data.State != BatteryStateIdle {
-			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sending OFF command (low SOC): current_state=%s", r.data.State))
-			r.sendCommand(r.service.ctx, BatteryCommandOff)
-		}
+	if !ready {
+		r.logCallback(hal.LogLevelDebug, "activateBattery: Not ReadyToScoot, skipping ON command.")
 		return
 	}
 
 	// If already active, nothing to do
-	if r.data.State == BatteryStateActive {
+	if state == BatteryStateActive {
+		r.logCallback(hal.LogLevelDebug, "activateBattery: Already active.")
 		return
 	}
 
-	// Persistent retry loop for activation
-	for attempt := 0; attempt < maxActivationRetries; attempt++ {
-		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Activation attempt %d of %d", attempt+1, maxActivationRetries))
-		
-		// First send seatbox closed command if we're transitioning from idle/asleep to active
-		if r.data.State == BatteryStateIdle || r.data.State == BatteryStateAsleep {
-			// Wait for any previous command to settle
-			time.Sleep(timeCmdSlow)
-			
-			// Verify state before sending seatbox closed
-			if r.hal.GetState() != hal.StatePresent {
-				r.logCallback(hal.LogLevelWarning, "Invalid state before SEATBOX_CLOSED command")
-				if attempt < maxActivationRetries-1 {
-					time.Sleep(timeActivationRetry)
-					continue
-				}
-				return
-			}
+	r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Sending ON command (current state: %s)", state))
+	if err := r.sendCommand(r.service.ctx, BatteryCommandOn); err != nil {
+		r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to send ON command: %v", err))
+		// TODO: Should we retry or set a fault here? Let's log for now.
+		return
+	}
 
-			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sending SEATBOX_CLOSED command before ON: current_state=%s", r.data.State))
-			r.sendCommand(r.service.ctx, BatteryCommandSeatboxClosed)
-			
-			// Wait longer for the seatbox closed command to be processed
-			time.Sleep(timeCmdFirstOpened)
-			
-			// If we lost connection, wait for potential rediscovery
-			if r.hal.GetState() == hal.StateDiscovering {
-				r.logCallback(hal.LogLevelDebug, "Waiting for rediscovery after SEATBOX_CLOSED")
-				time.Sleep(timeCmdFirstAsleep)
-				
-				// Verify state after waiting
-				if r.hal.GetState() != hal.StatePresent {
-					r.logCallback(hal.LogLevelWarning, "Failed to recover connection after SEATBOX_CLOSED")
-					if attempt < maxActivationRetries-1 {
-						time.Sleep(timeActivationRetry)
-						continue
-					}
-					return
-				}
-			}
-
-			// Re-read battery status to verify state
-			if err := r.readBatteryStatus(); err != nil {
-				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to verify state after SEATBOX_CLOSED: %v", err))
-				if attempt < maxActivationRetries-1 {
-					time.Sleep(timeActivationRetry)
-					continue
-				}
-				return
-			}
-
-			// Only proceed with ON command if we're still in a valid state
-			if r.data.State != BatteryStateIdle && r.data.State != BatteryStateAsleep {
-				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Invalid state after SEATBOX_CLOSED: %s", r.data.State))
-				if attempt < maxActivationRetries-1 {
-					time.Sleep(timeActivationRetry)
-					continue
-				}
-				return
-			}
-		}
-		
-		// Send ON command
-		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sending ON command: current_state=%s", r.data.State))
-		r.sendCommand(r.service.ctx, BatteryCommandOn)
-		
-		// Wait for state change to take effect
-		time.Sleep(timeStateVerify)
-		
-		// Re-read battery status to verify state change
-		if err := r.readBatteryStatus(); err != nil {
-			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to verify state after ON command: %v", err))
-			if attempt < maxActivationRetries-1 {
-				time.Sleep(timeActivationRetry)
-				continue
-			}
-			return
-		}
-		
-		// Check if state changed to ACTIVE
-		if r.data.State == BatteryStateActive {
-			r.logCallback(hal.LogLevelInfo, "Battery successfully activated")
-			// Set NotFollowingCommand fault to false since command was successful
-			r.data.Faults.NotFollowingCommand = false
-			if err := r.updateRedisStatus(); err != nil {
-				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after activation: %v", err))
-			}
-			return
-		}
-		
-		// State didn't change to ACTIVE, set fault and retry
-		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Battery not following command: state=%s after ON command", r.data.State))
-		r.data.Faults.NotFollowingCommand = true
-		if err := r.updateRedisStatus(); err != nil {
-			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after fault: %v", err))
-		}
-		
-		if attempt < maxActivationRetries-1 {
-			time.Sleep(timeActivationRetry)
+	// Wait briefly and re-read status to verify activation (optional but good practice)
+	time.Sleep(timeStateVerify)
+	if err := r.readBatteryStatus(); err != nil {
+		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to verify state after ON command: %v", err))
+	} else {
+		r.Lock()
+		newState := r.data.State
+		r.Unlock()
+		if newState == BatteryStateActive {
+			r.logCallback(hal.LogLevelInfo, "Battery successfully activated (state verified).")
+		} else {
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Battery state is %s after ON command (expected Active).", newState))
+			// Set fault?
+			r.Lock()
+			r.data.Faults.NotFollowingCommand = true
+			_ = r.updateRedisStatus()
+			r.Unlock()
 		}
 	}
-	
-	r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to activate battery after %d attempts", maxActivationRetries))
 }
 
-// updateBatteryState updates the battery state based on current conditions
-func (r *BatteryReader) updateBatteryState() {
-	// For battery 1, never enable it - only poll status
-	if r.index == 1 {
-		return
+// Helper function for determining ON/OFF command based on current state and conditions
+func (r *BatteryReader) determineAndSendCommandOnOff() (BatteryCommand, BatteryState, error) {
+	r.Lock()
+	currentState := r.data.State
+	ready := r.readyToScoot
+	lowSOC := r.data.LowSOC
+	enabled := r.enabled
+	index := r.index
+	r.Unlock()
+
+	// Default expectations
+	sentCmd := BatteryCommandNone
+	expectedState := currentState // Expect state to remain unchanged if no command sent
+	err := fmt.Errorf("no command needed")
+
+	// --- Determine desired state and command --- 
+
+	// Conditions where OFF is desired
+	if !enabled || lowSOC {
+		if currentState != BatteryStateAsleep && currentState != BatteryStateIdle {
+			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Condition for OFF met (enabled=%v, lowSOC=%v), current state=%s. Sending OFF.", enabled, lowSOC, currentState))
+			sentCmd = BatteryCommandOff
+			expectedState = BatteryStateIdle // Or Asleep? Idle seems more likely after OFF cmd
+			err = r.sendCommand(r.service.ctx, sentCmd)
+		} else {
+			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Condition for OFF met but already Asleep/Idle (enabled=%v, lowSOC=%v). Expecting %s.", enabled, lowSOC, currentState))
+			expectedState = currentState // Already in a low power state
+		}
+		return sentCmd, expectedState, err
 	}
 
-	// Call the new activateBattery method which implements the persistent retry mechanism
-	r.activateBattery()
+	// Conditions where ON is desired (only for battery 0)
+	if index == 0 && ready {
+		if currentState != BatteryStateActive {
+			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Condition for ON met (index=%d, ready=%v), current state=%s. Sending ON.", index, ready, currentState))
+			sentCmd = BatteryCommandOn
+			expectedState = BatteryStateActive
+			err = r.sendCommand(r.service.ctx, sentCmd)
+		} else {
+			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Condition for ON met but already Active (index=%d, ready=%v). Expecting Active.", index, ready))
+			expectedState = BatteryStateActive // Already active
+		}
+		return sentCmd, expectedState, err
+	}
+
+	// Default case: No command needed (e.g., battery 1 is present and ready, or battery 0 not ready)
+	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("No ON/OFF command needed (index=%d, ready=%v, state=%s). Expecting %s.", index, ready, currentState, expectedState))
+	return sentCmd, expectedState, err
+}
+
+// Helper function to read status and check if current state matches expected state
+func (r *BatteryReader) checkStateCorrectAfterRead(expectedState BatteryState) bool {
+	if err := r.readBatteryStatus(); err != nil {
+		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to read status for state check: %v", err))
+		return false // Cannot verify state if read fails
+	}
+	r.Lock()
+	currentState := r.data.State
+	r.Unlock()
+
+	match := currentState == expectedState
+
+	// Handle case where OFF command leads to Asleep instead of Idle
+	if !match && (expectedState == BatteryStateIdle) && (currentState == BatteryStateAsleep) {
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("State check: expected %s, got %s (Accepting Asleep as valid outcome for Idle expectation)", expectedState, currentState))
+		match = true
+	}
+
+	if !match {
+		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("State mismatch after read: expected %s, got %s", expectedState, currentState))
+	} else {
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("State match after read: expected %s, got %s", expectedState, currentState))
+	}
+	return match
 }
 
 // sendCommand sends a command to the battery with retries
@@ -1285,7 +1428,7 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 				time.Sleep(timeCmdFirstOpened)
 				if r.hal.GetState() == hal.StateDiscovering {
 					// Wait for potential rediscovery
-					time.Sleep(timeCmdFirstAsleep)
+					time.Sleep(timeCmdSlow) // Replaced timeCmdFirstAsleep
 				}
 				continue
 			}
@@ -1327,6 +1470,14 @@ func (s *Service) handleRedisSubscription() {
 	s.logger.Printf("[Redis] Fetching initial seatbox state")
 	s.updateSeatboxState()
 
+	// Force the handler to run for the initial state by temporarily setting
+	// the previous state to the opposite, ensuring the change is detected.
+	s.Lock()
+	initialState := s.seatboxOpen
+	s.seatboxOpen = !initialState // Pretend the state was the opposite before the first real check
+	s.Unlock()
+	s.handleSeatboxStateChange(initialState) // Now run the handler with the actual initial state
+
 	// Listen for messages
 	ch := pubsub.Channel()
 	s.logger.Printf("[Redis] Starting message loop for seatbox state updates")
@@ -1337,9 +1488,11 @@ func (s *Service) handleRedisSubscription() {
 			return
 		case msg := <-ch:
 			s.logger.Printf("[Redis] Received notification on channel '%s', payload: %s", msg.Channel, msg.Payload)
-			if msg.Payload == "seatbox:lock" {
-				s.updateSeatboxState()
-			}
+			// Re-check seatbox state on any notification on the vehicle channel
+			// as other keys might imply a seatbox change.
+			// if msg.Payload == "seatbox:lock" {
+			s.updateSeatboxState()
+			// }
 		}
 	}
 }
@@ -1350,15 +1503,82 @@ func (s *Service) updateSeatboxState() {
 	state, err := s.redis.HGet(s.ctx, "vehicle", "seatbox:lock").Result()
 	if err != nil {
 		if err == redis.Nil {
-			s.logger.Printf("[Redis] No seatbox state found in Redis")
+			s.logger.Printf("[Redis] No seatbox state found in Redis, assuming closed.")
+			state = "closed" // Default to closed if not found
 		} else {
 			s.logger.Printf("[Redis] Error getting seatbox state from Redis: %v", err)
+			return
 		}
-		return
 	}
 
 	s.logger.Printf("[Redis] Current seatbox state: %s", state)
-	enabled := state == "closed"
-	s.logger.Printf("[Redis] Setting battery 0 enabled state to: %v", enabled)
-	s.SetEnabled(0, enabled)
+	isOpen := state != "closed"
+
+	// Call the central handler
+	s.handleSeatboxStateChange(isOpen)
+}
+
+// --- Seatbox State Change Handling ---
+
+func (s *Service) handleSeatboxStateChange(isOpen bool) {
+	s.Lock()
+	previousStateOpen := s.seatboxOpen
+	s.seatboxOpen = isOpen
+	// Collect readers to notify outside the service lock
+	readersToNotify := make([]*BatteryReader, 0, 2)
+	for _, r := range s.readers {
+		if r != nil {
+			readersToNotify = append(readersToNotify, r)
+		}
+	}
+	s.Unlock()
+
+	if isOpen == previousStateOpen {
+		s.logger.Printf("[Seatbox] State hasn't changed (%v), ignoring.", isOpen)
+		return // No change
+	}
+
+	s.logger.Printf("[Seatbox] State changed: open=%v", isOpen)
+
+	for _, r := range readersToNotify {
+		r.handleSeatboxState(isOpen)
+	}
+}
+
+// handleSeatboxState is called on the BatteryReader when the seatbox state changes
+func (r *BatteryReader) handleSeatboxState(isOpen bool) {
+	r.Lock()
+	present := r.data.Present
+	ready := r.readyToScoot
+	state := r.data.State
+	r.Unlock()
+
+	if !present {
+		return // Ignore if battery not present
+	}
+
+	if isOpen {
+		r.logCallback(hal.LogLevelInfo, "Seatbox opened")
+		// Send UserOpenedSeatbox command
+		if err := r.sendCommand(r.service.ctx, BatteryCommandUserOpenedSeatbox); err != nil {
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to send SEATBOX_OPENED: %v", err))
+		}
+		// Heartbeats will start automatically in the startHeartbeat loop based on service.seatboxOpen
+		// Battery's internal safety check should start upon receiving heartbeat (battery-side logic)
+	} else {
+		r.logCallback(hal.LogLevelInfo, "Seatbox closed")
+		// Send UserClosedSeatbox command
+		if err := r.sendCommand(r.service.ctx, BatteryCommandUserClosedSeatbox); err != nil {
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to send SEATBOX_CLOSED: %v", err))
+		}
+		// Heartbeats will stop automatically in the startHeartbeat loop
+		// Battery's internal safety check should stop (battery-side logic)
+
+		// For Battery 0 only: If ready and not already active, send ON command
+		if r.index == 0 && ready && state != BatteryStateActive {
+			r.logCallback(hal.LogLevelInfo, "Seatbox closed, battery 0 ready. Sending ON command.")
+			// Call activateBattery which now just sends ON
+			r.activateBattery()
+		}
+	}
 }

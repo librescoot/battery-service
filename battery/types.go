@@ -28,17 +28,26 @@ func (s BatteryState) String() string {
 type BatteryCommand uint32
 
 const (
-	BatteryCommandNone              BatteryCommand = 0
-	BatteryCommandOn                BatteryCommand = 0x50505050
-	BatteryCommandOff               BatteryCommand = 0xCAFEF00D
-	BatteryCommandInsertedInCharger BatteryCommand = 0x4D415856 // "MAXV"
-	BatteryCommandInsertedInScooter BatteryCommand = 0x44414E41 // "ANAD"
-	BatteryCommandHeartbeatCharger  BatteryCommand = 0x4755494C // "GUIL"
-	BatteryCommandHeartbeatScooter  BatteryCommand = 0x534E4A41 // "SNJA"
-	BatteryCommandSeatboxOpened     BatteryCommand = 0x48525259 // "HRRY"
-	BatteryCommandSeatboxClosed     BatteryCommand = 0x4D4B4D4B // "MKMK"
-	BatteryCommandReadyToCharge     BatteryCommand = 0x4D485249 // "MHRI"
-	BatteryCommandReadyToScoot      BatteryCommand = 0x4D484D54 // "MHMT"
+	// Commands to Battery Management Software
+	BatteryCommandOn                BatteryCommand = 0x50505050 // Turn on the high-current path, Enters BatteryActive mode.
+	BatteryCommandOff               BatteryCommand = 0xCAFEF00D // Turn off the high-current path, Enters BatteryIdle mode.
+	BatteryCommandSleepNow          BatteryCommand = 0x39845983 // Force Battery to enter BatteryAsleep mode immediately.
+	BatteryCommandInsertedInCharger BatteryCommand = 0x4D415856 // Charger tells Battery that it is now in the Charger. ("MAXV")
+	BatteryCommandInsertedInScooter BatteryCommand = 0x44414E41 // Scooter tells Battery that it is now in the Scooter. ("ANAD")
+	BatteryCommandChargerHeartbeat  BatteryCommand = 0x4755494C // This signal indicates that the Battery is in the Charger. ("GUIL")
+	BatteryCommandScooterHeartbeat  BatteryCommand = 0x534E4A41 // This signal indicates that the Battery is in the Scooter. ("SNJA")
+	BatteryCommandBatteryRemoved    BatteryCommand = 0x4753534F // Battery Management System tells LED Ring that Battery removed from Charger or from Scooter. ("GSSO")
+	BatteryCommandSocUpdate         BatteryCommand = 0xFE4C4958 // Battery Management System tells LED Ring the SOC percentage, set data[0] = SOC %. ("þLIX")
+	BatteryCommandUserOpenedSeatbox BatteryCommand = 0x48525259 // Scooter sends this command to BMS, which forwards command to LED Ring. ("HRRY")
+	BatteryCommandUserClosedSeatbox BatteryCommand = 0x4D4B4D4B // Scooter sends this command to BMS, which forwards command to LED Ring. ("MKMK")
+	BatteryCommandErrorDetected     BatteryCommand = 0x54484D53 // Battery Management System sends this command to LED Ring when an error is detected. ("THMS")
+	BatteryCommandLedPassthrough    BatteryCommand = 0x52AAABEB // Entire BatteryControlMessage is forwarded to LED Ring.
+
+	// Responses from Battery Management Software (written to command register)
+	BatteryCommandReadyToCharge BatteryCommand = 0x4D485249 // Battery writes this to indicate ready to charge. ("MHRI")
+	BatteryCommandReadyToScoot  BatteryCommand = 0x4D484D54 // Battery writes this to indicate ready to scoot. ("MHMT")
+
+	BatteryCommandNone           BatteryCommand = 0 // Keep for default/unknown
 )
 
 // BatteryTemperatureState represents the temperature state of the battery
