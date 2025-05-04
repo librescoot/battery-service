@@ -30,7 +30,7 @@ const (
 	addrSession = 0x03B0
 
 	// Timing constants
-	timeHeartbeatOn     = 5 * time.Second
+	timeHeartbeatOn     = 3 * time.Second
 	timeCmd             = 200 * time.Millisecond
 	timeCmdSlow         = 800 * time.Millisecond
 	timeCmdFirstOpened  = 500 * time.Millisecond
@@ -42,7 +42,7 @@ const (
 	timeStateVerify     = 1000 * time.Millisecond // Time to wait before verifying state change
 	timeActivationRetry = 2 * time.Second   // Time between activation retry attempts
 	timeHALTimeout      = 5 * time.Second // Timeout for individual HAL operations
-	timeActiveStatusPoll = 30 * time.Second // Interval to poll status when battery is active
+	timeActiveStatusPoll = 10 * time.Second // Interval to poll status when battery is active
 
 	// Constants for temperature limits
 	temperatureStateColdLimit = -10 // Celsius
