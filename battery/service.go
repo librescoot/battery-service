@@ -42,6 +42,7 @@ const (
 	timeStateVerify     = 1000 * time.Millisecond // Time to wait before verifying state change
 	timeActivationRetry = 2 * time.Second   // Time between activation retry attempts
 	timeHALTimeout      = 5 * time.Second // Timeout for individual HAL operations
+	timeActiveStatusPoll = 30 * time.Second // Interval to poll status when battery is active
 
 	// Constants for temperature limits
 	temperatureStateColdLimit = -10 // Celsius
@@ -66,6 +67,7 @@ type BatteryReader struct {
 	justInserted bool
 	justOpened   bool
 	stopChan     chan struct{} // Channel to signal goroutine shutdown
+	nfcMutex     sync.Mutex    // Serializes access to NFC HAL operations
 }
 
 // Service represents the battery service that manages multiple readers
@@ -234,7 +236,9 @@ func (r *BatteryReader) monitorTags() {
 			}
 
 			// Proceed with tag detection
+			r.nfcMutex.Lock()
 			tags, err := r.hal.DetectTags()
+			r.nfcMutex.Unlock()
 			if err != nil {
 				r.logCallback(hal.LogLevelError, fmt.Sprintf("Tag detection error: %v", err))
 				// Short sleep after error before retrying detection
@@ -288,6 +292,7 @@ func (r *BatteryReader) startHeartbeat() {
 	go func() {
 		ticker := time.NewTicker(timeHeartbeatOn)
 		defer ticker.Stop()
+		var lastStatusPoll time.Time // Track time of last status poll when active
 
 		for {
 			select {
@@ -295,21 +300,43 @@ func (r *BatteryReader) startHeartbeat() {
 				return
 			case <-ticker.C:
 				r.Lock()
-				if r.data.Present {
-					if r.data.State == BatteryStateActive {
-						r.logCallback(hal.LogLevelDebug, "Sending heartbeat command")
-						r.sendCommand(r.service.ctx, BatteryCommandHeartbeatScooter)
-					} else if r.enabled && !r.data.LowSOC {
-						// Actively try to correct battery state if not ACTIVE
-						r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery not active during heartbeat (state=%s), attempting activation", r.data.State))
-						r.Unlock() // Unlock before calling updateBatteryState to avoid deadlock
-						r.activateBattery()
-						r.Lock() // Re-acquire lock
-					} else {
-						r.logCallback(hal.LogLevelDebug, "Battery present, continuing heartbeat")
+				// Read state variables while holding the lock
+				present := r.data.Present
+				state := r.data.State
+				enabled := r.enabled
+				lowSOC := r.data.LowSOC
+				shouldPollStatus := present && state == BatteryStateActive && time.Since(lastStatusPoll) >= timeActiveStatusPoll
+
+				if shouldPollStatus {
+					r.logCallback(hal.LogLevelDebug, "Polling active battery status due to interval")
+					lastStatusPoll = time.Now() // Update time *before* unlocking
+					r.Unlock() // Release lock before IO
+
+					// Send heartbeat first (primary ticker purpose)
+					_ = r.sendCommand(r.service.ctx, BatteryCommandHeartbeatScooter)
+
+					// Then poll status
+					if err := r.readBatteryStatus(); err != nil {
+						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Error during periodic status poll: %v", err))
 					}
+				} else if present && state == BatteryStateActive {
+					// Active and present, but not time to poll status - just send heartbeat
+					r.logCallback(hal.LogLevelDebug, "Sending heartbeat command")
+					r.Unlock() // Release lock before IO
+					_ = r.sendCommand(r.service.ctx, BatteryCommandHeartbeatScooter)
+				} else if present && enabled && !lowSOC {
+					// Present, enabled, not low SOC, but not active - try to activate
+					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery not active during heartbeat (state=%s), attempting activation", state))
+					r.Unlock() // Release lock before calling activateBattery
+					r.activateBattery() // Manages its own locking
+				} else if present {
+					// Present, but not active and not activating (e.g., disabled or low SOC)
+					r.logCallback(hal.LogLevelDebug, "Battery present, continuing heartbeat loop")
+					r.Unlock() // Release lock, nothing else to do
+				} else {
+					// Not present
+					r.Unlock() // Release lock
 				}
-				r.Unlock()
 			}
 		}
 	}()
@@ -422,7 +449,9 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 		halCtx, cancel := context.WithTimeout(ctx, timeHALTimeout)
 
 		// First read attempt
+		r.nfcMutex.Lock()
 		data, lastErr = r.hal.ReadBinary(addr)
+		r.nfcMutex.Unlock()
 		cancel()
 
 		if lastErr != nil {
@@ -480,7 +509,9 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 
 		// Verification read
 		halCtxVerify, cancelVerify := context.WithTimeout(ctx, timeHALTimeout)
+		r.nfcMutex.Lock()
 		checkData, lastErr = r.hal.ReadBinary(addr)
+		r.nfcMutex.Unlock()
 		cancelVerify()
 
 		if lastErr != nil {
@@ -1115,7 +1146,9 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 
 		// Create context with timeout for HAL write call
 		halWriteCtx, cancelWrite := context.WithTimeout(ctx, timeHALTimeout)
+		r.nfcMutex.Lock()
 		lastErr = r.hal.WriteBinary(addrCommand, data) // Pass halWriteCtx if HAL supports it
+		r.nfcMutex.Unlock()
 		cancelWrite()
 
 		if lastErr == nil {
@@ -1137,7 +1170,9 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 
 			// Create context with timeout for HAL read call
 			halReadCtx, cancelRead := context.WithTimeout(ctx, timeHALTimeout)
+			r.nfcMutex.Lock()
 			readData, err := r.hal.ReadBinary(addrCommand) // Pass halReadCtx if HAL supports it
+			r.nfcMutex.Unlock()
 			cancelRead()
 
 			if err != nil {
@@ -1161,7 +1196,9 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 			if len(readData) >= 2 && readData[0] == 0x60 && readData[1] == 0x06 {
 				// Read the actual response after the CREDIT notification
 				halReadCreditCtx, cancelReadCredit := context.WithTimeout(ctx, timeHALTimeout)
+				r.nfcMutex.Lock()
 				readData, err = r.hal.ReadBinary(addrCommand) // Pass halReadCreditCtx if HAL supports it
+				r.nfcMutex.Unlock()
 				cancelReadCredit()
 
 				if err != nil {
