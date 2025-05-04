@@ -60,12 +60,12 @@ type PN7150 struct {
 	tagSelected   bool
 	numTags       int
 	tags          []Tag
-	verbose       bool
+	debug         bool
 	paramWriteTry uint
 	paramWriteTries uint
 }
 
-func NewPN7150(devName string, logCallback LogCallback, app interface{}, standbyEnabled, lpcdEnabled bool) (*PN7150, error) {
+func NewPN7150(devName string, logCallback LogCallback, app interface{}, standbyEnabled, lpcdEnabled bool, debugMode bool) (*PN7150, error) {
 	fd, err := unix.Open(devName, unix.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open device %s: %v", devName, err)
@@ -79,7 +79,7 @@ func NewPN7150(devName string, logCallback LogCallback, app interface{}, standby
 		standbyEnabled: standbyEnabled,
 		lpcdEnabled:   lpcdEnabled,
 		tags:          make([]Tag, maxTags),
-		verbose:       true, // Enable verbose logging by default
+		debug:         debugMode,
 		paramWriteTries: 3,  // Maximum number of parameter write attempts
 	}
 
@@ -88,7 +88,7 @@ func NewPN7150(devName string, logCallback LogCallback, app interface{}, standby
 
 // logNCI logs NCI messages with direction
 func (p *PN7150) logNCI(buf []byte, size int, direction string) {
-	if !p.verbose {
+	if !p.debug {
 		return
 	}
 
@@ -607,8 +607,10 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 	copy(p.txBuf[3:], cmd)
 	p.txSize = 3 + len(cmd)
 
-	if p.logCallback != nil {
-		p.logCallback(LogLevelDebug, fmt.Sprintf("DATA_TX: %X", cmd))
+	if p.debug {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelDebug, fmt.Sprintf("DATA_TX: %X", cmd))
+		}
 	}
 
 	// Add retries for RF frame corruption errors
@@ -747,8 +749,10 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 			}
 
 			// Success - return the payload
-			if p.logCallback != nil {
-				p.logCallback(LogLevelDebug, fmt.Sprintf("DATA_RX: %X", resp[3:]))
+			if p.debug {
+				if p.logCallback != nil {
+					p.logCallback(LogLevelDebug, fmt.Sprintf("DATA_RX: %X", resp[3:]))
+				}
 			}
 			return resp[3:], nil
 		}
@@ -809,8 +813,10 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 	copy(p.txBuf[3:], cmd)
 	p.txSize = 3 + len(cmd)
 
-	if p.logCallback != nil {
-		p.logCallback(LogLevelDebug, fmt.Sprintf("DATA_TX: %X", cmd))
+	if p.debug {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelDebug, fmt.Sprintf("DATA_TX: %X", cmd))
+		}
 	}
 
 	// Add retries for RF frame corruption errors
@@ -999,7 +1005,7 @@ func (p *PN7150) flushReadBuffer() error {
 // transfer performs an NCI transfer operation
 func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 	if tx != nil {
-		if p.verbose {
+		if p.debug {
 			p.logNCI(tx, len(tx), "TX")
 		}
 
@@ -1112,7 +1118,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 		}
 
 		totalLen := 3 + payloadLen
-		if p.verbose {
+		if p.debug {
 			p.logNCI(p.rxBuf[:totalLen], totalLen, "RX")
 		}
 

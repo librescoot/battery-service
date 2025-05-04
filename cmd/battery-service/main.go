@@ -24,6 +24,8 @@ func main() {
 	flag.BoolVar(&config.TestMainPower, "test-main-power", false, "Enable main power test mode")
 	var heartbeatTimeout uint
 	flag.UintVar(&heartbeatTimeout, "heartbeat-timeout", 40, "Heartbeat timeout in seconds")
+	var debugMode bool
+	flag.BoolVar(&debugMode, "debug", false, "Enable debug logging for detailed NCI/DATA messages")
 
 	// Battery 0 configuration
 	flag.StringVar(&config.Batteries[0].DeviceName, "device0", "/dev/pn5xx_i2c0", "Battery 0 NFC device")
@@ -47,7 +49,7 @@ func main() {
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
 	// Create battery service
-	service, err := battery.NewService(config, logger)
+	service, err := battery.NewService(config, logger, debugMode)
 	if err != nil {
 		logger.Fatalf("Failed to create battery service: %v", err)
 	}

@@ -79,10 +79,11 @@ type Service struct {
 	redis    *redis.Client
 	ctx      context.Context
 	cancel   context.CancelFunc
+	debug    bool // Add debug flag here
 }
 
 // NewService creates a new battery service
-func NewService(config *ServiceConfig, logger *log.Logger) (*Service, error) {
+func NewService(config *ServiceConfig, logger *log.Logger, debugMode bool) (*Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	
 	s := &Service{
@@ -90,6 +91,7 @@ func NewService(config *ServiceConfig, logger *log.Logger) (*Service, error) {
 		logger: logger,
 		ctx:    ctx,
 		cancel: cancel,
+		debug:  debugMode, // Store debugMode
 	}
 
 	// Initialize Redis client
@@ -126,7 +128,7 @@ func (s *Service) createReader(index int, config *BatteryConfig) (*BatteryReader
 
 	// Create NFC HAL
 	var err error
-	reader.hal, err = hal.NewPN7150(config.DeviceName, reader.logCallback, nil, true, false)
+	reader.hal, err = hal.NewPN7150(config.DeviceName, reader.logCallback, nil, true, false, s.debug)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create NFC HAL: %v", err)
 	}
