@@ -41,6 +41,7 @@ const (
 	timeBattery1Poll    = 10 * time.Minute  // Special polling interval for battery 1
 	timeStateVerify     = 1000 * time.Millisecond // Time to wait before verifying state change
 	timeActivationRetry = 2 * time.Second   // Time between activation retry attempts
+	timeHALTimeout      = 5 * time.Second // Timeout for individual HAL operations
 
 	// Constants for temperature limits
 	temperatureStateColdLimit = -10 // Celsius
@@ -205,7 +206,7 @@ func (r *BatteryReader) setEnabled(enabled bool) {
 // monitorTags continuously monitors for tag presence
 func (r *BatteryReader) monitorTags() {
 	var lastBattery1Poll time.Time // Track last poll time for battery 1
-	
+
 	// Initialize battery state as not present
 	r.Lock()
 	if !r.data.Present {
@@ -215,25 +216,29 @@ func (r *BatteryReader) monitorTags() {
 		}
 	}
 	r.Unlock()
-	
+
 	for {
 		select {
 		case <-r.stopChan:
 			return
 		default:
-			// For battery 1, only poll every 10 minutes
-			if r.index == 1 {
-				if time.Since(lastBattery1Poll) < timeBattery1Poll {
-					time.Sleep(time.Second) // Sleep for a second before checking again
-					continue
-				}
-				lastBattery1Poll = time.Now()
+			// For battery 1, only poll the tag detector less frequently when present
+			r.Lock() // Lock needed to check r.data.Present safely
+			shouldSkipPoll := r.index == 1 && r.data.Present && time.Since(lastBattery1Poll) < timeBattery1Poll
+			r.Unlock() // Unlock after check
+
+			if shouldSkipPoll {
+				// Skip the hardware poll, but sleep briefly to check again soon
+				time.Sleep(500 * time.Millisecond)
+				continue
 			}
 
+			// Proceed with tag detection
 			tags, err := r.hal.DetectTags()
 			if err != nil {
 				r.logCallback(hal.LogLevelError, fmt.Sprintf("Tag detection error: %v", err))
-				time.Sleep(timeDeparture)
+				// Short sleep after error before retrying detection
+				time.Sleep(timeDeparture) // Use a short delay like timeDeparture
 				continue
 			}
 
@@ -241,27 +246,24 @@ func (r *BatteryReader) monitorTags() {
 
 			if len(tags) == 1 && (tags[0].RFProtocol == hal.RFProtocolT2T || tags[0].RFProtocol == hal.RFProtocolISODEP) {
 				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Found %s tag with ID: %x", tags[0].RFProtocol, tags[0].ID))
-				r.handleTagPresent()
+				r.handleTagPresent() // Handles state change and Redis update
+
+				// Update last poll time for battery 1 *only after* confirming presence
+				r.Lock()
+				if r.index == 1 {
+					lastBattery1Poll = time.Now()
+				}
+				r.Unlock()
+
 			} else if len(tags) > 1 {
 				r.logCallback(hal.LogLevelWarning, "Multiple tags detected, ignoring")
-				r.handleTagAbsent()
+				r.handleTagAbsent() // Handles state change and Redis update
 			} else {
-				r.handleTagAbsent()
+				r.handleTagAbsent() // Handles state change and Redis update
 			}
 
-			// Sleep interval based on battery index and presence
-			if r.index == 1 {
-				if r.data.Present {
-					// For battery 1 when present, use the long poll interval
-					time.Sleep(timeBattery1Poll)
-				} else {
-					// For battery 1 when not present, use a moderate poll interval
-					time.Sleep(5 * time.Second)
-				}
-			} else {
-				// For battery 0, use the standard short poll interval
-				time.Sleep(100 * time.Millisecond)
-			}
+			// Always use a short sleep interval to ensure responsiveness for absence detection
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 }
@@ -296,7 +298,7 @@ func (r *BatteryReader) startHeartbeat() {
 				if r.data.Present {
 					if r.data.State == BatteryStateActive {
 						r.logCallback(hal.LogLevelDebug, "Sending heartbeat command")
-						r.sendCommand(BatteryCommandHeartbeatScooter)
+						r.sendCommand(r.service.ctx, BatteryCommandHeartbeatScooter)
 					} else if r.enabled && !r.data.LowSOC {
 						// Actively try to correct battery state if not ACTIVE
 						r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery not active during heartbeat (state=%s), attempting activation", r.data.State))
@@ -316,7 +318,6 @@ func (r *BatteryReader) startHeartbeat() {
 // handleTagPresent handles a present tag
 func (r *BatteryReader) handleTagPresent() {
 	r.Lock()
-	defer r.Unlock()
 
 	if !r.data.Present {
 		r.data.Present = true // Mark as present immediately upon detection
@@ -324,37 +325,60 @@ func (r *BatteryReader) handleTagPresent() {
 		// We'll log the battery info after reading status
 	}
 
-	if err := r.readBatteryStatus(); err != nil {
-		r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to read battery status: %v", err))
-		r.data.EmptyOr0Data++
-		return
-	}
-
+	// Read status ONLY if just inserted to get initial data
 	if r.justInserted {
+		// Need to release lock before potentially blocking IO or calling activateBattery
+		r.Unlock() // <-- Unlock before potential blocking calls
+
+		if err := r.readBatteryStatus(); err != nil {
+			r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to read battery status: %v", err))
+			// Re-acquire lock briefly to update fault count
+			r.Lock()
+			r.data.EmptyOr0Data++
+			r.Unlock()
+			// No need to re-lock before return
+			return
+		}
+
+		r.Lock() // Re-acquire lock for logging and sending command
 		r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery inserted: serial_number=%s, fw_version=%s, charge=%d, state=%s",
 			string(r.data.SerialNumber[:]), r.data.FWVersion, r.data.Charge, r.data.State))
-		
+
 		// Send INSERTED command only once when battery is first detected
 		r.logCallback(hal.LogLevelDebug, "Sending inserted command for new battery")
-		r.sendCommand(BatteryCommandInsertedInScooter)
+		// Store command error but continue to activation attempt
+		cmdErr := r.sendCommand(r.service.ctx, BatteryCommandInsertedInScooter)
 		r.justInserted = false
-		
+		r.Unlock() // <-- Unlock before calling activateBattery
+
+		if cmdErr != nil {
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to send INSERTED command: %v", cmdErr))
+			// Still attempt activation even if INSERTED failed
+		}
+
 		// Force immediate activation attempt after insertion
-		r.Unlock() // Unlock before calling activateBattery to avoid deadlock
-		r.activateBattery()
-		r.Lock() // Re-acquire lock
+		r.activateBattery() // Called without holding the lock
+		// No need to re-lock before return
 		return // Skip the regular updateBatteryState call this cycle
 	}
 
-	// Calculate temperature state
+	// --- Handle case where tag was already present ---
+
+	// Calculate temperature state (safe to do under lock)
 	oldTempState := r.data.TemperatureState
 	r.data.TemperatureState = r.calculateTemperatureState()
 	if oldTempState != r.data.TemperatureState {
 		r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery temperature-state: %s", r.data.TemperatureState))
 	}
 
-	// Remove duplicate INSERTED command send from here
-	r.updateBatteryState()
+	// Unlock *before* calling updateBatteryState to prevent deadlock
+	r.Unlock() // <-- Unlock before calling updateBatteryState
+
+	// The activateBattery function (called by updateBatteryState)
+	// will handle state transitions and necessary status reads.
+	r.updateBatteryState() // Called without holding the lock
+
+	// No need to re-lock after this, as the function ends here.
 }
 
 // handleTagAbsent handles an absent tag
@@ -376,16 +400,41 @@ func (r *BatteryReader) handleTagAbsent() {
 }
 
 // readRegisterWithRetry reads a register with retries and verification
-func (r *BatteryReader) readRegisterWithRetry(addr uint16) ([]byte, error) {
+func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) ([]byte, error) {
 	var lastErr error
 	var data, checkData []byte
 	var verified bool
 	var successfulReads int
 
+	// Reset communication error flag at the start of the attempt sequence
+	r.data.Faults.CommunicationError = false
+
 	for retry := 0; retry < maxReadRetries; retry++ {
+		// Check overall context cancellation
+		select {
+		case <-ctx.Done():
+			lastErr = fmt.Errorf("context cancelled before read retry %d: %w", retry+1, ctx.Err())
+			goto endReadRetryLoop
+		default:
+		}
+
+		// Create a context with timeout for this specific HAL call attempt
+		halCtx, cancel := context.WithTimeout(ctx, timeHALTimeout)
+
 		// First read attempt
 		data, lastErr = r.hal.ReadBinary(addr)
+		cancel()
+
 		if lastErr != nil {
+			// Check if context timed out externally (if HAL call didn't respect it internally)
+			select {
+			case <-halCtx.Done():
+				if halCtx.Err() == context.DeadlineExceeded {
+					lastErr = fmt.Errorf("hal.ReadBinary timeout on retry %d: %w", retry+1, halCtx.Err())
+				}
+			default:
+			}
+
 			// Check if we lost connection
 			if r.hal.GetState() != hal.StatePresent {
 				lastErr = fmt.Errorf("lost connection during read: %v", lastErr)
@@ -430,8 +479,20 @@ func (r *BatteryReader) readRegisterWithRetry(addr uint16) ([]byte, error) {
 		}
 
 		// Verification read
+		halCtxVerify, cancelVerify := context.WithTimeout(ctx, timeHALTimeout)
 		checkData, lastErr = r.hal.ReadBinary(addr)
+		cancelVerify()
+
 		if lastErr != nil {
+			// Check if context timed out externally
+			select {
+			case <-halCtxVerify.Done():
+				if halCtxVerify.Err() == context.DeadlineExceeded {
+					lastErr = fmt.Errorf("hal.ReadBinary verification timeout on retry %d: %w", retry+1, halCtxVerify.Err())
+				}
+			default:
+			}
+
 			// Check if we lost connection
 			if r.hal.GetState() != hal.StatePresent {
 				lastErr = fmt.Errorf("lost connection during verification read: %v", lastErr)
@@ -524,8 +585,17 @@ func (r *BatteryReader) readRegisterWithRetry(addr uint16) ([]byte, error) {
 		time.Sleep(timeCmd)
 	}
 
+endReadRetryLoop: // Label to jump to for final error handling
+
 	if !verified {
-		return nil, fmt.Errorf("failed to read register 0x%04x after %d retries: %v", addr, maxReadRetries, lastErr)
+		err := fmt.Errorf("failed to read register 0x%04x after %d retries: %w", addr, maxReadRetries, lastErr)
+		r.logCallback(hal.LogLevelError, err.Error()) // Log the final error
+		// Set communication error fault if verification failed after retries
+		r.data.Faults.CommunicationError = true
+		if updateErr := r.updateRedisStatus(); updateErr != nil {
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after read communication error: %v", updateErr))
+		}
+		return nil, err
 	}
 
 	// Check for zero data
@@ -540,6 +610,14 @@ func (r *BatteryReader) readRegisterWithRetry(addr uint16) ([]byte, error) {
 		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("received zero data at register 0x%04x", addr))
 		r.data.EmptyOr0Data++
 		return nil, fmt.Errorf("received zero data at register 0x%04x", addr)
+	}
+
+	// Clear communication error flag on success
+	if r.data.Faults.CommunicationError {
+		r.data.Faults.CommunicationError = false
+		if updateErr := r.updateRedisStatus(); updateErr != nil {
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after clearing read communication error: %v", updateErr))
+		}
 	}
 
 	return data, nil
@@ -654,7 +732,7 @@ func (r *BatteryReader) readBatteryStatus() error {
 			continue
 		}
 
-		data, err = r.readRegisterWithRetry(addrStatus0)
+		data, err = r.readRegisterWithRetry(r.service.ctx, addrStatus0)
 		if err == nil {
 			break
 		}
@@ -769,7 +847,7 @@ func (r *BatteryReader) readBatteryStatus() error {
 			continue
 		}
 
-		data, err = r.readRegisterWithRetry(addrStatus1)
+		data, err = r.readRegisterWithRetry(r.service.ctx, addrStatus1)
 		if err == nil {
 			break
 		}
@@ -803,7 +881,7 @@ func (r *BatteryReader) readBatteryStatus() error {
 			continue
 		}
 
-		data, err = r.readRegisterWithRetry(addrStatus2)
+		data, err = r.readRegisterWithRetry(r.service.ctx, addrStatus2)
 		if err == nil {
 			break
 		}
@@ -854,7 +932,7 @@ func (r *BatteryReader) activateBattery() {
 	if !r.enabled {
 		if r.data.State != BatteryStateAsleep && r.data.State != BatteryStateIdle {
 			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sending OFF command (disabled): current_state=%s", r.data.State))
-			r.sendCommand(BatteryCommandOff)
+			r.sendCommand(r.service.ctx, BatteryCommandOff)
 		}
 		return
 	}
@@ -862,7 +940,7 @@ func (r *BatteryReader) activateBattery() {
 	if r.data.LowSOC {
 		if r.data.State != BatteryStateAsleep && r.data.State != BatteryStateIdle {
 			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sending OFF command (low SOC): current_state=%s", r.data.State))
-			r.sendCommand(BatteryCommandOff)
+			r.sendCommand(r.service.ctx, BatteryCommandOff)
 		}
 		return
 	}
@@ -892,7 +970,7 @@ func (r *BatteryReader) activateBattery() {
 			}
 
 			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sending SEATBOX_CLOSED command before ON: current_state=%s", r.data.State))
-			r.sendCommand(BatteryCommandSeatboxClosed)
+			r.sendCommand(r.service.ctx, BatteryCommandSeatboxClosed)
 			
 			// Wait longer for the seatbox closed command to be processed
 			time.Sleep(timeCmdFirstOpened)
@@ -936,7 +1014,7 @@ func (r *BatteryReader) activateBattery() {
 		
 		// Send ON command
 		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sending ON command: current_state=%s", r.data.State))
-		r.sendCommand(BatteryCommandOn)
+		r.sendCommand(r.service.ctx, BatteryCommandOn)
 		
 		// Wait for state change to take effect
 		time.Sleep(timeStateVerify)
@@ -989,10 +1067,21 @@ func (r *BatteryReader) updateBatteryState() {
 }
 
 // sendCommand sends a command to the battery with retries
-func (r *BatteryReader) sendCommand(cmd BatteryCommand) {
+func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) error {
 	// Ensure minimum time between commands
 	if time.Since(r.lastCmd) < timeCmd {
-		time.Sleep(timeCmd - time.Since(r.lastCmd))
+		sleepCtx, cancelSleep := context.WithTimeout(ctx, timeCmd - time.Since(r.lastCmd))
+		select {
+		case <-sleepCtx.Done():
+			cancelSleep()
+			if sleepCtx.Err() != context.DeadlineExceeded {
+				return fmt.Errorf("context cancelled during command delay: %w", sleepCtx.Err())
+			}
+			// If timeout expired, just continue, minimum time passed
+		case <-time.After(timeCmd - time.Since(r.lastCmd)):
+			// Normal sleep completion
+		}
+		cancelSleep()
 	}
 
 	data := make([]byte, 4)
@@ -1004,7 +1093,18 @@ func (r *BatteryReader) sendCommand(cmd BatteryCommand) {
 	var lastErr error
 	var successfulWrites int
 
+	// Reset communication error flag at the start of the attempt sequence
+	r.data.Faults.CommunicationError = false
+
 	for retry := 0; retry < maxWriteRetries; retry++ {
+		// Check overall context cancellation
+		select {
+		case <-ctx.Done():
+			lastErr = fmt.Errorf("context cancelled before write retry %d: %w", retry+1, ctx.Err())
+			goto endWriteRetryLoop
+		default:
+		}
+
 		// Verify state before attempting write
 		if r.hal.GetState() != hal.StatePresent {
 			lastErr = fmt.Errorf("invalid state for writing: %s", r.hal.GetState())
@@ -1013,19 +1113,45 @@ func (r *BatteryReader) sendCommand(cmd BatteryCommand) {
 			continue
 		}
 
-		lastErr = r.hal.WriteBinary(addrCommand, data)
+		// Create context with timeout for HAL write call
+		halWriteCtx, cancelWrite := context.WithTimeout(ctx, timeHALTimeout)
+		lastErr = r.hal.WriteBinary(addrCommand, data) // Pass halWriteCtx if HAL supports it
+		cancelWrite()
+
 		if lastErr == nil {
 			successfulWrites++
 
 			// On first successful write, give a short delay before reading response
 			if successfulWrites == 1 {
-				time.Sleep(timeCmd)
+				sleepCtx, cancelSleep := context.WithTimeout(ctx, timeCmd)
+				select {
+				case <-sleepCtx.Done():
+					cancelSleep()
+					lastErr = fmt.Errorf("context cancelled during write-read delay: %w", sleepCtx.Err())
+					continue // Go to next retry
+				case <-time.After(timeCmd):
+					// Normal sleep completion
+				}
+				cancelSleep()
 			}
 
-			// Read response, handling CREDIT notifications
-			readData, err := r.hal.ReadBinary(addrCommand)
+			// Create context with timeout for HAL read call
+			halReadCtx, cancelRead := context.WithTimeout(ctx, timeHALTimeout)
+			readData, err := r.hal.ReadBinary(addrCommand) // Pass halReadCtx if HAL supports it
+			cancelRead()
+
 			if err != nil {
-				lastErr = fmt.Errorf("failed to read response: %v", err)
+				// Check if context timed out externally
+				select {
+				case <-halReadCtx.Done():
+					if halReadCtx.Err() == context.DeadlineExceeded {
+						lastErr = fmt.Errorf("hal.ReadBinary response timeout on retry %d: %w", retry+1, halReadCtx.Err())
+					} else {
+						lastErr = fmt.Errorf("context error during read response on retry %d: %w", retry+1, halReadCtx.Err())
+					}
+				default:
+					lastErr = fmt.Errorf("failed to read response: %w", err)
+				}
 				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Retry %d: %v", retry+1, lastErr))
 				time.Sleep(timeCmd)
 				continue
@@ -1034,9 +1160,22 @@ func (r *BatteryReader) sendCommand(cmd BatteryCommand) {
 			// Skip CREDIT notifications (0x60 0x06)
 			if len(readData) >= 2 && readData[0] == 0x60 && readData[1] == 0x06 {
 				// Read the actual response after the CREDIT notification
-				readData, err = r.hal.ReadBinary(addrCommand)
+				halReadCreditCtx, cancelReadCredit := context.WithTimeout(ctx, timeHALTimeout)
+				readData, err = r.hal.ReadBinary(addrCommand) // Pass halReadCreditCtx if HAL supports it
+				cancelReadCredit()
+
 				if err != nil {
-					lastErr = fmt.Errorf("failed to read response after CREDIT: %v", err)
+					// Check if context timed out externally
+					select {
+					case <-halReadCreditCtx.Done():
+						if halReadCreditCtx.Err() == context.DeadlineExceeded {
+							lastErr = fmt.Errorf("hal.ReadBinary after CREDIT timeout on retry %d: %w", retry+1, halReadCreditCtx.Err())
+						} else {
+							lastErr = fmt.Errorf("context error during read after CREDIT on retry %d: %w", retry+1, halReadCreditCtx.Err())
+						}
+					default:
+						lastErr = fmt.Errorf("failed to read response after CREDIT: %w", err)
+					}
 					r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Retry %d: %v", retry+1, lastErr))
 					time.Sleep(timeCmd)
 					continue
@@ -1047,7 +1186,14 @@ func (r *BatteryReader) sendCommand(cmd BatteryCommand) {
 			if len(readData) >= 2 && readData[0] == 0x0A && readData[1] == 0x00 {
 				r.lastCmd = time.Now()
 				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sent command: %v (ACK received)", cmd))
-				return
+				// Clear communication error on success
+				if r.data.Faults.CommunicationError {
+					r.data.Faults.CommunicationError = false
+					if updateErr := r.updateRedisStatus(); updateErr != nil {
+						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after clearing write communication error: %v", updateErr))
+					}
+				}
+				return nil // Command succeeded
 			}
 
 			// Check for RF frame corruption (all 0xFF)
@@ -1069,29 +1215,54 @@ func (r *BatteryReader) sendCommand(cmd BatteryCommand) {
 			if successfulWrites >= 2 {
 				r.lastCmd = time.Now()
 				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sent command: %v (accepted after %d successful writes)", cmd, successfulWrites))
-				return
+				// Clear communication error on success (even if no ACK, write went through)
+				if r.data.Faults.CommunicationError {
+					r.data.Faults.CommunicationError = false
+					if updateErr := r.updateRedisStatus(); updateErr != nil {
+						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after clearing write communication error: %v", updateErr))
+					}
+				}
+				return nil // Command succeeded (conditionally)
 			}
 
 			// No ACK and not enough successful writes, try again
 			lastErr = fmt.Errorf("no ACK received")
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Retry %d: %v", retry+1, lastErr))
 			time.Sleep(timeCmd)
-			continue
-		}
+		} else { // lastErr != nil
+			// Check if the timeout was exceeded before the error occurred
+			if halWriteCtx.Err() == context.DeadlineExceeded { // Check error directly
+				 lastErr = fmt.Errorf("hal.WriteBinary timeout or context exceeded before error on retry %d: %w", retry+1, halWriteCtx.Err())
+			} // else keep original lastErr or handle other ctx errors if needed
 
-		// Check if we lost connection
-		if r.hal.GetState() != hal.StatePresent {
-			lastErr = fmt.Errorf("lost connection during write: %v", lastErr)
-			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Retry %d: %v", retry+1, lastErr))
-			time.Sleep(timeCmdSlow) // Use slower delay for connection issues
-			continue
-		}
+			// Log error with potentially updated lastErr
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Retry %d: WriteBinary failed: %v", retry+1, lastErr))
 
-		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Retry %d: %v", retry+1, lastErr))
-		time.Sleep(timeCmd) // Standard delay for other errors
+			// Check if we lost connection
+			if r.hal.GetState() != hal.StatePresent {
+				lastErr = fmt.Errorf("lost connection during write: %v", lastErr) // Keep updated error if timeout occurred
+
+				// Add a longer delay and attempt to recover the connection
+				time.Sleep(timeCmdFirstOpened)
+				if r.hal.GetState() == hal.StateDiscovering {
+					// Wait for potential rediscovery
+					time.Sleep(timeCmdFirstAsleep)
+				}
+				continue
+			}
+		}
 	}
 
-	r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to send command after %d retries: %v", maxWriteRetries, lastErr))
+endWriteRetryLoop: // Label to jump to for final error handling
+
+	finalErr := fmt.Errorf("failed to send command %v after %d retries: %w", cmd, maxWriteRetries, lastErr)
+	r.logCallback(hal.LogLevelError, finalErr.Error())
+	// Set communication error fault if command failed after retries
+	r.data.Faults.CommunicationError = true
+	if updateErr := r.updateRedisStatus(); updateErr != nil {
+		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after write communication error: %v", updateErr))
+	}
+	return finalErr // Return the final error
 }
 
 // logCallback handles logging for the battery reader
