@@ -805,7 +805,9 @@ func (r *BatteryReader) updateRedisStatus() error {
 		return fmt.Errorf("Redis client not initialized")
 	}
 
-	// Create a map for the battery status fields
+	key := fmt.Sprintf("battery:%d", r.index)
+
+	// Create a map for the battery status fields that will be set with HMSet
 	status := map[string]interface{}{
 		"present":            fmt.Sprintf("%v", r.data.Present),
 		"state":             r.data.State.String(),
@@ -824,13 +826,6 @@ func (r *BatteryReader) updateRedisStatus() error {
 		"fw-version":        r.data.FWVersion,
 	}
 
-	// Set all non-fault fields in the hash
-	key := fmt.Sprintf("battery:%d", r.index)
-	if err := r.service.redis.HMSet(r.service.ctx, key, status).Err(); err != nil {
-		return fmt.Errorf("failed to update Redis status: %v", err)
-	}
-
-	// Handle fault fields - only write true values, clear false values
 	// Define all possible fault fields
 	faultFields := []struct {
 		field string
@@ -856,33 +851,35 @@ func (r *BatteryReader) updateRedisStatus() error {
 		{"faults:reader-error", r.data.Faults.ReaderError},
 	}
 
-	// Process each fault field
+	// --- Use a pipeline for atomic execution (MULTI/EXEC) ---
+	pipe := r.service.redis.Pipeline()
+
+	// 1. Set all non-fault fields in the hash
+	pipe.HMSet(r.service.ctx, key, status)
+
+	// 2. Handle fault fields - set to "true" or "false"
 	for _, fault := range faultFields {
+		valueStr := "false"
 		if fault.value {
-			// If fault is true, set it in Redis
-			if err := r.service.redis.HSet(r.service.ctx, key, fault.field, "true").Err(); err != nil {
-				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to set fault %s: %v", fault.field, err))
-			}
-		} else {
-			// If fault is false, check if it exists in Redis and delete it if it does
-			exists, err := r.service.redis.HExists(r.service.ctx, key, fault.field).Result()
-			if err != nil {
-				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to check if fault %s exists: %v", fault.field, err))
-				continue
-			}
-			
-			if exists {
-				// Delete the fault field if it exists but is now false
-				if err := r.service.redis.HDel(r.service.ctx, key, fault.field).Err(); err != nil {
-					r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to clear fault %s: %v", fault.field, err))
-				} else {
-					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Cleared fault %s", fault.field))
-				}
-			}
+			valueStr = "true"
 		}
+		pipe.HSet(r.service.ctx, key, fault.field, valueStr)
 	}
 
-	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Updated Redis status for battery:%d", r.index))
+	// 3. Publish notifications for key state changes
+	pipe.Publish(r.service.ctx, key, "present")
+	pipe.Publish(r.service.ctx, key, "state")
+	pipe.Publish(r.service.ctx, key, "charge")
+	pipe.Publish(r.service.ctx, key, "temperature-state")
+
+	// Execute the pipeline
+	_, err := pipe.Exec(r.service.ctx)
+	if err != nil {
+		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Redis pipeline execution failed: %v", err))
+		return fmt.Errorf("redis pipeline execution failed: %v", err) // Return error to indicate failure
+	}
+
+	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Updated Redis status (with publish) for %s", key))
 	return nil
 }
 
