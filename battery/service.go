@@ -72,6 +72,7 @@ type BatteryReader struct {
 	readyToScoot bool          // Flag indicating battery responded with ReadyToScoot
 	stopChan     chan struct{} // Channel to signal goroutine shutdown
 	nfcMutex     sync.Mutex    // Serializes access to NFC HAL operations
+	lastPublishedData BatteryData // Stores the state as of the last successful Redis update with PUBLISH
 }
 
 // Service represents the battery service that manages multiple readers
@@ -220,6 +221,7 @@ func (r *BatteryReader) monitorTags() {
 	r.Lock()
 	if !r.data.Present {
 		r.data = BatteryData{} // Ensure clean state
+		r.lastPublishedData = r.data // Initialize lastPublishedData to prevent false-positive changes on first update
 		if err := r.updateRedisStatus(); err != nil {
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to initialize Redis status: %v", err))
 		}
@@ -862,6 +864,30 @@ func (r *BatteryReader) updateRedisStatus() error {
 	pipe := r.service.redis.Pipeline()
 	faultsChanged := false
 
+	// --- Publish for specific field changes on 'battery:X' channel ---
+	// Compare current r.data with r.lastPublishedData
+
+	// Present
+	if r.data.Present != r.lastPublishedData.Present {
+		pipe.Publish(r.service.ctx, key, "present")
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Publishing 'present' to %s (new: %v, old: %v)", key, r.data.Present, r.lastPublishedData.Present))
+	}
+	// State
+	if r.data.State != r.lastPublishedData.State {
+		pipe.Publish(r.service.ctx, key, "state")
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Publishing 'state' to %s (new: %s, old: %s)", key, r.data.State, r.lastPublishedData.State))
+	}
+	// Charge
+	if r.data.Charge != r.lastPublishedData.Charge {
+		pipe.Publish(r.service.ctx, key, "charge")
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Publishing 'charge' to %s (new: %d, old: %d)", key, r.data.Charge, r.lastPublishedData.Charge))
+	}
+	// TemperatureState
+	if r.data.TemperatureState != r.lastPublishedData.TemperatureState {
+		pipe.Publish(r.service.ctx, key, "temperature-state")
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Publishing 'temperature-state' to %s (new: %s, old: %s)", key, r.data.TemperatureState, r.lastPublishedData.TemperatureState))
+	}
+
 	// 1. Set all main status fields in the hash
 	pipe.HMSet(r.service.ctx, key, status)
 
@@ -901,10 +927,13 @@ func (r *BatteryReader) updateRedisStatus() error {
 	_, execErr := pipe.Exec(r.service.ctx)
 	if execErr != nil {
 		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Redis pipeline execution failed: %v", execErr))
-		return fmt.Errorf("redis pipeline execution failed: %v", execErr) // Return error to indicate failure
+		return fmt.Errorf("redis pipeline execution failed: %v", execErr) // Return error to indicate failure, DO NOT update lastPublishedData
 	}
 
-	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Updated Redis status for %s and fault set %s", key, faultSetKey))
+	// --- After successful pipeline execution, update lastPublishedData ---
+	r.lastPublishedData = r.data // Update to the new successfully written state
+
+	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Updated Redis status for %s and fault set %s. Published relevant changes.", key, faultSetKey))
 	return nil
 }
 
