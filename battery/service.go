@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"reflect"
 	"sync"
 	"time"
 
@@ -799,15 +800,35 @@ endReadRetryLoop: // Label to jump to for final error handling
 	return data, nil
 }
 
-// updateRedisStatus updates the Redis hash with current battery status
+// faultCodeMap maps boolean fault fields in BatteryFaults to their numeric codes
+var faultCodeMap = map[string]int{
+	"ChargeTempOverHigh":    0,
+	"ChargeTempOverLow":     1,
+	"DischargeTempOverHigh": 2,
+	"DischargeTempOverLow":  3,
+	"SignalWireBroken":      4,
+	"SecondLevelOverTemp":   5,
+	"PackVoltageHigh":       6,
+	"MOSTempOverHigh":       7,
+	"CellVoltageHigh":       8,
+	"PackVoltageLow":        9,
+	"CellVoltageLow":        10,
+	"ChargeOverCurrent":     11,
+	"DischargeOverCurrent":  12,
+	"ShortCircuit":          13,
+}
+
+// updateRedisStatus updates the Redis hash and fault set with current battery status
 func (r *BatteryReader) updateRedisStatus() error {
 	if r.service.redis == nil {
 		return fmt.Errorf("Redis client not initialized")
 	}
 
 	key := fmt.Sprintf("battery:%d", r.index)
+	faultSetKey := fmt.Sprintf("battery:%d:fault", r.index)
+	faultNotifyChannel := key + " fault" // Publish to 'battery:X fault' channel
 
-	// Create a map for the battery status fields that will be set with HMSet
+	// Create a map for the main battery status fields
 	status := map[string]interface{}{
 		"present":            fmt.Sprintf("%v", r.data.Present),
 		"state":             r.data.State.String(),
@@ -826,60 +847,64 @@ func (r *BatteryReader) updateRedisStatus() error {
 		"fw-version":        r.data.FWVersion,
 	}
 
-	// Define all possible fault fields
-	faultFields := []struct {
-		field string
-		value bool
-	}{
-		{"faults:charge-temp-over-high", r.data.Faults.ChargeTempOverHigh},
-		{"faults:charge-temp-over-low", r.data.Faults.ChargeTempOverLow},
-		{"faults:discharge-temp-over-high", r.data.Faults.DischargeTempOverHigh},
-		{"faults:discharge-temp-over-low", r.data.Faults.DischargeTempOverLow},
-		{"faults:signal-wire-broken", r.data.Faults.SignalWireBroken},
-		{"faults:second-level-over-temp", r.data.Faults.SecondLevelOverTemp},
-		{"faults:pack-voltage-high", r.data.Faults.PackVoltageHigh},
-		{"faults:mos-temp-over-high", r.data.Faults.MOSTempOverHigh},
-		{"faults:cell-voltage-high", r.data.Faults.CellVoltageHigh},
-		{"faults:pack-voltage-low", r.data.Faults.PackVoltageLow},
-		{"faults:cell-voltage-low", r.data.Faults.CellVoltageLow},
-		{"faults:charge-over-current", r.data.Faults.ChargeOverCurrent},
-		{"faults:discharge-over-current", r.data.Faults.DischargeOverCurrent},
-		{"faults:short-circuit", r.data.Faults.ShortCircuit},
-		{"faults:not-following-command", r.data.Faults.NotFollowingCommand},
-		{"faults:zero-data", r.data.Faults.ZeroData},
-		{"faults:communication-error", r.data.Faults.CommunicationError},
-		{"faults:reader-error", r.data.Faults.ReaderError},
+	// Fetch current fault set members from Redis
+	currentFaultCodesStr, err := r.service.redis.SMembers(r.service.ctx, faultSetKey).Result()
+	if err != nil && err != redis.Nil {
+		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to get current faults from Redis set %s: %v", faultSetKey, err))
+		currentFaultCodesStr = []string{} // Treat as empty if error or nil
+	}
+	currentFaultsInSet := make(map[string]struct{})
+	for _, codeStr := range currentFaultCodesStr {
+		currentFaultsInSet[codeStr] = struct{}{}
 	}
 
 	// --- Use a pipeline for atomic execution (MULTI/EXEC) ---
 	pipe := r.service.redis.Pipeline()
+	faultsChanged := false
 
-	// 1. Set all non-fault fields in the hash
+	// 1. Set all main status fields in the hash
 	pipe.HMSet(r.service.ctx, key, status)
 
-	// 2. Handle fault fields - set to "true" or "false"
-	for _, fault := range faultFields {
-		valueStr := "false"
-		if fault.value {
-			valueStr = "true"
+	// 2. Handle BMS fault codes using the Set
+	// Use reflection to iterate over the BatteryFaults struct fields mapped in faultCodeMap
+	faultsValue := reflect.ValueOf(r.data.Faults)
+	for fieldName, faultCode := range faultCodeMap {
+		fieldValue := faultsValue.FieldByName(fieldName)
+		if !fieldValue.IsValid() || fieldValue.Kind() != reflect.Bool {
+			continue // Should not happen if map is correct
 		}
-		pipe.HSet(r.service.ctx, key, fault.field, valueStr)
-	}
+		
+		isFaultActive := fieldValue.Bool()
+		faultCodeStr := fmt.Sprintf("%d", faultCode)
+		_, faultWasInSet := currentFaultsInSet[faultCodeStr]
 
-	// 3. Publish notifications for key state changes
-	pipe.Publish(r.service.ctx, key, "present")
-	pipe.Publish(r.service.ctx, key, "state")
-	pipe.Publish(r.service.ctx, key, "charge")
-	pipe.Publish(r.service.ctx, key, "temperature-state")
+		if isFaultActive && !faultWasInSet {
+			// Fault is active now, but wasn't in the set -> SADD
+			pipe.SAdd(r.service.ctx, faultSetKey, faultCodeStr)
+			faultsChanged = true
+			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Adding fault code %d (%s) to set %s", faultCode, fieldName, faultSetKey))
+		} else if !isFaultActive && faultWasInSet {
+			// Fault is inactive now, but was in the set -> SREM
+			pipe.SRem(r.service.ctx, faultSetKey, faultCodeStr)
+			faultsChanged = true
+			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Removing fault code %d (%s) from set %s", faultCode, fieldName, faultSetKey))
+		}
+	}
+	
+	// 3. Publish notification *if* faults changed
+	if faultsChanged {
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Fault set %s changed, publishing notification to %s", faultSetKey, faultNotifyChannel))
+		pipe.Publish(r.service.ctx, faultNotifyChannel, "fault")
+	}
 
 	// Execute the pipeline
-	_, err := pipe.Exec(r.service.ctx)
-	if err != nil {
-		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Redis pipeline execution failed: %v", err))
-		return fmt.Errorf("redis pipeline execution failed: %v", err) // Return error to indicate failure
+	_, execErr := pipe.Exec(r.service.ctx)
+	if execErr != nil {
+		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Redis pipeline execution failed: %v", execErr))
+		return fmt.Errorf("redis pipeline execution failed: %v", execErr) // Return error to indicate failure
 	}
 
-	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Updated Redis status (with publish) for %s", key))
+	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Updated Redis status for %s and fault set %s", key, faultSetKey))
 	return nil
 }
 
