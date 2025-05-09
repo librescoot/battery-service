@@ -179,10 +179,12 @@ func (r *BatteryReader) startHeartbeat() {
 									if !r.checkStateCorrectAfterRead(expectedState) {
 										// State is incorrect, attempt recovery
 										r.logCallback(hal.LogLevelWarning, "Battery 0: State incorrect after ON/OFF (infrequent poll), attempting recovery...")
-										if errRec := r.sendCommand(r.service.ctx, BatteryCommandInsertedInScooter); errRec != nil {
-											r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Battery 0: Failed to send INSERTED_IN_SCOOTER for recovery (infrequent poll): %v", errRec))
+										if errRec := r.recreateHAL(r.service.ctx); errRec != nil {
+											r.logCallback(hal.LogLevelError, fmt.Sprintf("Battery 0: HAL reinitialization failed during infrequent poll recovery: %v", errRec))
+										} else {
+											// Give newly initialized reader a short moment to settle
+											time.Sleep(500 * time.Millisecond)
 										}
-										time.Sleep(timeCmd) // tm_inserted_closed equivalent
 									} else {
 										r.logCallback(hal.LogLevelDebug, "Battery 0: Idle/asleep state correct (infrequent poll), waiting for next infrequent poll cycle.")
 									}
@@ -194,15 +196,12 @@ func (r *BatteryReader) startHeartbeat() {
 								// 3. Read status and check state correctness (regular frequency)
 								if !r.checkStateCorrectAfterRead(expectedState) {
 									// State is incorrect, attempt recovery
-									r.logCallback(hal.LogLevelWarning, "Battery 0: State incorrect after ON/OFF, attempting recovery...")
-									// 4. Send INSERTED_IN_SCOOTER (Recovery attempt)
-									if err := r.sendCommand(r.service.ctx, BatteryCommandInsertedInScooter); err != nil {
-										r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Battery 0: Failed to send INSERTED_IN_SCOOTER for recovery: %v", err))
+									r.logCallback(hal.LogLevelWarning, "Battery 0: State incorrect after ON/OFF – performing HAL reinitialization")
+									if err := r.recreateHAL(r.service.ctx); err != nil {
+										r.logCallback(hal.LogLevelError, fmt.Sprintf("Battery 0: HAL reinitialization failed during maint recovery: %v", err))
+									} else {
+										time.Sleep(500 * time.Millisecond)
 									}
-
-									time.Sleep(timeCmd) // tm_inserted_closed equivalent
-
-									// The loop will restart on the next tick, implicitly going back to send_closed
 								} else {
 									// State is correct, wait for next tick (wait_update equivalent)
 									r.logCallback(hal.LogLevelDebug, "Battery 0: State correct, waiting for next maint cycle.")
