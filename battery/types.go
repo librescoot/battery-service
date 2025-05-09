@@ -1,5 +1,59 @@
 package battery
 
+import (
+	"context"
+	"fmt"
+	"log"
+	"sync"
+	"time"
+
+	"battery-service/nfc/hal"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// ErrHALRecreatedRetryRead signals that the HAL was recreated and the read operation should be retried.
+var errHALRecreatedRetryRead = fmt.Errorf("HAL was recreated, retry read operation")
+
+// BatteryReader represents a single battery reader instance
+type BatteryReader struct {
+	sync.Mutex
+	index                     int
+	hal                       hal.HAL
+	data                      BatteryData
+	enabled                   bool
+	config                    *BatteryConfig
+	service                   *Service
+	lastCmd                   time.Time
+	justInserted              bool
+	justOpened                bool
+	readyToScoot              bool          // Flag indicating battery responded with ReadyToScoot
+	stopChan                  chan struct{} // Channel to signal goroutine shutdown
+	nfcMutex                  sync.Mutex    // Serializes access to NFC HAL operations
+	lastPublishedData         BatteryData   // Stores the state as of the last successful Redis update with PUBLISH
+	lastBattery1MaintPollTime time.Time     // Tracks last maintenance poll for battery 1
+	lastIdleAsleepPollTime    time.Time     // Tracks last poll time for battery 0 when idle/asleep in stand-by
+}
+
+// Service represents the battery service that manages multiple readers
+type Service struct {
+	sync.Mutex
+	config      *ServiceConfig
+	readers     [2]*BatteryReader
+	logger      *log.Logger
+	redis       *redis.Client
+	ctx         context.Context
+	cancel      context.CancelFunc
+	debug       bool // Add debug flag here
+	seatboxOpen bool // Track current seatbox state
+
+	// Fields for cb-battery monitoring and control
+	vehicleState          string
+	cbBatteryCharge       int
+	cbBatteryPollTicker   *time.Ticker
+	cbBatteryPollStopChan chan struct{}
+}
+
 // BatteryState represents the state of the battery
 type BatteryState uint32
 
@@ -47,7 +101,7 @@ const (
 	BatteryCommandReadyToCharge BatteryCommand = 0x4D485249 // Battery writes this to indicate ready to charge. ("MHRI")
 	BatteryCommandReadyToScoot  BatteryCommand = 0x4D484D54 // Battery writes this to indicate ready to scoot. ("MHMT")
 
-	BatteryCommandNone           BatteryCommand = 0 // Keep for default/unknown
+	BatteryCommandNone BatteryCommand = 0 // Keep for default/unknown
 )
 
 // BatteryTemperatureState represents the temperature state of the battery

@@ -84,4 +84,4 @@ func NewError(code int, message string) error {
 		Code:    code,
 		Message: message,
 	}
-} 
+}

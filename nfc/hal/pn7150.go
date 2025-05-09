@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -48,20 +49,20 @@ func (s state) String() string {
 // PN7150 implements the HAL interface for the NXP PN7150 NFC controller
 type PN7150 struct {
 	sync.Mutex
-	state         state
-	fd            int
-	logCallback   LogCallback
-	app           interface{}
-	txBuf         [256]byte
-	txSize        int
-	rxBuf         []byte
-	standbyEnabled bool
-	lpcdEnabled   bool
-	tagSelected   bool
-	numTags       int
-	tags          []Tag
-	debug         bool
-	paramWriteTry uint
+	state           state
+	fd              int
+	logCallback     LogCallback
+	app             interface{}
+	txBuf           [256]byte
+	txSize          int
+	rxBuf           []byte
+	standbyEnabled  bool
+	lpcdEnabled     bool
+	tagSelected     bool
+	numTags         int
+	tags            []Tag
+	debug           bool
+	paramWriteTry   uint
 	paramWriteTries uint
 }
 
@@ -72,15 +73,15 @@ func NewPN7150(devName string, logCallback LogCallback, app interface{}, standby
 	}
 
 	hal := &PN7150{
-		fd:            fd,
-		logCallback:   logCallback,
-		app:           app,
-		rxBuf:         make([]byte, nciBufferSize),
-		standbyEnabled: standbyEnabled,
-		lpcdEnabled:   lpcdEnabled,
-		tags:          make([]Tag, maxTags),
-		debug:         debugMode,
-		paramWriteTries: 3,  // Maximum number of parameter write attempts
+		fd:              fd,
+		logCallback:     logCallback,
+		app:             app,
+		rxBuf:           make([]byte, nciBufferSize),
+		standbyEnabled:  standbyEnabled,
+		lpcdEnabled:     lpcdEnabled,
+		tags:            make([]Tag, maxTags),
+		debug:           debugMode,
+		paramWriteTries: 3, // Maximum number of parameter write attempts
 	}
 
 	return hal, nil
@@ -168,8 +169,8 @@ func (p *PN7150) Initialize() error {
 	}
 
 	params := []nciParam{
-		{0xA003, []byte{0x08}},                    // CLOCK_SEL_CFG: 27.12 MHz crystal
-		{0xA00E, []byte{0x02, 0x09, 0x00}},       // PMU_CFG
+		{0xA003, []byte{0x08}},             // CLOCK_SEL_CFG: 27.12 MHz crystal
+		{0xA00E, []byte{0x02, 0x09, 0x00}}, // PMU_CFG
 	}
 
 	// Set each parameter
@@ -232,20 +233,20 @@ func (p *PN7150) Initialize() error {
 
 	// Build CORE_SET_CONFIG command
 	configCmd := []byte{
-		0x20, // MT=CMD (1 << 5), GID=CORE
-		0x02, // OID=SET_CONFIG
-		0x00, // Length placeholder
+		0x20,                   // MT=CMD (1 << 5), GID=CORE
+		0x02,                   // OID=SET_CONFIG
+		0x00,                   // Length placeholder
 		byte(len(transitions)), // Number of parameters
 	}
 
 	// Add each transition parameter
 	for _, t := range transitions {
 		configCmd = append(configCmd,
-			0xA0, // RF_TRANSITION_CFG >> 8
-			0x0D, // RF_TRANSITION_CFG & 0xFF
+			0xA0,                 // RF_TRANSITION_CFG >> 8
+			0x0D,                 // RF_TRANSITION_CFG & 0xFF
 			byte(2+len(t.value)), // Parameter length
-			t.id,     // Transition ID
-			t.offset, // Offset
+			t.id,                 // Transition ID
+			t.offset,             // Offset
 		)
 		configCmd = append(configCmd, t.value...)
 	}
@@ -314,14 +315,14 @@ func (p *PN7150) setPower(on bool) error {
 	if p.logCallback != nil {
 		p.logCallback(LogLevelDebug, fmt.Sprintf("Set power: %v", on))
 	}
-	
+
 	const pn5xxSetPwr = 0xE901
-	
+
 	var value uintptr
 	if on {
 		value = 1
 	}
-	
+
 	// Call IOCTL using raw fd
 	_, _, errno := unix.Syscall(
 		unix.SYS_IOCTL,
@@ -329,7 +330,7 @@ func (p *PN7150) setPower(on bool) error {
 		uintptr(pn5xxSetPwr),
 		value,
 	)
-	
+
 	if errno != 0 {
 		return fmt.Errorf("ioctl error: %v", errno)
 	}
@@ -602,8 +603,8 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 
 	// Send as DATA packet
 	p.txBuf[0] = nciMsgTypeData << nciMsgTypeBit // DATA packet
-	p.txBuf[1] = 0 // Connection ID
-	p.txBuf[2] = byte(len(cmd)) // Payload length
+	p.txBuf[1] = 0                               // Connection ID
+	p.txBuf[2] = byte(len(cmd))                  // Payload length
 	copy(p.txBuf[3:], cmd)
 	p.txSize = 3 + len(cmd)
 
@@ -642,18 +643,18 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 					lastErr = err
 					break
 				}
-				
+
 				// If we get no response after credit notification, treat it as a communication issue
 				if len(resp) == 0 {
 					if p.logCallback != nil {
 						p.logCallback(LogLevelDebug, "No response after credit notification - reinitializing")
 					}
-					
+
 					// We need to unlock before calling StartDiscovery to avoid deadlock
 					p.Unlock()
 					err = p.StartDiscovery(100)
 					p.Lock() // Re-acquire the lock
-					
+
 					if err != nil {
 						lastErr = fmt.Errorf("failed to reinitialize after credit timeout: %v", err)
 						break
@@ -671,12 +672,12 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 						time.Sleep(10 * time.Millisecond)
 					}
 					p.Lock() // Re-acquire lock
-					
+
 					if err != nil || len(tags) == 0 {
 						lastErr = fmt.Errorf("failed to detect tag after credit timeout: %v", err)
 						break
 					}
-					
+
 					// Tag should now be activated and present
 					if p.state != statePresent {
 						lastErr = fmt.Errorf("tag not present after credit timeout")
@@ -695,12 +696,12 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 				if p.logCallback != nil {
 					p.logCallback(LogLevelDebug, "Received 0300 response - reinitializing communication")
 				}
-				
+
 				// We need to unlock before calling StartDiscovery to avoid deadlock
 				p.Unlock()
 				err = p.StartDiscovery(100)
 				p.Lock() // Re-acquire the lock
-				
+
 				if err != nil {
 					lastErr = fmt.Errorf("failed to reinitialize after 0300: %v", err)
 					break
@@ -718,12 +719,12 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 					time.Sleep(10 * time.Millisecond)
 				}
 				p.Lock() // Re-acquire lock
-				
+
 				if err != nil || len(tags) == 0 {
 					lastErr = fmt.Errorf("failed to detect tag after reinitialization: %v", err)
 					break
 				}
-				
+
 				// Tag should now be activated and present
 				if p.state != statePresent {
 					lastErr = fmt.Errorf("tag not present after reinitialization")
@@ -789,18 +790,18 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 	if p.tags[0].RFProtocol == RFProtocolT2T {
 		// T2T write command: 0xA2 followed by block number and data
 		cmd = make([]byte, 6)
-		cmd[0] = 0xA2                    // T2T WRITE command
-		cmd[1] = byte(address >> 2)      // Convert address to block number (4 bytes per block)
-		copy(cmd[2:], data)              // Copy the data (4 bytes)
+		cmd[0] = 0xA2               // T2T WRITE command
+		cmd[1] = byte(address >> 2) // Convert address to block number (4 bytes per block)
+		copy(cmd[2:], data)         // Copy the data (4 bytes)
 	} else if p.tags[0].RFProtocol == RFProtocolISODEP {
 		// For ISO-DEP, we need to send a different command
 		// The command is: CLA=0x00, INS=0xD6 (UPDATE BINARY), P1=high byte, P2=low byte, Lc=len(data), Data
 		cmd = make([]byte, 5+len(data))
-		cmd[0] = 0x00  // CLA
-		cmd[1] = 0xD6  // INS (UPDATE BINARY)
-		cmd[2] = byte(address >> 8)    // P1 (high byte of address)
-		cmd[3] = byte(address & 0xFF)  // P2 (low byte of address)
-		cmd[4] = byte(len(data))       // Lc (length of data)
+		cmd[0] = 0x00                 // CLA
+		cmd[1] = 0xD6                 // INS (UPDATE BINARY)
+		cmd[2] = byte(address >> 8)   // P1 (high byte of address)
+		cmd[3] = byte(address & 0xFF) // P2 (low byte of address)
+		cmd[4] = byte(len(data))      // Lc (length of data)
 		copy(cmd[5:], data)
 	} else {
 		return fmt.Errorf("unsupported protocol: %s", p.tags[0].RFProtocol)
@@ -808,8 +809,8 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 
 	// Send as DATA packet
 	p.txBuf[0] = nciMsgTypeData << nciMsgTypeBit // DATA packet
-	p.txBuf[1] = 0 // Connection ID
-	p.txBuf[2] = byte(len(cmd)) // Payload length
+	p.txBuf[1] = 0                               // Connection ID
+	p.txBuf[2] = byte(len(cmd))                  // Payload length
 	copy(p.txBuf[3:], cmd)
 	p.txSize = 3 + len(cmd)
 
@@ -846,12 +847,12 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 				if p.logCallback != nil {
 					p.logCallback(LogLevelDebug, "Received 0300 response - reinitializing communication")
 				}
-				
+
 				// We need to unlock before calling StartDiscovery to avoid deadlock
 				p.Unlock()
 				err = p.StartDiscovery(100)
 				p.Lock() // Re-acquire the lock
-				
+
 				if err != nil {
 					lastErr = fmt.Errorf("failed to reinitialize after 0300: %v", err)
 					break
@@ -869,12 +870,12 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 					time.Sleep(10 * time.Millisecond)
 				}
 				p.Lock() // Re-acquire lock
-				
+
 				if err != nil || len(tags) == 0 {
 					lastErr = fmt.Errorf("failed to detect tag after reinitialization: %v", err)
 					break
 				}
-				
+
 				// Tag should now be activated and present
 				if p.state != statePresent {
 					lastErr = fmt.Errorf("tag not present after reinitialization")
@@ -909,18 +910,18 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 					lastErr = err
 					break
 				}
-				
+
 				// If we get no response after credit notification, treat it as a communication issue
 				if len(resp) == 0 {
 					if p.logCallback != nil {
 						p.logCallback(LogLevelDebug, "No response after credit notification - reinitializing")
 					}
-					
+
 					// We need to unlock before calling StartDiscovery to avoid deadlock
 					p.Unlock()
 					err = p.StartDiscovery(100)
 					p.Lock() // Re-acquire the lock
-					
+
 					if err != nil {
 						lastErr = fmt.Errorf("failed to reinitialize after credit timeout: %v", err)
 						break
@@ -938,12 +939,12 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 						time.Sleep(10 * time.Millisecond)
 					}
 					p.Lock() // Re-acquire lock
-					
+
 					if err != nil || len(tags) == 0 {
 						lastErr = fmt.Errorf("failed to detect tag after credit timeout: %v", err)
 						break
 					}
-					
+
 					// Tag should now be activated and present
 					if p.state != statePresent {
 						lastErr = fmt.Errorf("tag not present after credit timeout")
@@ -1021,7 +1022,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 				}
 				return nil, fmt.Errorf("write error: %v", err)
 			}
-			
+
 			if n != len(tx) {
 				if i < i2cRetries {
 					time.Sleep(i2cRetryTime)
@@ -1029,7 +1030,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 				}
 				return nil, fmt.Errorf("incomplete write: %d != %d", n, len(tx))
 			}
-			
+
 			break
 		}
 	}
@@ -1123,7 +1124,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 		}
 
 		// Special case: If we sent a data packet (MT=0), expect a notification as response
-		if tx != nil && mt == nciMsgTypeNotification && (tx[0] & 0xE0) == 0 {
+		if tx != nil && mt == nciMsgTypeNotification && (tx[0]&0xE0) == 0 {
 			return p.rxBuf[:totalLen], nil
 		}
 
