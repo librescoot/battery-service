@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"battery-service/nfc/hal"
 
@@ -24,6 +25,7 @@ func NewService(config *ServiceConfig, logger *log.Logger, debugMode bool) (*Ser
 		vehicleState:          "", // Will be fetched
 		cbBatteryCharge:       -1, // Indicates unknown
 		cbBatteryPollStopChan: make(chan struct{}),
+		lastHALReinit:         [2]time.Time{time.Now(), time.Now()}, // Initialize with current time
 	}
 
 	// Initialize Redis client
@@ -52,10 +54,12 @@ func NewService(config *ServiceConfig, logger *log.Logger, debugMode bool) (*Ser
 // createReader creates a new battery reader instance
 func (s *Service) createReader(index int, config *BatteryConfig) (*BatteryReader, error) {
 	reader := &BatteryReader{
-		index:    index,
-		config:   config,
-		service:  s,
-		stopChan: make(chan struct{}),
+		index:                   index,
+		config:                  config,
+		service:                 s,
+		stopChan:                make(chan struct{}),
+		lastReinitialization:    time.Now(), // Initialize with current time
+		batteryRemovedThreshold: 5,          // Default value - could be configurable
 	}
 
 	// Create NFC HAL

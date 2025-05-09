@@ -51,6 +51,7 @@ type PN7150 struct {
 	sync.Mutex
 	state           state
 	fd              int
+	devicePath      string // Store the actual device path
 	logCallback     LogCallback
 	app             interface{}
 	txBuf           [256]byte
@@ -64,6 +65,7 @@ type PN7150 struct {
 	debug           bool
 	paramWriteTry   uint
 	paramWriteTries uint
+	lastReinitTime  time.Time // Track when the HAL was last reinitialized
 }
 
 func NewPN7150(devName string, logCallback LogCallback, app interface{}, standbyEnabled, lpcdEnabled bool, debugMode bool) (*PN7150, error) {
@@ -74,6 +76,7 @@ func NewPN7150(devName string, logCallback LogCallback, app interface{}, standby
 
 	hal := &PN7150{
 		fd:              fd,
+		devicePath:      devName, // Store the device path
 		logCallback:     logCallback,
 		app:             app,
 		rxBuf:           make([]byte, nciBufferSize),
@@ -103,9 +106,9 @@ func (p *PN7150) logNCI(buf []byte, size int, direction string) {
 // Initialize implements HAL.Initialize
 func (p *PN7150) Initialize() error {
 	p.Lock()
-	defer p.Unlock()
 
 	if p.state != stateUninitialized {
+		p.Unlock()
 		return fmt.Errorf("invalid state for initialization: %s", p.state)
 	}
 
@@ -115,7 +118,8 @@ func (p *PN7150) Initialize() error {
 	}
 
 	// Power on the device
-	if err := p.setPower(true); err != nil {
+	if err := p.SetPower(true); err != nil {
+		p.Unlock()
 		return fmt.Errorf("failed to power on device: %v", err)
 	}
 
@@ -126,6 +130,7 @@ func (p *PN7150) Initialize() error {
 	resetCmd := buildCoreReset()
 	resp, err := p.transfer(resetCmd)
 	if err != nil {
+		p.Unlock()
 		return fmt.Errorf("core reset failed: %v", err)
 	}
 
@@ -136,6 +141,7 @@ func (p *PN7150) Initialize() error {
 	initCmd := buildCoreInit()
 	resp, err = p.transfer(initCmd)
 	if err != nil {
+		p.Unlock()
 		return fmt.Errorf("core init failed: %v", err)
 	}
 
@@ -159,6 +165,7 @@ func (p *PN7150) Initialize() error {
 	}
 	resp, err = p.transfer(propActCmd)
 	if err != nil {
+		p.Unlock()
 		return fmt.Errorf("proprietary activation failed: %v", err)
 	}
 
@@ -189,15 +196,18 @@ func (p *PN7150) Initialize() error {
 
 		resp, err = p.transfer(configCmd)
 		if err != nil {
+			p.Unlock()
 			return fmt.Errorf("parameter configuration failed: %v", err)
 		}
 
 		nciResp, err := parseNCIResponse(resp)
 		if err != nil {
+			p.Unlock()
 			return fmt.Errorf("failed to parse parameter response: %v", err)
 		}
 
 		if !isSuccessResponse(nciResp) {
+			p.Unlock()
 			return fmt.Errorf("parameter configuration failed with status: %02x", nciResp.Status)
 		}
 	}
@@ -257,15 +267,18 @@ func (p *PN7150) Initialize() error {
 	// Send CORE_SET_CONFIG command
 	resp, err = p.transfer(configCmd)
 	if err != nil {
+		p.Unlock()
 		return fmt.Errorf("RF transitions configuration failed: %v", err)
 	}
 
 	nciResp, err := parseNCIResponse(resp)
 	if err != nil {
+		p.Unlock()
 		return fmt.Errorf("failed to parse RF transitions response: %v", err)
 	}
 
 	if !isSuccessResponse(nciResp) {
+		p.Unlock()
 		return fmt.Errorf("RF transitions configuration failed with status: %02x", nciResp.Status)
 	}
 
@@ -274,26 +287,45 @@ func (p *PN7150) Initialize() error {
 
 	resp, err = p.transfer(mapCmd)
 	if err != nil {
+		p.Unlock()
 		return fmt.Errorf("RF discover map failed: %v", err)
 	}
 
 	nciResp, err = parseNCIResponse(resp)
 	if err != nil {
+		p.Unlock()
 		return fmt.Errorf("failed to parse RF discover map response: %v", err)
 	}
 
 	if !isSuccessResponse(nciResp) {
+		p.Unlock()
 		return fmt.Errorf("RF discover map failed with status: %02x", nciResp.Status)
 	}
 
-	p.state = stateIdle
+	// Set lastReinitTime during initialization to match behavior of FullReinitialize
+	p.lastReinitTime = time.Now()
 
-	// Release the mutex before starting discovery
+	p.state = stateIdle
 	p.Unlock()
+
+	// Start discovery without holding the lock
 	err = p.StartDiscovery(100)
-	p.Lock() // Re-acquire the mutex
 	if err != nil {
 		return fmt.Errorf("failed to start discovery after initialization: %v", err)
+	}
+
+	// After successful Initialize(), wait briefly for a tag to be rediscovered so callers don't
+	// immediately fail with "Discovering" state. We poll DetectTags for up to 1 s.
+	// Give the tag a brief moment to be rediscovered so that higher-level write/read operations
+	// executed right after re-init don't fail with "Discovering" state.  We poll DetectTags for
+	// up to ~1 second in a non-blocking loop.
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if tags, _ := p.DetectTags(); len(tags) > 0 {
+			break // tag back in Present state
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	return nil
@@ -307,8 +339,8 @@ func boolToByte(b bool) byte {
 	return 0
 }
 
-// setPower controls the device power state through IOCTL
-func (p *PN7150) setPower(on bool) error {
+// SetPower controls the device power state through IOCTL
+func (p *PN7150) SetPower(on bool) error {
 	if p.fd < 0 {
 		return nil
 	}
@@ -460,6 +492,11 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 	p.Lock()
 	defer p.Unlock()
 
+	// We used to attempt "enhanced" post-reinitialisation tricks here (fast polling,
+	// forced discovery restarts, etc.).  Those paths added complexity without
+	// improving reliability, so they have been removed – we now perform a
+	// single passive read and, if nothing is available, just return.
+
 	// Read any pending notifications
 	resp, err := p.transfer(nil)
 	if err != nil {
@@ -531,6 +568,8 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 			}
 			p.tags[p.numTags] = tag
 			p.numTags++
+
+			// Extra log info after reinitialization
 			if p.logCallback != nil {
 				p.logCallback(LogLevelDebug, fmt.Sprintf("Tag discovered: protocol=%s, uid_len=%d, uid=%X", tag.RFProtocol, len(tag.ID), tag.ID))
 			}
@@ -557,6 +596,7 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 		p.numTags = 1
 		p.tags[0] = *tag
 		p.tagSelected = true
+
 		return []Tag{*tag}, nil
 
 	case nciRFDeactivateOID:
@@ -577,6 +617,61 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 	return nil, nil
 }
 
+// FullReinitialize completely reinitializes the PN7150 HAL from scratch
+// This should be called when communication is severely broken and
+// simple discovery restarts don't resolve the issue
+// Caller must NOT hold the lock when calling this
+func (p *PN7150) FullReinitialize() error {
+	// Fast path: if we are already in the middle of an initialization or are
+	// uninitialized there is nothing for us to do – just return.
+	p.Lock()
+	if p.state == stateInitializing || p.state == stateUninitialized {
+		p.Unlock()
+		return nil
+	}
+
+	if p.logCallback != nil {
+		p.logCallback(LogLevelInfo, "Performing simplified HAL reinitialization")
+	}
+
+	// Remember the device path and close the current file descriptor (if any).
+	devicePath := p.devicePath
+	if p.fd >= 0 {
+		unix.Close(p.fd)
+		p.fd = -1
+	}
+
+	// Reset the internal state so that a fresh call to Initialize() can run.
+	p.state = stateUninitialized
+	p.numTags = 0
+	p.tagSelected = false
+	p.Unlock()
+
+	// Re-open the device.
+	fd, err := unix.Open(devicePath, unix.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("failed to reopen NFC device: %w", err)
+	}
+
+	// Store the new file descriptor.
+	p.Lock()
+	p.fd = fd
+	p.Unlock()
+
+	// Re-run the normal initialization sequence that is already proven to
+	// work at start-up.  All state transitions and discovery start are
+	// handled inside Initialize().
+	if err := p.Initialize(); err != nil {
+		return fmt.Errorf("reinitialization failed: %w", err)
+	}
+
+	if p.logCallback != nil {
+		p.logCallback(LogLevelInfo, "HAL reinitialization completed successfully")
+	}
+
+	return nil
+}
+
 // ReadBinary implements HAL.ReadBinary
 func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 	p.Lock()
@@ -591,14 +686,17 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 		return nil, fmt.Errorf("no valid tag present")
 	}
 
+	// Save tag info before potentially releasing lock
+	protocol := p.tags[0].RFProtocol
+
 	var cmd []byte
-	if p.tags[0].RFProtocol == RFProtocolT2T {
+	if protocol == RFProtocolT2T {
 		// T2T read command: 0x30 followed by block number
 		cmd = []byte{0x30, byte(address >> 2)} // Convert address to block number (4 bytes per block)
-	} else if p.tags[0].RFProtocol == RFProtocolISODEP {
+	} else if protocol == RFProtocolISODEP {
 		cmd = []byte{0x00, 0xB0, byte(address >> 8), byte(address & 0xFF), 0x02}
 	} else {
-		return nil, fmt.Errorf("unsupported protocol: %s", p.tags[0].RFProtocol)
+		return nil, fmt.Errorf("unsupported protocol: %s", protocol)
 	}
 
 	// Send as DATA packet
@@ -617,6 +715,7 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 	// Add retries for RF frame corruption errors
 	const maxRFRetries = 3
 	var lastErr error
+	consecutive0300Errors := 0
 
 	for retry := 0; retry < maxRFRetries; retry++ {
 		resp, err := p.transfer(p.txBuf[:p.txSize])
@@ -647,93 +746,64 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 				// If we get no response after credit notification, treat it as a communication issue
 				if len(resp) == 0 {
 					if p.logCallback != nil {
-						p.logCallback(LogLevelDebug, "No response after credit notification - reinitializing")
+						p.logCallback(LogLevelDebug, "No response after credit notification – performing full HAL reinitialization")
 					}
 
-					// We need to unlock before calling StartDiscovery to avoid deadlock
+					// Release lock before reinitialization
 					p.Unlock()
-					err = p.StartDiscovery(100)
-					p.Lock() // Re-acquire the lock
+					err = p.FullReinitialize()
+					p.Lock()
 
 					if err != nil {
-						lastErr = fmt.Errorf("failed to reinitialize after credit timeout: %v", err)
-						break
+						lastErr = fmt.Errorf("failed full reinitialization: %v", err)
+					} else {
+						lastErr = fmt.Errorf("performed full HAL reinitialization after credit timeout")
 					}
-
-					// Wait for tag to be rediscovered and activated
-					p.Unlock() // Release lock while waiting for discovery
-					deadline := time.Now().Add(100 * time.Millisecond)
-					var tags []Tag
-					for time.Now().Before(deadline) {
-						tags, err = p.DetectTags()
-						if err == nil && len(tags) > 0 {
-							break
-						}
-						time.Sleep(10 * time.Millisecond)
-					}
-					p.Lock() // Re-acquire lock
-
-					if err != nil || len(tags) == 0 {
-						lastErr = fmt.Errorf("failed to detect tag after credit timeout: %v", err)
-						break
-					}
-
-					// Tag should now be activated and present
-					if p.state != statePresent {
-						lastErr = fmt.Errorf("tag not present after credit timeout")
-						break
-					}
-
-					lastErr = fmt.Errorf("reinitialized after credit timeout")
 					break
 				}
 				continue
 			}
 
-			// Check for special response codes
+			// Check for special response codes - critical error 0300
 			if len(resp) >= 5 && resp[3] == 0x03 && resp[4] == 0x00 {
 				// Got 0300 response - need to reinitialize
 				if p.logCallback != nil {
 					p.logCallback(LogLevelDebug, "Received 0300 response - reinitializing communication")
 				}
 
-				// We need to unlock before calling StartDiscovery to avoid deadlock
-				p.Unlock()
-				err = p.StartDiscovery(100)
-				p.Lock() // Re-acquire the lock
+				consecutive0300Errors++
+				if consecutive0300Errors >= 2 {
+					// Multiple 0300 errors in a row - do full reinitialization
+					if p.logCallback != nil {
+						p.logCallback(LogLevelWarning, fmt.Sprintf("Multiple 0300 errors (%d) - performing full HAL reinitialization", consecutive0300Errors))
+					}
 
-				if err != nil {
-					lastErr = fmt.Errorf("failed to reinitialize after 0300: %v", err)
-					break
-				}
+					// Release lock before full reinitialization
+					p.Unlock()
+					err = p.FullReinitialize()
+					// Re-acquire lock
+					p.Lock()
 
-				// Wait for tag to be rediscovered and activated
-				p.Unlock() // Release lock while waiting for discovery
-				deadline := time.Now().Add(500 * time.Millisecond)
-				var tags []Tag
-				for time.Now().Before(deadline) {
-					tags, err = p.DetectTags()
-					if err == nil && len(tags) > 0 {
+					if err != nil {
+						lastErr = fmt.Errorf("failed full reinitialization: %v", err)
 						break
 					}
-					time.Sleep(10 * time.Millisecond)
-				}
-				p.Lock() // Re-acquire lock
 
-				if err != nil || len(tags) == 0 {
-					lastErr = fmt.Errorf("failed to detect tag after reinitialization: %v", err)
+					// Even after full reinitialization, we can't continue with this read
+					lastErr = fmt.Errorf("aborted read after full HAL reinitialization")
 					break
 				}
 
-				// Tag should now be activated and present
-				if p.state != statePresent {
-					lastErr = fmt.Errorf("tag not present after reinitialization")
-					break
-				}
+				// First 0300 error – immediately perform full reinitialization
+				p.Unlock()
+				err = p.FullReinitialize()
+				p.Lock()
 
-				// Small delay to let the tag stabilize
-				time.Sleep(10 * time.Millisecond)
-				lastErr = fmt.Errorf("reinitialized after 0300")
+				if err != nil {
+					lastErr = fmt.Errorf("failed full reinitialization: %v", err)
+				} else {
+					lastErr = fmt.Errorf("performed full HAL reinitialization after first 0300 error")
+				}
 				break
 			}
 
@@ -786,14 +856,17 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 		return fmt.Errorf("no valid tag present")
 	}
 
+	// Save tag info before potentially releasing lock
+	protocol := p.tags[0].RFProtocol
+
 	var cmd []byte
-	if p.tags[0].RFProtocol == RFProtocolT2T {
+	if protocol == RFProtocolT2T {
 		// T2T write command: 0xA2 followed by block number and data
 		cmd = make([]byte, 6)
 		cmd[0] = 0xA2               // T2T WRITE command
 		cmd[1] = byte(address >> 2) // Convert address to block number (4 bytes per block)
 		copy(cmd[2:], data)         // Copy the data (4 bytes)
-	} else if p.tags[0].RFProtocol == RFProtocolISODEP {
+	} else if protocol == RFProtocolISODEP {
 		// For ISO-DEP, we need to send a different command
 		// The command is: CLA=0x00, INS=0xD6 (UPDATE BINARY), P1=high byte, P2=low byte, Lc=len(data), Data
 		cmd = make([]byte, 5+len(data))
@@ -804,7 +877,7 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 		cmd[4] = byte(len(data))      // Lc (length of data)
 		copy(cmd[5:], data)
 	} else {
-		return fmt.Errorf("unsupported protocol: %s", p.tags[0].RFProtocol)
+		return fmt.Errorf("unsupported protocol: %s", protocol)
 	}
 
 	// Send as DATA packet
@@ -823,6 +896,7 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 	// Add retries for RF frame corruption errors
 	const maxRFRetries = 3
 	var lastErr error
+	consecutive0300Errors := 0
 
 	for retry := 0; retry < maxRFRetries; retry++ {
 		resp, err := p.transfer(p.txBuf[:p.txSize])
@@ -848,55 +922,51 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 					p.logCallback(LogLevelDebug, "Received 0300 response - reinitializing communication")
 				}
 
-				// We need to unlock before calling StartDiscovery to avoid deadlock
-				p.Unlock()
-				err = p.StartDiscovery(100)
-				p.Lock() // Re-acquire the lock
+				consecutive0300Errors++
+				if consecutive0300Errors >= 2 {
+					// Multiple 0300 errors in a row - do full reinitialization
+					if p.logCallback != nil {
+						p.logCallback(LogLevelWarning, fmt.Sprintf("Multiple 0300 errors (%d) - performing full HAL reinitialization", consecutive0300Errors))
+					}
 
-				if err != nil {
-					lastErr = fmt.Errorf("failed to reinitialize after 0300: %v", err)
-					break
-				}
+					// Release lock before full reinitialization
+					p.Unlock()
+					err = p.FullReinitialize()
+					// Re-acquire lock
+					p.Lock()
 
-				// Wait for tag to be rediscovered and activated
-				p.Unlock() // Release lock while waiting for discovery
-				deadline := time.Now().Add(500 * time.Millisecond)
-				var tags []Tag
-				for time.Now().Before(deadline) {
-					tags, err = p.DetectTags()
-					if err == nil && len(tags) > 0 {
+					if err != nil {
+						lastErr = fmt.Errorf("failed full reinitialization: %v", err)
 						break
 					}
-					time.Sleep(10 * time.Millisecond)
-				}
-				p.Lock() // Re-acquire lock
 
-				if err != nil || len(tags) == 0 {
-					lastErr = fmt.Errorf("failed to detect tag after reinitialization: %v", err)
+					// Even after full reinitialization, we can't continue with this write
+					lastErr = fmt.Errorf("aborted write after full HAL reinitialization")
 					break
 				}
 
-				// Tag should now be activated and present
-				if p.state != statePresent {
-					lastErr = fmt.Errorf("tag not present after reinitialization")
-					break
-				}
+				// First 0300 error – immediately perform full reinitialization
+				p.Unlock()
+				err = p.FullReinitialize()
+				p.Lock()
 
-				// Small delay to let the tag stabilize
-				time.Sleep(10 * time.Millisecond)
-				lastErr = fmt.Errorf("reinitialized after 0300")
+				if err != nil {
+					lastErr = fmt.Errorf("failed full reinitialization: %v", err)
+				} else {
+					lastErr = fmt.Errorf("performed full HAL reinitialization after first 0300 error")
+				}
 				break
 			}
 
 			// For T2T, we expect an ACK (0x0A) response
-			if p.tags[0].RFProtocol == RFProtocolT2T {
+			if protocol == RFProtocolT2T {
 				if len(resp) >= 4 && resp[3] == 0x0A {
 					return nil
 				}
 			}
 
 			// For ISO-DEP, check the response status
-			if p.tags[0].RFProtocol == RFProtocolISODEP {
+			if protocol == RFProtocolISODEP {
 				if len(resp) >= 5 && resp[3] == 0x90 && resp[4] == 0x00 {
 					return nil
 				}
@@ -914,44 +984,19 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 				// If we get no response after credit notification, treat it as a communication issue
 				if len(resp) == 0 {
 					if p.logCallback != nil {
-						p.logCallback(LogLevelDebug, "No response after credit notification - reinitializing")
+						p.logCallback(LogLevelDebug, "No response after credit notification – performing full HAL reinitialization")
 					}
 
-					// We need to unlock before calling StartDiscovery to avoid deadlock
+					// Release lock before reinitialization
 					p.Unlock()
-					err = p.StartDiscovery(100)
-					p.Lock() // Re-acquire the lock
+					err = p.FullReinitialize()
+					p.Lock()
 
 					if err != nil {
-						lastErr = fmt.Errorf("failed to reinitialize after credit timeout: %v", err)
-						break
+						lastErr = fmt.Errorf("failed full reinitialization: %v", err)
+					} else {
+						lastErr = fmt.Errorf("performed full HAL reinitialization after credit timeout")
 					}
-
-					// Wait for tag to be rediscovered and activated
-					p.Unlock() // Release lock while waiting for discovery
-					deadline := time.Now().Add(200 * time.Millisecond)
-					var tags []Tag
-					for time.Now().Before(deadline) {
-						tags, err = p.DetectTags()
-						if err == nil && len(tags) > 0 {
-							break
-						}
-						time.Sleep(10 * time.Millisecond)
-					}
-					p.Lock() // Re-acquire lock
-
-					if err != nil || len(tags) == 0 {
-						lastErr = fmt.Errorf("failed to detect tag after credit timeout: %v", err)
-						break
-					}
-
-					// Tag should now be activated and present
-					if p.state != statePresent {
-						lastErr = fmt.Errorf("tag not present after credit timeout")
-						break
-					}
-
-					lastErr = fmt.Errorf("reinitialized after credit timeout")
 					break
 				}
 				continue
@@ -1124,7 +1169,8 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 		}
 
 		// Special case: If we sent a data packet (MT=0), expect a notification as response
-		if tx != nil && mt == nciMsgTypeNotification && (tx[0]&0xE0) == 0 {
+		// Make sure tx is not nil and has at least 1 element before accessing tx[0]
+		if tx != nil && len(tx) > 0 && mt == nciMsgTypeNotification && (tx[0]&0xE0) == 0 {
 			return p.rxBuf[:totalLen], nil
 		}
 

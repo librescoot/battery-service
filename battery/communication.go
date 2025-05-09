@@ -512,8 +512,77 @@ func (r *BatteryReader) readCommandRegisterWithTimeout(ctx context.Context, time
 // This is used to recover from deep NFC communication issues.
 func (r *BatteryReader) recreateHAL(ctx context.Context) error {
 	r.logCallback(hal.LogLevelInfo, "Attempting to recreate HAL instance due to persistent communication issues.")
+
+	// Update reinitialization timestamp immediately on entry to prevent false absences
+	// This gives the reader time to complete HAL recreation before absence detection kicks in
+	currentTime := time.Now()
+	r.Lock()
+	r.lastReinitialization = currentTime
+	r.Unlock()
+
+	// Also update service-level timestamp
+	r.service.Lock()
+	if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
+		r.service.lastHALReinit[r.index] = currentTime
+		r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Updated service reinitialization timestamp at start: %v", currentTime))
+	}
+	r.service.Unlock()
+
+	// First, acquire the mutex to ensure exclusive access
 	r.nfcMutex.Lock()
-	defer r.nfcMutex.Unlock()
+
+	// Track whether we've released the mutex explicitly for FullReinitialize
+	mutexReleased := false
+
+	// Make sure to release the mutex if we haven't done so explicitly by the end of the function
+	defer func() {
+		if !mutexReleased {
+			r.nfcMutex.Unlock()
+		}
+	}()
+
+	// Mark reinitialization time right at the beginning to ensure it's captured
+	r.Lock()
+	r.lastReinitialization = currentTime
+	r.service.Lock()
+	if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
+		r.service.lastHALReinit[r.index] = currentTime
+	}
+	r.service.Unlock()
+	r.Unlock()
+
+	// Try to use fullReinitialize if the HAL implementation supports it
+	if pn7150, ok := r.hal.(*hal.PN7150); ok {
+		r.logCallback(hal.LogLevelDebug, "Using PN7150 full reinitialization method...")
+
+		// Unlock for fullReinitialize operation which acquires its own locks
+		r.nfcMutex.Unlock()
+		mutexReleased = true
+
+		err := pn7150.FullReinitialize()
+		if err != nil {
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("PN7150 reinitialization failed: %v", err))
+			return err
+		}
+
+		// Update the last reinitialization timestamp and log.
+		newTimestamp := time.Now()
+		r.Lock()
+		r.lastReinitialization = newTimestamp
+		r.Unlock()
+		r.service.Lock()
+		if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
+			r.service.lastHALReinit[r.index] = newTimestamp
+		}
+		r.service.Unlock()
+
+		r.logCallback(hal.LogLevelInfo, "PN7150 reinitialization successful – waiting for normal tag detection flow to resume.")
+
+		return nil
+	}
+
+	// Traditional HAL recreation approach
+	r.logCallback(hal.LogLevelInfo, "Using traditional HAL recreation approach")
 
 	// De-initialize the old HAL instance first (best effort)
 	if r.hal != nil {
@@ -538,6 +607,36 @@ func (r *BatteryReader) recreateHAL(ctx context.Context) error {
 		// Even if init fails, we have a new r.hal. Subsequent operations will fail if it's bad.
 		return fmt.Errorf("failed to initialize new HAL instance: %w", errInit)
 	}
+
+	// Update the reinitialization timestamp for the traditional approach as well
+	traditionalTimestamp := time.Now()
+	r.Lock()
+	r.lastReinitialization = traditionalTimestamp
+	r.service.Lock()
+	if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
+		r.service.lastHALReinit[r.index] = traditionalTimestamp
+	}
+	r.service.Unlock()
+	r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Updated reinitialization timestamp after traditional init: %v", traditionalTimestamp))
+	r.Unlock()
+
+	// Force timestamps to be visible to absence detection
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		postInitTime := time.Now()
+
+		r.Lock()
+		r.lastReinitialization = postInitTime
+		r.Unlock()
+
+		r.service.Lock()
+		if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
+			r.service.lastHALReinit[r.index] = postInitTime
+		}
+		r.service.Unlock()
+
+		r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Rebroadcast reinitialization timestamp after traditional init: %v", postInitTime))
+	}()
 
 	r.logCallback(hal.LogLevelInfo, "New HAL instance successfully created and initialized.")
 	return nil

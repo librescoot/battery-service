@@ -12,6 +12,7 @@ import (
 func (r *BatteryReader) Start() error {
 	// Enable the reader by default
 	r.enabled = true
+	r.batteryRemovedThreshold = 5 // At least 5 consecutive absences before battery is considered removed
 
 	// Initialize NFC HAL
 	if err := r.hal.Initialize(); err != nil {
@@ -296,6 +297,9 @@ func (r *BatteryReader) handleTagPresent() {
 	const maxInsertionRetries = 3
 	r.Lock()
 
+	// Reset the consecutive absence counter when tag is detected
+	r.consecutiveTagAbsences = 0
+
 	if !r.data.Present {
 		r.data.Present = true // Mark as present immediately
 		r.justInserted = true
@@ -410,15 +414,84 @@ func (r *BatteryReader) handleTagAbsent() {
 	r.Lock()
 	defer r.Unlock()
 
+	// Check if battery was previously present
 	if r.data.Present {
-		r.logCallback(hal.LogLevelInfo, "Battery removed")
-		r.data = BatteryData{} // Clear data
-		r.justInserted = false
-		r.justOpened = false
+		// Increment the consecutive absence counter
+		r.consecutiveTagAbsences++
 
-		// Update Redis to reflect the battery is no longer present
-		if err := r.updateRedisStatus(); err != nil {
-			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after battery removal: %v", err))
+		// Check for recent reinitializations using both local and service-level timestamps
+		recentReinitThreshold := 30 * time.Second // Increased from 15 seconds to 30 seconds
+
+		// Get the reader's local reinitialization time
+		localReinitTime := r.lastReinitialization
+
+		// Get the service-level reinitialization time for this reader
+		var serviceReinitTime time.Time
+		r.service.Lock()
+		if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
+			serviceReinitTime = r.service.lastHALReinit[r.index]
+		}
+		r.service.Unlock()
+
+		// Debug timestamps to help diagnose issues
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Reinitialization times: Local: %v ago, Service: %v ago",
+			time.Since(localReinitTime).Round(time.Second),
+			time.Since(serviceReinitTime).Round(time.Second)))
+
+		// Use the most recent timestamp between local and service
+		effectiveReinitTime := localReinitTime
+		if serviceReinitTime.After(localReinitTime) {
+			effectiveReinitTime = serviceReinitTime
+		}
+
+		recentlyReinitialized := time.Since(effectiveReinitTime) < recentReinitThreshold
+
+		// Add more diagnostic logging
+		if recentlyReinitialized {
+			r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Recent HAL reinitialization detected (%v ago). Local: %v, Service: %v",
+				time.Since(effectiveReinitTime).Round(time.Second),
+				time.Since(localReinitTime).Round(time.Second),
+				time.Since(serviceReinitTime).Round(time.Second)))
+		}
+
+		// Force recentlyReinitialized to true if we did a full HAL init in the last 30 seconds
+		// This is a safety check to make sure the threshold timing didn't mess up
+		if !recentlyReinitialized &&
+			(time.Since(localReinitTime) < 30*time.Second || time.Since(serviceReinitTime) < 30*time.Second) {
+			r.logCallback(hal.LogLevelWarning, "Forcing reinitialization flag to true based on raw timestamps")
+			recentlyReinitialized = true
+		}
+
+		// Log the absence but be more cautious about declaring the battery removed
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Tag absence detected (%d/%d). Recent reinitialization: %v",
+			r.consecutiveTagAbsences, r.batteryRemovedThreshold, recentlyReinitialized))
+
+		// If we've recently reinitialized, use a much higher threshold
+		effectiveThreshold := r.batteryRemovedThreshold
+		if recentlyReinitialized {
+			effectiveThreshold *= 5 // Increase threshold multiplier from 3 to 5
+			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Using increased absence threshold (%d) due to recent HAL reinitialization",
+				effectiveThreshold))
+
+			// If very recent reinitialization (within 10 seconds), reset the counter
+			if time.Since(effectiveReinitTime) < 10*time.Second {
+				r.logCallback(hal.LogLevelInfo, "Very recent reinitialization, resetting absence counter")
+				r.consecutiveTagAbsences = 1 // Reset to 1 to still increment but avoid many rapid resets
+			}
+		}
+
+		// Only mark as removed if consistently absent for a while
+		if r.consecutiveTagAbsences >= effectiveThreshold {
+			r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery removed after %d consecutive absences", r.consecutiveTagAbsences))
+			r.data = BatteryData{} // Clear data
+			r.justInserted = false
+			r.justOpened = false
+			r.consecutiveTagAbsences = 0 // Reset counter
+
+			// Update Redis to reflect the battery is no longer present
+			if err := r.updateRedisStatus(); err != nil {
+				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after battery removal: %v", err))
+			}
 		}
 	}
 }
