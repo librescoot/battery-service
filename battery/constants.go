@@ -14,7 +14,7 @@ const (
 	addrSession = 0x03B0
 
 	// Timing constants
-	timeHeartbeatIntervalScooter    = 1 * time.Second        // Interval for ScooterHeartbeat when present (Changed from 400ms)
+	timeHeartbeatIntervalScooter    = 5 * time.Second        // Interval for ScooterHeartbeat when present
 	timeHeartbeatTimeoutScooter     = 800 * time.Millisecond // Timeout for battery's internal safety check
 	timeReadyToScootTimeout         = 350 * time.Millisecond // Max time to wait for BatteryReadyToScoot response
 	timePeriodicOnInterval          = 3 * time.Second        // Interval to send BatteryOn when seatbox closed
