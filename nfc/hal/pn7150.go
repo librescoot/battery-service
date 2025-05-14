@@ -169,6 +169,20 @@ func (p *PN7150) Initialize() error {
 		return fmt.Errorf("proprietary activation failed: %v", err)
 	}
 
+	time.Sleep(30 * time.Millisecond)
+
+	propPowerCmd := []byte{
+		0x2F,
+		0x00,
+		0x01,
+		0x01,
+	}
+	resp, err = p.transfer(propPowerCmd)
+	if err != nil {
+		p.Unlock()
+		return fmt.Errorf("proprietary power setting failed: %v", err)
+	}
+
 	// Set initial parameters
 	type nciParam struct {
 		id    uint16
@@ -178,6 +192,7 @@ func (p *PN7150) Initialize() error {
 	params := []nciParam{
 		{0xA003, []byte{0x08}},             // CLOCK_SEL_CFG: 27.12 MHz crystal
 		{0xA00E, []byte{0x02, 0x09, 0x00}}, // PMU_CFG
+		{0xA040, []byte{0x01}},
 	}
 
 	// Set each parameter
@@ -417,10 +432,43 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 		return fmt.Errorf("RF deactivate failed with status: %02x", nciResp.Status)
 	}
 
-	// Set poll period
 	if pollPeriod > 2750 {
 		return fmt.Errorf("invalid poll period: %d", pollPeriod)
 	}
+
+	p.logCallback(LogLevelDebug, fmt.Sprintf("StartDiscovery: poll_period=%dms", pollPeriod))
+
+	totalDurationPayload := []byte{
+		byte(pollPeriod & 0xFF),        // LSB
+		byte((pollPeriod >> 8) & 0xFF), // MSB
+	}
+	p.logCallback(LogLevelDebug, fmt.Sprintf("Setting TOTAL_DURATION (0x0000) to %X (%d ms)", totalDurationPayload, pollPeriod))
+	totalDurationConfigCmd := []byte{
+		(nciMsgTypeCommand << nciMsgTypeBit) | nciGroupCore, // 20
+		nciCoreSetConfig,              // 02
+		0x05,                          // Payload length: 1 (NumItems) + 1 (ID) + 1 (Len) + 2 (Value) = 5
+		0x01,                          // Number of Parameter TLVs = 1
+		byte(nciParamIDTotalDuration), // Parameter ID (0x00 for TOTAL_DURATION)
+		0x02,                          // Parameter Length (2 bytes for uint16)
+		totalDurationPayload[0],       // Value LSB
+		totalDurationPayload[1],       // Value MSB
+	}
+	respTotalDuration, errTotalDuration := p.transfer(totalDurationConfigCmd)
+	if errTotalDuration != nil {
+		return fmt.Errorf("failed to set TOTAL_DURATION: %v", errTotalDuration)
+	}
+	nciRespTD, errParseTD := parseNCIResponse(respTotalDuration)
+	if errParseTD != nil || !isSuccessResponse(nciRespTD) {
+		errMsgTD := "set TOTAL_DURATION response error"
+		if errParseTD != nil {
+			errMsgTD += fmt.Sprintf(": %v", errParseTD)
+		}
+		if nciRespTD != nil {
+			errMsgTD += fmt.Sprintf(" (status: %02x)", nciRespTD.Status)
+		}
+		return fmt.Errorf(errMsgTD)
+	}
+	p.logCallback(LogLevelDebug, "TOTAL_DURATION set successfully.")
 
 	// Start RF discovery
 	discoverCmd := buildRFDiscoverCmd(pollPeriod)
