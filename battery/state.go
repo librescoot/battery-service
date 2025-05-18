@@ -77,11 +77,22 @@ func (r *BatteryReader) handleSeatboxState(isOpen bool) {
 		// Heartbeats will stop automatically in the startHeartbeat loop
 		// Battery's internal safety check should stop (battery-side logic)
 
-		// For Battery 0 only: If ready and not already active, send ON command
+		// For Battery 0 only: If ready and not already active, check conditions before sending ON command
 		if r.index == 0 && ready && state != BatteryStateActive {
-			r.logCallback(hal.LogLevelInfo, "Seatbox closed, battery 0 ready. Sending ON command.")
-			// Call activateBattery which now just sends ON
-			r.activateBattery()
+			// Check vehicle state and CB battery charge to decide whether to activate
+			r.service.Lock()
+			vehicleState := r.service.vehicleState
+			cbCharge := r.service.cbBatteryCharge
+			r.service.Unlock()
+
+			// Only activate if not in standby mode or CB charge is below threshold
+			if vehicleState != "stand-by" || (cbCharge >= 0 && cbCharge < cbBatteryActivationThreshold) {
+				r.logCallback(hal.LogLevelInfo, "Seatbox closed, battery 0 ready. Sending ON command.")
+				// Call activateBattery which now just sends ON
+				r.activateBattery()
+			} else {
+				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Seatbox closed, battery 0 ready, but in stand-by mode with CB charge %d%%. Skipping activation.", cbCharge))
+			}
 		}
 	}
 }

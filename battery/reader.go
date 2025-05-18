@@ -12,7 +12,10 @@ import (
 func (r *BatteryReader) Start() error {
 	// Enable the reader by default
 	r.enabled = true
-	r.batteryRemovedThreshold = 5 // At least 5 consecutive absences before battery is considered removed
+	r.batteryRemovedThreshold = 5          // At least 5 consecutive absences before battery is considered removed
+	r.isPoweredDown = false                // Ensure we start with the reader powered up
+	r.zeroTagDetections = 0                // Initialize zero tag detection counter
+	r.consecutiveZeroInitializingCount = 0 // Initialize counter for zero detections while initializing
 
 	// Initialize NFC HAL
 	if err := r.hal.Initialize(); err != nil {
@@ -31,6 +34,20 @@ func (r *BatteryReader) Start() error {
 // Stop stops the battery reader
 func (r *BatteryReader) Stop() {
 	close(r.stopChan)
+
+	// Reset powered down state to ensure final deinitialization works
+	r.Lock()
+	wasPoweredDown := r.isPoweredDown
+	r.isPoweredDown = false
+	r.Unlock()
+
+	// If it was powered down, we need to initialize it first before deinitializing
+	if wasPoweredDown {
+		if err := r.hal.Initialize(); err != nil {
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to initialize HAL during shutdown: %v", err))
+		}
+	}
+
 	r.hal.Deinitialize()
 }
 
@@ -54,11 +71,25 @@ func (r *BatteryReader) monitorTags() {
 	}
 	r.Unlock()
 
+	// Default poll period in milliseconds
+	const defaultPollPeriod uint = 500
+
 	for {
 		select {
 		case <-r.stopChan:
 			return
 		default:
+			// Check if the reader is temporarily powered down
+			r.Lock()
+			isPoweredDown := r.isPoweredDown
+			r.Unlock()
+
+			if isPoweredDown {
+				// Skip tag detection when powered down, use longer sleep to reduce CPU usage
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
 			// Proceed with tag detection
 			r.nfcMutex.Lock()
 			tags, err := r.hal.DetectTags()
@@ -75,11 +106,99 @@ func (r *BatteryReader) monitorTags() {
 			if len(tags) == 1 && (tags[0].RFProtocol == hal.RFProtocolT2T || tags[0].RFProtocol == hal.RFProtocolISODEP) {
 				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Found %s tag with ID: %x", tags[0].RFProtocol, tags[0].ID))
 				r.handleTagPresent() // Handles state change and Redis update
+
+				// Reset zero tag counter when we find a tag
+				r.Lock()
+				r.zeroTagDetections = 0
+				r.Unlock()
 			} else if len(tags) > 1 {
 				r.logCallback(hal.LogLevelWarning, "Multiple tags detected, ignoring")
 				r.handleTagAbsent() // Handles state change and Redis update
+
+				// Reset zero tag counter when we find multiple tags
+				r.Lock()
+				r.zeroTagDetections = 0
+				r.Unlock()
 			} else {
+				// No tags detected
 				r.handleTagAbsent() // Handles state change and Redis update
+
+				// Increment zero tag counter and check if we need to restart discovery
+				r.Lock()
+				r.zeroTagDetections++
+				zeroTagCount := r.zeroTagDetections
+				r.Unlock()
+
+				// Every 5 consecutive zero detections, restart discovery
+				if zeroTagCount >= 5 {
+					r.logCallback(hal.LogLevelInfo, "5 consecutive zero tag detections - restarting discovery")
+
+					r.nfcMutex.Lock()
+					// Get current HAL state
+					halState := r.hal.GetState()
+
+					// Only attempt to restart discovery if HAL is in a valid state
+					if halState == hal.StateInitializing {
+						r.logCallback(hal.LogLevelWarning, "Cannot restart discovery - HAL is still initializing")
+
+						// If initialization has been stuck for some time, try hardware reset
+						if r.consecutiveZeroInitializingCount > 3 {
+							r.logCallback(hal.LogLevelWarning, "HAL stuck in initializing state - attempting hardware reset")
+							r.consecutiveZeroInitializingCount = 0
+							r.nfcMutex.Unlock() // Release mutex before reset
+
+							// Use simple approach to reset the hardware
+							if err := r.forceHardwareReset(); err != nil {
+								r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to reset hardware: %v", err))
+							}
+						} else {
+							r.consecutiveZeroInitializingCount++
+							r.nfcMutex.Unlock()
+						}
+
+						// Reset counter to avoid continuous logging
+						r.Lock()
+						r.zeroTagDetections = 1
+						r.Unlock()
+					} else if halState != hal.StateUninitialized && halState != hal.StateInitializing {
+						// Stop discovery first
+						_ = r.hal.StopDiscovery() // Ignore errors, we'll try to restart anyway
+
+						// Start discovery again
+						if err := r.hal.StartDiscovery(defaultPollPeriod); err != nil {
+							r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to restart discovery: %v", err))
+						} else {
+							r.logCallback(hal.LogLevelInfo, "Successfully restarted discovery")
+						}
+						r.nfcMutex.Unlock()
+
+						// Reset counter
+						r.Lock()
+						r.zeroTagDetections = 0
+						r.Unlock()
+					} else {
+						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Cannot restart discovery - HAL in state: %s", halState))
+						r.nfcMutex.Unlock()
+
+						// Deinitialize the existing HAL
+						r.nfcMutex.Lock()
+						r.hal.Deinitialize()
+						r.nfcMutex.Unlock()
+
+						time.Sleep(500 * time.Millisecond)
+
+						// Try to recover using the centralized HAL creation function
+						r.logCallback(hal.LogLevelInfo, "Attempting to recover from uninitialized state")
+						if err := r.createNewHAL(); err != nil {
+							r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to create new HAL during recovery: %v", err))
+						}
+
+						// Reset counter
+						r.Lock()
+						r.zeroTagDetections = 0
+						r.Unlock()
+					}
+				}
 			}
 
 			// Always use a short sleep interval to ensure responsiveness for absence detection
@@ -176,19 +295,71 @@ func (r *BatteryReader) startHeartbeat() {
 							if pollLessFrequently {
 								if time.Since(r.lastIdleAsleepPollTime) >= timeMaintPollIdleAsleepInterval {
 									r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery 0: Time for infrequent idle/asleep poll (interval: %s)", timeMaintPollIdleAsleepInterval))
+
+									// Power up the reader if needed before polling
+									r.Lock()
+									if r.isPoweredDown {
+										r.logCallback(hal.LogLevelInfo, "Powering up HAL before low-frequency poll")
+										r.isPoweredDown = false
+										r.Unlock()
+
+										// Deinitialize old HAL
+										r.nfcMutex.Lock()
+										r.hal.Deinitialize()
+										r.nfcMutex.Unlock()
+
+										time.Sleep(200 * time.Millisecond)
+
+										// Use central function to create new HAL
+										if err := r.createNewHAL(); err != nil {
+											r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to create new HAL before low-frequency poll: %v", err))
+											// Skip this polling cycle if we can't create a new HAL
+											r.lastIdleAsleepPollTime = time.Now()
+											continue
+										}
+
+										r.logCallback(hal.LogLevelInfo, "HAL powered up and initialized successfully for polling")
+									} else {
+										r.Unlock()
+									}
+
+									// Check state after powering up the HAL
 									if !r.checkStateCorrectAfterRead(expectedState) {
 										// State is incorrect, attempt recovery
 										r.logCallback(hal.LogLevelWarning, "Battery 0: State incorrect after ON/OFF (infrequent poll), attempting recovery...")
-										if errRec := r.recreateHAL(r.service.ctx); errRec != nil {
-											r.logCallback(hal.LogLevelError, fmt.Sprintf("Battery 0: HAL reinitialization failed during infrequent poll recovery: %v", errRec))
+
+										// Deinitialize current HAL
+										r.nfcMutex.Lock()
+										r.hal.Deinitialize()
+										r.nfcMutex.Unlock()
+
+										time.Sleep(200 * time.Millisecond)
+
+										// Use central function to create new HAL
+										if err := r.createNewHAL(); err != nil {
+											r.logCallback(hal.LogLevelError, fmt.Sprintf("Battery 0: HAL recovery failed: %v", err))
 										} else {
-											// Give newly initialized reader a short moment to settle
-											time.Sleep(500 * time.Millisecond)
+											r.logCallback(hal.LogLevelInfo, "Battery 0: HAL recreated successfully for recovery")
 										}
 									} else {
 										r.logCallback(hal.LogLevelDebug, "Battery 0: Idle/asleep state correct (infrequent poll), waiting for next infrequent poll cycle.")
 									}
+
 									r.lastIdleAsleepPollTime = time.Now()
+
+									// Power down the reader after polling until next cycle
+									r.Lock()
+									if !r.isPoweredDown && r.data.Present && (r.data.State == BatteryStateIdle || r.data.State == BatteryStateAsleep) {
+										r.logCallback(hal.LogLevelInfo, "Powering down HAL until next low-frequency polling cycle")
+										r.Unlock()
+
+										// Safely deinitialize the HAL
+										if err := r.safelyPowerDownHAL(); err != nil {
+											r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to power down HAL: %v", err))
+										}
+									} else {
+										r.Unlock()
+									}
 								} else {
 									r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery 0: Expecting idle/asleep, waiting for next infrequent poll interval (last poll: %s, next in: %s)", r.lastIdleAsleepPollTime.Format(time.RFC3339), r.lastIdleAsleepPollTime.Add(timeMaintPollIdleAsleepInterval).Sub(time.Now()).Round(time.Second)))
 								}
@@ -197,10 +368,32 @@ func (r *BatteryReader) startHeartbeat() {
 								if !r.checkStateCorrectAfterRead(expectedState) {
 									// State is incorrect, attempt recovery
 									r.logCallback(hal.LogLevelWarning, "Battery 0: State incorrect after ON/OFF – performing HAL reinitialization")
-									if err := r.recreateHAL(r.service.ctx); err != nil {
-										r.logCallback(hal.LogLevelError, fmt.Sprintf("Battery 0: HAL reinitialization failed during maint recovery: %v", err))
+									r.logCallback(hal.LogLevelWarning, "Attempting HAL recreation.")
+
+									// Use simple deinitialize/initialize approach
+									r.nfcMutex.Lock()
+									r.hal.Deinitialize()
+									r.nfcMutex.Unlock()
+
+									time.Sleep(500 * time.Millisecond)
+
+									r.nfcMutex.Lock()
+									errInit := r.hal.Initialize()
+									r.nfcMutex.Unlock()
+
+									if errInit != nil {
+										r.logCallback(hal.LogLevelError, fmt.Sprintf("Battery 0: HAL reinitialization failed during maint recovery: %v", errInit))
 									} else {
-										time.Sleep(500 * time.Millisecond)
+										// Update timestamp
+										currentTime := time.Now()
+										r.Lock()
+										r.lastReinitialization = currentTime
+										r.Unlock()
+										r.service.Lock()
+										if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
+											r.service.lastHALReinit[r.index] = currentTime
+										}
+										r.service.Unlock()
 									}
 								} else {
 									// State is correct, wait for next tick (wait_update equivalent)
@@ -383,10 +576,21 @@ func (r *BatteryReader) handleTagPresent() {
 
 		r.Unlock() // Unlock before potentially calling activateBattery
 
-		// If seatbox is already closed and this is battery 0, activate now
+		// If seatbox is already closed and this is battery 0, check conditions before activating
 		if shouldActivateNow {
-			r.logCallback(hal.LogLevelInfo, "Battery 0 ready and seatbox closed. Activating immediately.")
-			r.activateBattery()
+			// Get vehicle state and CB battery charge to decide whether to activate
+			r.service.Lock()
+			vehicleState := r.service.vehicleState
+			cbCharge := r.service.cbBatteryCharge
+			r.service.Unlock()
+
+			// Only activate immediately if not in standby mode or CB charge is below threshold
+			if vehicleState != "stand-by" || (cbCharge >= 0 && cbCharge < cbBatteryActivationThreshold) {
+				r.logCallback(hal.LogLevelInfo, "Battery 0 ready and seatbox closed. Activating immediately.")
+				r.activateBattery()
+			} else {
+				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery 0 ready and seatbox closed, but in stand-by mode with CB charge %d%%. Skipping immediate activation.", cbCharge))
+			}
 		}
 
 		return // Initial insertion handling complete for this cycle
@@ -517,10 +721,34 @@ func (r *BatteryReader) readBatteryStatus() error {
 			lastMainError = fmt.Errorf("attempt %d: invalid HAL state for reading: %s", attempt, halState)
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("%s. HAL state: %s", lastMainError.Error(), halState))
 			if attempt < maxAttemptsAfterHALRecreation {
-				r.logCallback(hal.LogLevelWarning, "Attempting HAL recreation due to invalid state.")
-				if errRecreate := r.recreateHAL(r.service.ctx); errRecreate != nil {
-					return fmt.Errorf("%w; and failed to recreate HAL: %v", lastMainError, errRecreate)
+				r.logCallback(hal.LogLevelWarning, "Attempting HAL recreation.")
+
+				// Use simple deinitialize/initialize approach
+				r.nfcMutex.Lock()
+				r.hal.Deinitialize()
+				r.nfcMutex.Unlock()
+
+				time.Sleep(500 * time.Millisecond)
+
+				r.nfcMutex.Lock()
+				errInit := r.hal.Initialize()
+				r.nfcMutex.Unlock()
+
+				if errInit != nil {
+					return fmt.Errorf("%w; and failed to initialize HAL: %v", lastMainError, errInit)
 				}
+
+				// Update timestamp
+				currentTime := time.Now()
+				r.Lock()
+				r.lastReinitialization = currentTime
+				r.Unlock()
+				r.service.Lock()
+				if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
+					r.service.lastHALReinit[r.index] = currentTime
+				}
+				r.service.Unlock()
+
 				continue // Retry readBatteryStatus full sequence
 			}
 			return lastMainError // Max attempts reached or other unrecoverable state issue
@@ -591,9 +819,33 @@ func (r *BatteryReader) readBatteryStatus() error {
 			r.logCallback(hal.LogLevelWarning, lastMainError.Error())
 			if attempt < maxAttemptsAfterHALRecreation {
 				r.logCallback(hal.LogLevelWarning, "Attempting HAL recreation.")
-				if errRecreate := r.recreateHAL(r.service.ctx); errRecreate != nil {
-					return fmt.Errorf("%w; and failed to recreate HAL: %v", lastMainError, errRecreate)
+
+				// Use simple deinitialize/initialize approach
+				r.nfcMutex.Lock()
+				r.hal.Deinitialize()
+				r.nfcMutex.Unlock()
+
+				time.Sleep(500 * time.Millisecond)
+
+				r.nfcMutex.Lock()
+				errInit := r.hal.Initialize()
+				r.nfcMutex.Unlock()
+
+				if errInit != nil {
+					return fmt.Errorf("%w; and failed to initialize HAL: %v", lastMainError, errInit)
 				}
+
+				// Update timestamp
+				currentTime := time.Now()
+				r.Lock()
+				r.lastReinitialization = currentTime
+				r.Unlock()
+				r.service.Lock()
+				if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
+					r.service.lastHALReinit[r.index] = currentTime
+				}
+				r.service.Unlock()
+
 				continue // Retry readBatteryStatus full sequence
 			}
 			return lastMainError
@@ -627,9 +879,33 @@ func (r *BatteryReader) readBatteryStatus() error {
 			r.logCallback(hal.LogLevelWarning, lastMainError.Error())
 			if attempt < maxAttemptsAfterHALRecreation {
 				r.logCallback(hal.LogLevelWarning, "Attempting HAL recreation.")
-				if errRecreate := r.recreateHAL(r.service.ctx); errRecreate != nil {
-					return fmt.Errorf("%w; and failed to recreate HAL: %v", lastMainError, errRecreate)
+
+				// Use simple deinitialize/initialize approach
+				r.nfcMutex.Lock()
+				r.hal.Deinitialize()
+				r.nfcMutex.Unlock()
+
+				time.Sleep(500 * time.Millisecond)
+
+				r.nfcMutex.Lock()
+				errInit := r.hal.Initialize()
+				r.nfcMutex.Unlock()
+
+				if errInit != nil {
+					return fmt.Errorf("%w; and failed to initialize HAL: %v", lastMainError, errInit)
 				}
+
+				// Update timestamp
+				currentTime := time.Now()
+				r.Lock()
+				r.lastReinitialization = currentTime
+				r.Unlock()
+				r.service.Lock()
+				if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
+					r.service.lastHALReinit[r.index] = currentTime
+				}
+				r.service.Unlock()
+
 				continue // Retry readBatteryStatus full sequence
 			}
 			return lastMainError
@@ -675,4 +951,151 @@ func (r *BatteryReader) readBatteryStatus() error {
 	// If loop finishes, it means all attempts failed.
 	r.logCallback(hal.LogLevelError, fmt.Sprintf("Completely failed to read battery status after %d attempts. Last error: %v", maxAttemptsAfterHALRecreation, lastMainError))
 	return fmt.Errorf("completely failed to read battery status after %d attempts: %w", maxAttemptsAfterHALRecreation, lastMainError)
+}
+
+// safelyPowerDownHAL safely powers down the HAL after ensuring no operations are in progress
+func (r *BatteryReader) safelyPowerDownHAL() error {
+	// Check vehicle state first - avoid power down in certain vehicle states
+	r.service.Lock()
+	vehicleState := r.service.vehicleState
+	r.service.Unlock()
+
+	// Only power down in stand-by state to avoid potential issues with other states
+	if vehicleState != "stand-by" {
+		r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Skipping HAL power down in '%s' vehicle state", vehicleState))
+		return nil
+	}
+
+	// Log intent
+	r.logCallback(hal.LogLevelInfo, "Preparing to power down HAL")
+
+	// Set powered down flag first to prevent new operations
+	r.Lock()
+	wasAlreadyPoweredDown := r.isPoweredDown
+	r.isPoweredDown = true
+	r.Unlock()
+
+	// If already powered down, no need to do it again
+	if wasAlreadyPoweredDown {
+		r.logCallback(hal.LogLevelInfo, "HAL was already powered down, no action needed")
+		return nil
+	}
+
+	// Allow a short time for ongoing operations to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Acquire mutex to ensure exclusive access to HAL
+	r.nfcMutex.Lock()
+	defer r.nfcMutex.Unlock()
+
+	// Deinitialize the HAL, catching any potential errors
+	defer func() {
+		if panicErr := recover(); panicErr != nil {
+			r.logCallback(hal.LogLevelError, fmt.Sprintf("Recovered from panic during HAL deinitialization: %v", panicErr))
+		}
+	}()
+
+	// Simply call deinitialize to power down
+	currentState := r.hal.GetState()
+	r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Deinitializing HAL (current state: %s)", currentState))
+	r.hal.Deinitialize()
+	r.logCallback(hal.LogLevelInfo, "HAL successfully powered down")
+
+	return nil
+}
+
+// forceHardwareReset performs an aggressive hardware reset when the HAL is stuck
+func (r *BatteryReader) forceHardwareReset() error {
+	r.logCallback(hal.LogLevelWarning, "Performing hardware reset due to stuck HAL")
+
+	// First mark as not powered down
+	r.Lock()
+	r.isPoweredDown = false
+	r.Unlock()
+
+	// Deinitialize the existing HAL
+	r.nfcMutex.Lock()
+	r.hal.Deinitialize()
+	r.nfcMutex.Unlock()
+
+	// Give hardware time to reset
+	time.Sleep(500 * time.Millisecond)
+
+	// Create and initialize new HAL instance
+	if err := r.createNewHAL(); err != nil {
+		r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to create new HAL during hardware reset: %v", err))
+		return err
+	}
+
+	r.logCallback(hal.LogLevelInfo, "Hardware reset completed successfully")
+	return nil
+}
+
+// createNewHAL creates a new HAL instance, initializes it, and waits for initialization to complete
+func (r *BatteryReader) createNewHAL() error {
+	r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Creating new HAL instance for reader %d", r.index))
+
+	// Create a completely new HAL instance
+	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Calling NewPN7150 for device '%s'", r.config.DeviceName))
+	newHal, errCreate := hal.NewPN7150(r.config.DeviceName, r.logCallback, nil, true, false, r.service.debug)
+	if errCreate != nil {
+		r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to create new HAL instance: %v", errCreate))
+		return fmt.Errorf("failed to create new HAL instance: %w", errCreate)
+	}
+	r.logCallback(hal.LogLevelDebug, "NewPN7150 returned successfully")
+
+	// Replace the old HAL with the new one
+	r.nfcMutex.Lock()
+	r.hal = newHal
+	r.nfcMutex.Unlock()
+	r.logCallback(hal.LogLevelDebug, "Replaced old HAL with new instance")
+
+	// Initialize the new HAL
+	r.logCallback(hal.LogLevelDebug, "Initializing new HAL instance")
+	r.nfcMutex.Lock()
+	errInit := r.hal.Initialize()
+	r.nfcMutex.Unlock()
+
+	if errInit != nil {
+		r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to initialize new HAL instance: %v", errInit))
+		return fmt.Errorf("failed to initialize new HAL instance: %w", errInit)
+	}
+	r.logCallback(hal.LogLevelDebug, "HAL initialization started")
+
+	// Wait for initialization to complete
+	startTime := time.Now()
+	maxWaitTime := 3 * time.Second
+	initSuccess := false
+
+	for time.Since(startTime) < maxWaitTime {
+		halState := r.hal.GetState()
+		if halState != hal.StateInitializing {
+			r.logCallback(hal.LogLevelInfo, fmt.Sprintf("HAL successfully initialized, current state: %s (after %.1f seconds)",
+				halState, time.Since(startTime).Seconds()))
+			initSuccess = true
+			break
+		}
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Waiting for HAL initialization to complete, current state: %s (elapsed: %.1f seconds)",
+			halState, time.Since(startTime).Seconds()))
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !initSuccess {
+		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Timeout waiting for HAL to initialize after %.1f seconds, continuing anyway",
+			time.Since(startTime).Seconds()))
+	}
+
+	// Update reinitialization timestamp
+	currentTime := time.Now()
+	r.Lock()
+	r.lastReinitialization = currentTime
+	r.Unlock()
+	r.service.Lock()
+	if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
+		r.service.lastHALReinit[r.index] = currentTime
+	}
+	r.service.Unlock()
+	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Updated reinitialization timestamps to %v", currentTime))
+
+	return nil
 }
