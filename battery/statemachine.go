@@ -196,6 +196,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateInitializing, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
 		{StateInitializing, EventHALError, StateError, sm.actionHALError},
 		{StateInitializing, EventDisabled, StateDisabled, sm.actionDisable},
+		{StateInitializing, EventVehicleActive, StateInitializing, nil}, // Stay in Initializing, wait for ReadyToScoot
 
 		// From IdleStandby
 		{StateIdleStandby, EventSeatboxClosed, StateIdleReady, sm.actionSeatboxClosed},
@@ -249,6 +250,10 @@ func (sm *BatteryStateMachine) setupTransitions() {
 
 		// From Disabled
 		{StateDisabled, EventEnabled, StateNotPresent, sm.actionEnable},
+		{StateDisabled, EventVehicleActive, StateNotPresent, sm.actionVehicleActiveWhileDisabled},
+		{StateDisabled, EventCBChargeLow, StateNotPresent, sm.actionEnable},
+		{StateDisabled, EventBatteryInserted, StateDisabled, sm.actionBatteryInsertedWhileDisabled},
+		{StateDisabled, EventBatteryRemoved, StateDisabled, sm.actionBatteryRemoved},
 
 		// From Maintenance
 		{StateMaintenance, EventMaintenanceTick, StateIdleStandby, sm.actionMaintenanceComplete},
@@ -258,9 +263,10 @@ func (sm *BatteryStateMachine) setupTransitions() {
 	}
 
 	// Build transition map
-	for _, t := range transitions {
+	for i := range transitions {
+		t := &transitions[i]
 		key := stateEventKey{t.FromState, t.Event}
-		sm.transitions[key] = &t
+		sm.transitions[key] = t
 	}
 }
 
@@ -378,21 +384,29 @@ func (sm *BatteryStateMachine) CanTransition(event BatteryEvent) bool {
 // Action methods for state transitions
 
 func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMachine, event BatteryEvent) error {
-	// Send InsertedInScooter command and wait for ReadyToScoot
-	if err := sm.reader.sendCommand(sm.reader.service.ctx, BatteryCommandInsertedInScooter); err != nil {
-		return fmt.Errorf("failed to send InsertedInScooter: %w", err)
-	}
-
 	// Read initial status
 	if err := sm.reader.readBatteryStatus(); err != nil {
-		return fmt.Errorf("failed to read initial status: %w", err)
+		// If we can't read status, send InsertedInScooter as recovery
+		if err := sm.reader.sendCommand(sm.reader.service.ctx, BatteryCommandInsertedInScooter); err != nil {
+			return fmt.Errorf("failed to send InsertedInScooter: %w", err)
+		}
+		time.Sleep(10 * time.Second) // Wait like C code does
+
+		// Try reading status again
+		if err := sm.reader.readBatteryStatus(); err != nil {
+			return fmt.Errorf("failed to read status after InsertedInScooter: %w", err)
+		}
 	}
 
-	// Mark as just inserted for initialization logic
+	// If we got here, battery is responding properly
 	sm.reader.Lock()
+	sm.reader.readyToScoot = true // Just set it true, don't wait for response
 	sm.reader.justInserted = true
 	sm.reader.data.Present = true
 	sm.reader.Unlock()
+
+	// Send the ready event
+	sm.SendEvent(EventReadyToScoot)
 
 	return nil
 }
@@ -722,4 +736,127 @@ func (sm *BatteryStateMachine) actionEnable(machine *BatteryStateMachine, event 
 
 	sm.logger(hal.LogLevelInfo, "Battery reader enabled")
 	return nil
+}
+
+func (sm *BatteryStateMachine) actionVehicleActiveWhileDisabled(machine *BatteryStateMachine, event BatteryEvent) error {
+	sm.logger(hal.LogLevelInfo, "Vehicle became active while battery disabled - checking if battery should be enabled")
+
+	// Check if this is battery 0 (only battery 0 can be activated)
+	if sm.reader.index != 0 {
+		sm.logger(hal.LogLevelDebug, "Battery 1 remains disabled (only battery 0 can be activated)")
+		return fmt.Errorf("battery 1 should not be enabled")
+	}
+
+	// Get current conditions
+	sm.reader.service.Lock()
+	vehicleState := sm.reader.service.vehicleState
+	cbCharge := sm.reader.service.cbBatteryCharge
+	seatboxOpen := sm.reader.service.seatboxOpen
+	sm.reader.service.Unlock()
+
+	sm.reader.Lock()
+	batteryPresent := sm.reader.data.Present
+	sm.reader.Unlock()
+
+	// In parked mode, we should always enable battery 0 if it's present
+	if vehicleState == "parked" && batteryPresent {
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Enabling Battery 0 due to parked state (present=%v, seatboxOpen=%v)", batteryPresent, seatboxOpen))
+
+		// Enable the battery
+		sm.reader.Lock()
+		sm.reader.enabled = true
+		sm.reader.Unlock()
+
+		// Send EventEnabled to trigger proper initialization
+		go func() {
+			// Small delay to ensure state transition completes first
+			time.Sleep(10 * time.Millisecond)
+			sm.logger(hal.LogLevelDebug, "Sending EventEnabled after vehicle active")
+			sm.SendEvent(EventEnabled)
+		}()
+
+		sm.logger(hal.LogLevelInfo, "Battery reader enabled")
+		return nil // Transition to StateNotPresent
+	}
+
+	// For non-parked states, check normal activation conditions
+	shouldEnable := batteryPresent && !seatboxOpen &&
+		(vehicleState != "stand-by" || (cbCharge >= 0 && cbCharge < cbBatteryActivationThreshold))
+
+	if shouldEnable {
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Enabling Battery 0 due to vehicle state '%s' (present=%v, seatboxOpen=%v, cbCharge=%d)", vehicleState, batteryPresent, seatboxOpen, cbCharge))
+
+		// Enable the battery
+		sm.reader.Lock()
+		sm.reader.enabled = true
+		sm.reader.Unlock()
+
+		// Send EventEnabled to trigger proper initialization
+		go func() {
+			// Small delay to ensure state transition completes first
+			time.Sleep(10 * time.Millisecond)
+			sm.logger(hal.LogLevelDebug, "Sending EventEnabled after vehicle active")
+			sm.SendEvent(EventEnabled)
+		}()
+
+		sm.logger(hal.LogLevelInfo, "Battery reader enabled")
+		return nil // Transition to StateNotPresent
+	}
+
+	sm.logger(hal.LogLevelDebug, fmt.Sprintf("Battery 0 activation conditions not met (vehicleState=%s, present=%v, seatboxOpen=%v, cbCharge=%d)", vehicleState, batteryPresent, seatboxOpen, cbCharge))
+	return fmt.Errorf("battery activation conditions not met")
+}
+
+func (sm *BatteryStateMachine) actionBatteryInsertedWhileDisabled(machine *BatteryStateMachine, event BatteryEvent) error {
+	sm.logger(hal.LogLevelInfo, "Battery inserted while disabled - checking if battery should be enabled")
+
+	// Check if this is battery 0 (only battery 0 can be activated)
+	if sm.reader.index != 0 {
+		sm.logger(hal.LogLevelDebug, "Battery 1 remains disabled (only battery 0 can be activated)")
+		// For battery 1, we don't enable it, so we should stay in disabled state
+		// Return an error to prevent the transition to StateNotPresent
+		return fmt.Errorf("battery 1 should not be enabled")
+	}
+
+	// Get current conditions
+	sm.reader.service.Lock()
+	vehicleState := sm.reader.service.vehicleState
+	cbCharge := sm.reader.service.cbBatteryCharge
+	seatboxOpen := sm.reader.service.seatboxOpen
+	sm.reader.service.Unlock()
+
+	sm.reader.Lock()
+	batteryPresent := sm.reader.data.Present
+	sm.reader.Unlock()
+
+	// Check if conditions suggest the battery should be enabled
+	// Enable for non-standby states (like "parked") when battery is present
+	shouldEnable := batteryPresent && !seatboxOpen &&
+		(vehicleState != "stand-by" || (cbCharge >= 0 && cbCharge < cbBatteryActivationThreshold))
+
+	if shouldEnable {
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Enabling Battery 0 due to vehicle state '%s' (present=%v, seatboxOpen=%v, cbCharge=%d)", vehicleState, batteryPresent, seatboxOpen, cbCharge))
+
+		// Enable the battery (this action sets enabled=true like actionEnable)
+		sm.reader.Lock()
+		sm.reader.enabled = true
+		sm.reader.Unlock()
+
+		// If battery is present, schedule a battery insertion event to trigger initialization
+		if batteryPresent {
+			go func() {
+				// Small delay to ensure state transition completes first
+				time.Sleep(10 * time.Millisecond)
+				sm.logger(hal.LogLevelDebug, "Sending EventBatteryInserted after enabling")
+				sm.SendEvent(EventBatteryInserted)
+			}()
+		}
+
+		sm.logger(hal.LogLevelInfo, "Battery reader enabled")
+		return nil // Transition to StateNotPresent
+	} else {
+		sm.logger(hal.LogLevelDebug, fmt.Sprintf("Battery 0 activation conditions not met (vehicleState=%s, present=%v, seatboxOpen=%v, cbCharge=%d)", vehicleState, batteryPresent, seatboxOpen, cbCharge))
+		// Don't enable, stay in disabled state
+		return fmt.Errorf("battery activation conditions not met")
+	}
 }
