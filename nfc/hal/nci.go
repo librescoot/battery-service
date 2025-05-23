@@ -6,73 +6,73 @@ import (
 
 // NCI message types and bit positions
 const (
-	nciMsgTypeBit    = 5
-	nciMsgTypeData   = 0
-	nciMsgTypeCommand = 1
-	nciMsgTypeResponse = 2
+	nciMsgTypeBit          = 5
+	nciMsgTypeData         = 0
+	nciMsgTypeCommand      = 1
+	nciMsgTypeResponse     = 2
 	nciMsgTypeNotification = 3
 )
 
 // NCI Groups
 const (
-	nciGroupCore uint8 = 0x00
-	nciGroupRF   uint8 = 0x01
-	nciGroupProp uint8 = 0x0F
-	nciGroupStatus uint8 = 0x08  // Status and diagnostics group
+	nciGroupCore   uint8 = 0x00
+	nciGroupRF     uint8 = 0x01
+	nciGroupProp   uint8 = 0x0F
+	nciGroupStatus uint8 = 0x08 // Status and diagnostics group
 )
 
 // NCI Core commands (OID)
 const (
-	nciCoreReset uint8 = 0x00
-	nciCoreInit  uint8 = 0x01
-	nciCoreSetConfig uint8 = 0x02
-	nciCoreGetConfig uint8 = 0x03
+	nciCoreReset           uint8 = 0x00
+	nciCoreInit            uint8 = 0x01
+	nciCoreSetConfig       uint8 = 0x02
+	nciCoreGetConfig       uint8 = 0x03
 	nciCoreSetPowerModeOID uint8 = 0x09
-	nciCoreConnCredits uint8 = 0x06
-	nciCoreGenericError uint8 = 0x07
-	nciCoreInterfaceError uint8 = 0x08
+	nciCoreConnCredits     uint8 = 0x06
+	nciCoreGenericError    uint8 = 0x07
+	nciCoreInterfaceError  uint8 = 0x08
 )
 
 // NCI RF commands (OID)
 const (
-	nciRFDiscoverMapOID uint8 = 0x00
-	nciRFDiscoverOID uint8 = 0x03
+	nciRFDiscoverMapOID    uint8 = 0x00
+	nciRFDiscoverOID       uint8 = 0x03
 	nciRFDiscoverSelectOID uint8 = 0x04
-	nciRFIntfActivatedOID uint8 = 0x05
-	nciRFDeactivateOID uint8 = 0x06
-	nciRFT2TReadOID uint8 = 0x10
-	nciRFT2TWriteOID uint8 = 0x11
-	nciRFGetTransitionOID uint8 = 0x20
+	nciRFIntfActivatedOID  uint8 = 0x05
+	nciRFDeactivateOID     uint8 = 0x06
+	nciRFT2TReadOID        uint8 = 0x10
+	nciRFT2TWriteOID       uint8 = 0x11
+	nciRFGetTransitionOID  uint8 = 0x20
 )
 
 // NCI proprietary commands (OID)
 const (
-	nciProprietaryActOID uint8 = 0x02
-	nciProprietarySetPowerModeOID uint8 = 0x00 // PN7150 proprietary power mode command
+	nciProprietaryActOID             uint8 = 0x02
+	nciProprietarySetPowerModeOID    uint8 = 0x00 // PN7150 proprietary power mode command
 	nciProprietaryRFGetTransitionOID uint8 = 0x14 // PN7150 proprietary RF transition command
 )
 
 // NCI RF protocols and interfaces
 const (
-	nciRFProtocolT2T uint8 = 0x02     // Type 2 Tag (MIFARE Ultralight)
-	nciRFProtocolISODEP uint8 = 0x04  // ISO14443-4
-	nciRFInterfaceFrame uint8 = 0x01
+	nciRFProtocolT2T     uint8 = 0x02 // Type 2 Tag (MIFARE Ultralight)
+	nciRFProtocolISODEP  uint8 = 0x04 // ISO14443-4
+	nciRFInterfaceFrame  uint8 = 0x01
 	nciRFInterfaceISODEP uint8 = 0x02
 )
 
 // NCI status codes
 const (
-	nciStatusOK uint8 = 0x00
+	nciStatusOK            uint8 = 0x00
 	nciStatusSemanticError uint8 = 0x06
 )
 
 // NCI parameter IDs
 const (
-	nciParamIDTotalDuration uint16 = 0x0000
-	nciParamIDClockSelCfg uint16 = 0xA003
+	nciParamIDTotalDuration   uint16 = 0x0000
+	nciParamIDClockSelCfg     uint16 = 0xA003
 	nciParamIDRFTransitionCfg uint16 = 0xA00D
-	nciParamIDPMUCfg uint16 = 0xA00E
-	nciParamIDTagDetectorCfg uint16 = 0xA040
+	nciParamIDPMUCfg          uint16 = 0xA00E
+	nciParamIDTagDetectorCfg  uint16 = 0xA040
 )
 
 // NCI RF technologies
@@ -94,8 +94,8 @@ var (
 
 // NCI Packet Header
 type nciHeader struct {
-	MT_PBF_GID uint8  // Message Type (5 bits) | Packet Boundary Flag (1 bit) | Group ID (2 bits)
-	OID_NAD    uint8  // Opcode ID (6 bits) | NAD (2 bits)
+	MT_PBF_GID uint8 // Message Type (5 bits) | Packet Boundary Flag (1 bit) | Group ID (2 bits)
+	OID_NAD    uint8 // Opcode ID (6 bits) | NAD (2 bits)
 	Length     uint8
 }
 
@@ -145,10 +145,10 @@ func buildCoreInit() []byte {
 // NCI Core Set Config Command
 func buildCoreSetConfig(paramID uint16, value []byte) []byte {
 	payload := []byte{
-		0x01,                    // Number of parameters
-		byte(paramID >> 8),     // Parameter ID high byte
-		byte(paramID & 0xFF),   // Parameter ID low byte
-		byte(len(value)),       // Parameter length
+		0x01,                 // Number of parameters
+		byte(paramID >> 8),   // Parameter ID high byte
+		byte(paramID & 0xFF), // Parameter ID low byte
+		byte(len(value)),     // Parameter length
 	}
 	payload = append(payload, value...)
 	header := buildNCIHeader(nciMsgTypeCommand, nciGroupCore, nciCoreSetConfig, uint8(len(payload)))
@@ -158,9 +158,9 @@ func buildCoreSetConfig(paramID uint16, value []byte) []byte {
 // NCI RF Discovery Commands
 func buildRFDiscoverCmd(pollPeriod uint) []byte {
 	payload := []byte{
-		0x01,                         // Number of technologies
-		nciRFTechNFCAPassivePoll,    // RF Technology = NFC-A passive poll mode (0x00)
-		0x01,                        // Frequency = 1 (ignored by PN7150)
+		0x01,                     // Number of technologies
+		nciRFTechNFCAPassivePoll, // RF Technology = NFC-A passive poll mode (0x00)
+		0x01,                     // Frequency = 1 (ignored by PN7150)
 	}
 	header := buildNCIHeader(nciMsgTypeCommand, nciGroupRF, nciRFDiscoverOID, uint8(len(payload)))
 	return buildNCIPacket(header, payload)
@@ -169,13 +169,13 @@ func buildRFDiscoverCmd(pollPeriod uint) []byte {
 // NCI RF Discovery Map Command
 func buildRFDiscoverMapCmd() []byte {
 	payload := []byte{
-		0x02,                    // Number of mappings (2 for both T2T and ISO_DEP)
-		nciRFProtocolT2T,       // First mapping: T2T protocol
-		0x01,                   // Mode = Poll
-		nciRFInterfaceFrame,    // Frame interface for T2T
-		nciRFProtocolISODEP,    // Second mapping: ISO_DEP protocol
-		0x01,                   // Mode = Poll
-		nciRFInterfaceISODEP,   // ISO_DEP interface
+		0x02,                 // Number of mappings (2 for both T2T and ISO_DEP)
+		nciRFProtocolT2T,     // First mapping: T2T protocol
+		0x01,                 // Mode = Poll
+		nciRFInterfaceFrame,  // Frame interface for T2T
+		nciRFProtocolISODEP,  // Second mapping: ISO_DEP protocol
+		0x01,                 // Mode = Poll
+		nciRFInterfaceISODEP, // ISO_DEP interface
 	}
 	header := buildNCIHeader(nciMsgTypeCommand, nciGroupRF, nciRFDiscoverMapOID, uint8(len(payload)))
 	return buildNCIPacket(header, payload)
@@ -226,14 +226,14 @@ func parseNCIResponse(data []byte) (*nciResponse, error) {
 		}
 		return &nciResponse{
 			Status:  data[3],
-			Payload: data[4:3+header.Length],
+			Payload: data[4 : 3+header.Length],
 		}, nil
 	}
 
 	// For notifications, no status byte
 	return &nciResponse{
 		Status:  nciStatusOK,
-		Payload: data[3:3+header.Length],
+		Payload: data[3 : 3+header.Length],
 	}, nil
 }
 
@@ -259,7 +259,7 @@ func parseRFIntfActivatedNtf(data []byte) (*Tag, error) {
 
 	rfProtocol := RFProtocol(data[5])
 	rfTechnology := data[6]
-	
+
 	// Check for supported protocols
 	switch rfProtocol {
 	case RFProtocolT2T:
@@ -277,9 +277,9 @@ func parseRFIntfActivatedNtf(data []byte) (*Tag, error) {
 		}
 		return &Tag{
 			RFProtocol: rfProtocol,
-			ID:         data[10:10+uidLen],
+			ID:         data[10 : 10+uidLen],
 		}, nil
 	}
 
 	return nil, fmt.Errorf("unsupported RF technology: %02x", rfTechnology)
-} 
+}

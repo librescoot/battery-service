@@ -28,17 +28,10 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 		r.isPoweredDown = false
 		r.Unlock()
 
-		// Deinitialize if needed (best practice)
-		r.nfcMutex.Lock()
-		r.hal.Deinitialize()
-		r.nfcMutex.Unlock()
-
-		time.Sleep(200 * time.Millisecond)
-
-		// Create new HAL using central function
-		if err := r.createNewHAL(); err != nil {
-			r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to create new HAL before reading register: %v", err))
-			return nil, fmt.Errorf("failed to create new HAL: %w", err)
+		// Use simple HAL recovery approach
+		if err := r.simpleHALRecovery(); err != nil {
+			r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed HAL recovery before reading register: %v", err))
+			return nil, fmt.Errorf("failed HAL recovery: %w", err)
 		}
 	}
 
@@ -89,22 +82,15 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 
 		// Check for 0300 response payload from HAL, indicating deep NFC issue
 		if len(data) == 2 && data[0] == 0x03 && data[1] == 0x00 {
-			r.logCallback(hal.LogLevelWarning, "Received 0300 payload from HAL, creating new HAL")
+			r.logCallback(hal.LogLevelWarning, "Received 0300 payload from HAL, performing recovery")
 
-			// Deinitialize current HAL
-			r.nfcMutex.Lock()
-			r.hal.Deinitialize()
-			r.nfcMutex.Unlock()
-
-			time.Sleep(200 * time.Millisecond)
-
-			// Create new HAL using central function
-			if err := r.createNewHAL(); err != nil {
-				r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to create new HAL after 0300 payload: %v", err))
-				return nil, fmt.Errorf("received 0300 payload and failed to create new HAL: %w", err)
+			// Use simple HAL recovery approach
+			if err := r.simpleHALRecovery(); err != nil {
+				r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed HAL recovery after 0300 payload: %v", err))
+				return nil, fmt.Errorf("received 0300 payload and recovery failed: %w", err)
 			}
 
-			r.logCallback(hal.LogLevelInfo, "HAL reset successfully after 0300 payload. Signaling for read retry.")
+			r.logCallback(hal.LogLevelInfo, "HAL recovery completed after 0300 payload. Signaling for read retry.")
 			return nil, errHALRecreatedRetryRead // Signal caller to retry the whole read operation
 		}
 
@@ -289,17 +275,10 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 		r.isPoweredDown = false
 		r.Unlock()
 
-		// Deinitialize if needed (best practice)
-		r.nfcMutex.Lock()
-		r.hal.Deinitialize()
-		r.nfcMutex.Unlock()
-
-		time.Sleep(200 * time.Millisecond)
-
-		// Create new HAL using central function
-		if err := r.createNewHAL(); err != nil {
-			r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to create new HAL before command: %v", err))
-			return fmt.Errorf("failed to create new HAL: %w", err)
+		// Use simple HAL recovery approach
+		if err := r.simpleHALRecovery(); err != nil {
+			r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed HAL recovery before command: %v", err))
+			return fmt.Errorf("failed HAL recovery: %w", err)
 		}
 	}
 
@@ -311,26 +290,19 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 		r.Unlock()
 
 		if currentState == BatteryStateAsleep {
-			r.logCallback(hal.LogLevelInfo, "Battery is Asleep, target is ON. Creating new HAL instance.")
+			r.logCallback(hal.LogLevelInfo, "Battery is Asleep, target is ON. Performing HAL recovery.")
 
-			// Deinitialize existing HAL
-			r.nfcMutex.Lock()
-			r.hal.Deinitialize()
-			r.nfcMutex.Unlock()
-
-			time.Sleep(200 * time.Millisecond)
-
-			// Create new HAL using central function
-			err := r.createNewHAL()
+			// Use simple HAL recovery approach
+			err := r.simpleHALRecovery()
 
 			if err != nil {
-				r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to create new HAL for Asleep battery: %v. Proceeding with command might fail.", err))
+				r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed HAL recovery for Asleep battery: %v. Proceeding with command might fail.", err))
 				// Original code proceeded even if HAL recreation failed here, so we maintain that behavior.
 			} else {
-				r.logCallback(hal.LogLevelInfo, "New HAL instance successfully initialized for Asleep battery.")
+				r.logCallback(hal.LogLevelInfo, "HAL recovery successfully completed for Asleep battery.")
 			}
 
-			time.Sleep(timeCmd) // Brief pause after HAL re-init attempt
+			time.Sleep(timeCmd) // Brief pause after HAL recovery attempt
 			r.logCallback(hal.LogLevelInfo, "Proceeding with original ON command attempt.")
 		}
 	}
@@ -607,209 +579,9 @@ func (r *BatteryReader) readCommandRegisterWithTimeout(ctx context.Context, time
 }
 
 // recreateHAL is deprecated - use simple deinitialize/initialize approach instead
-// Leaving implementation for backward compatibility
 func (r *BatteryReader) recreateHAL(ctx context.Context) error {
-	r.logCallback(hal.LogLevelWarning, "DEPRECATED: recreateHAL is no longer recommended - use simple deinitialize/initialize approach instead")
+	r.logCallback(hal.LogLevelWarning, "DEPRECATED: recreateHAL is no longer recommended - use simpleHALRecovery instead")
 
-	// The recommended approach:
-	// 1. hal.Deinitialize()
-	// 2. time.Sleep(500 * time.Millisecond)
-	// 3. hal.Initialize()
-
-	r.logCallback(hal.LogLevelInfo, "Falling back to legacy HAL recreation")
-
-	// Update reinitialization timestamp immediately on entry to prevent false absences
-	// This gives the reader time to complete HAL recreation before absence detection kicks in
-	currentTime := time.Now()
-	r.Lock()
-	r.lastReinitialization = currentTime
-	r.Unlock()
-
-	// Also update service-level timestamp
-	r.service.Lock()
-	if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
-		r.service.lastHALReinit[r.index] = currentTime
-		r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Updated service reinitialization timestamp at start: %v", currentTime))
-	}
-	r.service.Unlock()
-
-	// First, acquire the mutex to ensure exclusive access
-	r.nfcMutex.Lock()
-
-	// Track whether we've released the mutex explicitly for FullReinitialize
-	mutexReleased := false
-
-	// Make sure to release the mutex if we haven't done so explicitly by the end of the function
-	defer func() {
-		if !mutexReleased {
-			r.nfcMutex.Unlock()
-		}
-	}()
-
-	// Mark reinitialization time right at the beginning to ensure it's captured
-	r.Lock()
-	r.lastReinitialization = currentTime
-	r.service.Lock()
-	if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
-		r.service.lastHALReinit[r.index] = currentTime
-	}
-	r.service.Unlock()
-	r.Unlock()
-
-	// Try to use fullReinitialize if the HAL implementation supports it
-	if pn7150, ok := r.hal.(*hal.PN7150); ok {
-		r.logCallback(hal.LogLevelDebug, "Using PN7150 full reinitialization method...")
-
-		// Unlock for fullReinitialize operation which acquires its own locks
-		r.nfcMutex.Unlock()
-		mutexReleased = true
-
-		// Try to force stop discovery before reinitializing, ignoring errors
-		_ = pn7150.StopDiscovery()
-
-		// Try FullReinitialize
-		err := pn7150.FullReinitialize()
-		if err != nil {
-			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("PN7150 reinitialization failed: %v", err))
-
-			// If full reinitialization failed, try a more comprehensive approach
-			r.logCallback(hal.LogLevelWarning, "Attempting additional recovery steps...")
-
-			// Try to power cycle the device with longer delays to fully reset the hardware
-			pn7150.SetPower(false)
-			r.logCallback(hal.LogLevelInfo, "Powered down PN7150 - waiting for full discharge")
-			time.Sleep(500 * time.Millisecond) // Increased delay to ensure complete hardware reset
-			r.logCallback(hal.LogLevelInfo, "Powering up PN7150")
-			pn7150.SetPower(true)
-			time.Sleep(200 * time.Millisecond)
-
-			// Try to initialize again
-			err = pn7150.Initialize()
-			if err != nil {
-				r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to initialize after power cycle: %v", err))
-				return err
-			}
-		}
-
-		// Update the last reinitialization timestamp and log.
-		newTimestamp := time.Now()
-		r.Lock()
-		r.lastReinitialization = newTimestamp
-		r.Unlock()
-		r.service.Lock()
-		if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
-			r.service.lastHALReinit[r.index] = newTimestamp
-		}
-		r.service.Unlock()
-
-		r.logCallback(hal.LogLevelInfo, "PN7150 reinitialization successful – waiting for normal tag detection flow to resume.")
-
-		// Wait for HAL to complete initialization before returning
-		r.logCallback(hal.LogLevelInfo, "Waiting for PN7150 to complete initialization")
-		initWaitStartTime := time.Now()
-		const maxInitWaitTime = 3 * time.Second
-		initSuccess := false
-
-		for time.Since(initWaitStartTime) < maxInitWaitTime {
-			halState := pn7150.GetState()
-
-			if halState == hal.StateIdle || halState == hal.StateDiscovering || halState == hal.StatePresent {
-				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("PN7150 successfully initialized, current state: %s", halState))
-				initSuccess = true
-				break
-			}
-
-			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Waiting for PN7150 initialization to complete, current state: %s", halState))
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		if !initSuccess {
-			r.logCallback(hal.LogLevelWarning, "Timeout waiting for PN7150 to initialize, but continuing anyway")
-		}
-
-		return nil
-	}
-
-	// Traditional HAL recreation approach
-	r.logCallback(hal.LogLevelInfo, "Using traditional HAL recreation approach")
-
-	// De-initialize the old HAL instance first (best effort)
-	if r.hal != nil {
-		r.logCallback(hal.LogLevelDebug, "Deinitializing existing HAL instance...")
-		r.hal.Deinitialize() // This is synchronous
-		r.logCallback(hal.LogLevelDebug, "Existing HAL deinitialization complete.")
-	}
-
-	// Create a new HAL instance
-	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Creating new NFC HAL instance for %s...", r.config.DeviceName))
-	newHal, errHalCreate := hal.NewPN7150(r.config.DeviceName, r.logCallback, nil, true, false, r.service.debug)
-	if errHalCreate != nil {
-		r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to create new HAL instance: %v", errHalCreate))
-		return fmt.Errorf("failed to create new HAL instance: %w", errHalCreate)
-	}
-
-	r.hal = newHal // Assign the new HAL instance
-	r.logCallback(hal.LogLevelInfo, "New HAL instance created. Attempting to Initialize...")
-	// Initialize() in pn7150.go already calls StartDiscovery.
-	if errInit := r.hal.Initialize(); errInit != nil {
-		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to initialize new HAL instance: %v", errInit))
-		// Even if init fails, we have a new r.hal. Subsequent operations will fail if it's bad.
-		return fmt.Errorf("failed to initialize new HAL instance: %w", errInit)
-	}
-
-	// Update the reinitialization timestamp for the traditional approach as well
-	traditionalTimestamp := time.Now()
-	r.Lock()
-	r.lastReinitialization = traditionalTimestamp
-	r.service.Lock()
-	if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
-		r.service.lastHALReinit[r.index] = traditionalTimestamp
-	}
-	r.service.Unlock()
-	r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Updated reinitialization timestamp after traditional init: %v", traditionalTimestamp))
-	r.Unlock()
-
-	// Wait for HAL to complete initialization before returning
-	r.logCallback(hal.LogLevelInfo, "Waiting for HAL to complete initialization")
-	initWaitStartTime := time.Now()
-	const maxInitWaitTime = 3 * time.Second
-	initSuccess := false
-
-	for time.Since(initWaitStartTime) < maxInitWaitTime {
-		halState := r.hal.GetState()
-
-		if halState == hal.StateIdle || halState == hal.StateDiscovering || halState == hal.StatePresent {
-			r.logCallback(hal.LogLevelInfo, fmt.Sprintf("HAL successfully initialized, current state: %s", halState))
-			initSuccess = true
-			break
-		}
-
-		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Waiting for HAL initialization to complete, current state: %s", halState))
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	if !initSuccess {
-		r.logCallback(hal.LogLevelWarning, "Timeout waiting for HAL to initialize, but continuing anyway")
-	}
-
-	// Force timestamps to be visible to absence detection
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		postInitTime := time.Now()
-
-		r.Lock()
-		r.lastReinitialization = postInitTime
-		r.Unlock()
-
-		r.service.Lock()
-		if r.index >= 0 && r.index < len(r.service.lastHALReinit) {
-			r.service.lastHALReinit[r.index] = postInitTime
-		}
-		r.service.Unlock()
-
-		r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Rebroadcast reinitialization timestamp after traditional init: %v", postInitTime))
-	}()
-
-	r.logCallback(hal.LogLevelInfo, "New HAL instance successfully created and initialized.")
-	return nil
+	// Use the simple approach instead of complex recreation logic
+	return r.simpleHALRecovery()
 }

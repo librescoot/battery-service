@@ -27,18 +27,19 @@ type BatteryReader struct {
 	lastCmd                          time.Time
 	justInserted                     bool
 	justOpened                       bool
-	readyToScoot                     bool          // Flag indicating battery responded with ReadyToScoot
-	stopChan                         chan struct{} // Channel to signal goroutine shutdown
-	nfcMutex                         sync.Mutex    // Serializes access to NFC HAL operations
-	lastPublishedData                BatteryData   // Stores the state as of the last successful Redis update with PUBLISH
-	lastBattery1MaintPollTime        time.Time     // Tracks last maintenance poll for battery 1
-	lastIdleAsleepPollTime           time.Time     // Tracks last poll time for battery 0 when idle/asleep in stand-by
-	consecutiveTagAbsences           int           // Count consecutive tag absences before considering battery removed
-	lastReinitialization             time.Time     // Track when HAL was last reinitialized
-	batteryRemovedThreshold          int           // Number of consecutive absences before battery is considered removed
-	isPoweredDown                    bool          // Indicates reader is temporarily powered down during low-frequency polling
-	zeroTagDetections                int           // Count consecutive zero tag detections to restart discovery
-	consecutiveZeroInitializingCount int           // Count consecutive zero tag detections while in initializing state
+	readyToScoot                     bool                 // Flag indicating battery responded with ReadyToScoot
+	stopChan                         chan struct{}        // Channel to signal goroutine shutdown
+	nfcMutex                         sync.Mutex           // Serializes access to NFC HAL operations
+	lastPublishedData                BatteryData          // Stores the state as of the last successful Redis update with PUBLISH
+	lastBattery1MaintPollTime        time.Time            // Tracks last maintenance poll for battery 1
+	lastIdleAsleepPollTime           time.Time            // Tracks last poll time for battery 0 when idle/asleep in stand-by
+	consecutiveTagAbsences           int                  // Count consecutive tag absences before considering battery removed
+	lastReinitialization             time.Time            // Track when HAL was last reinitialized
+	batteryRemovedThreshold          int                  // Number of consecutive absences before battery is considered removed
+	isPoweredDown                    bool                 // Indicates reader is temporarily powered down during low-frequency polling
+	zeroTagDetections                int                  // Count consecutive zero tag detections to restart discovery
+	consecutiveZeroInitializingCount int                  // Count consecutive zero tag detections while in initializing state
+	stateMachine                     *BatteryStateMachine // State machine for managing battery transitions
 }
 
 // Service represents the battery service that manages multiple readers

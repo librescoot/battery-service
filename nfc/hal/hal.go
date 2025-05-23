@@ -12,6 +12,9 @@ type HAL interface {
 	// Deinitialize deinitializes the NFC controller
 	Deinitialize()
 
+	// FullReinitialize completely reinitializes the HAL including file descriptor renewal
+	FullReinitialize() error
+
 	// StartDiscovery starts RF discovery with the given poll period in milliseconds
 	StartDiscovery(pollPeriod uint) error
 

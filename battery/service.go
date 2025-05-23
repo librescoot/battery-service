@@ -69,6 +69,9 @@ func (s *Service) createReader(index int, config *BatteryConfig) (*BatteryReader
 		return nil, fmt.Errorf("failed to create NFC HAL: %v", err)
 	}
 
+	// Initialize state machine
+	reader.stateMachine = NewBatteryStateMachine(reader)
+
 	return reader, nil
 }
 

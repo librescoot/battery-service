@@ -2,7 +2,6 @@ package battery
 
 import (
 	"fmt"
-	"time"
 
 	"battery-service/nfc/hal"
 )
@@ -52,118 +51,28 @@ func (s *Service) handleSeatboxStateChange(isOpen bool) {
 func (r *BatteryReader) handleSeatboxState(isOpen bool) {
 	r.Lock()
 	present := r.data.Present
-	ready := r.readyToScoot
-	state := r.data.State
 	r.Unlock()
 
 	if !present {
 		return // Ignore if battery not present
 	}
 
+	// Send the appropriate event to the state machine
 	if isOpen {
 		r.logCallback(hal.LogLevelInfo, "Seatbox opened")
-		// Send UserOpenedSeatbox command
-		if err := r.sendCommand(r.service.ctx, BatteryCommandUserOpenedSeatbox); err != nil {
-			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to send SEATBOX_OPENED: %v", err))
-		}
-		// Heartbeats will start automatically in the startHeartbeat loop based on service.seatboxOpen
-		// Battery's internal safety check should start upon receiving heartbeat (battery-side logic)
+		r.stateMachine.SendEvent(EventSeatboxOpened)
 	} else {
 		r.logCallback(hal.LogLevelInfo, "Seatbox closed")
-		// Send UserClosedSeatbox command
-		if err := r.sendCommand(r.service.ctx, BatteryCommandUserClosedSeatbox); err != nil {
-			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to send SEATBOX_CLOSED: %v", err))
-		}
-		// Heartbeats will stop automatically in the startHeartbeat loop
-		// Battery's internal safety check should stop (battery-side logic)
-
-		// For Battery 0 only: If ready and not already active, check conditions before sending ON command
-		if r.index == 0 && ready && state != BatteryStateActive {
-			// Check vehicle state and CB battery charge to decide whether to activate
-			r.service.Lock()
-			vehicleState := r.service.vehicleState
-			cbCharge := r.service.cbBatteryCharge
-			r.service.Unlock()
-
-			// Only activate if not in standby mode or CB charge is below threshold
-			if vehicleState != "stand-by" || (cbCharge >= 0 && cbCharge < cbBatteryActivationThreshold) {
-				r.logCallback(hal.LogLevelInfo, "Seatbox closed, battery 0 ready. Sending ON command.")
-				// Call activateBattery which now just sends ON
-				r.activateBattery()
-			} else {
-				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Seatbox closed, battery 0 ready, but in stand-by mode with CB charge %d%%. Skipping activation.", cbCharge))
-			}
-		}
+		r.stateMachine.SendEvent(EventSeatboxClosed)
 	}
 }
 
-// activateBattery now simply sends the ON command. It's called when appropriate
-// (e.g., for battery 0 when seatbox closes and battery is ready).
+// activateBattery is now handled by the state machine
 func (r *BatteryReader) activateBattery() {
-	// For battery 1, never send ON command
-	if r.index == 1 {
-		r.logCallback(hal.LogLevelDebug, "activateBattery called for battery 1 - skipping ON command.")
-		return
-	}
-
-	r.Lock()
-	state := r.data.State
-	ready := r.readyToScoot
-	lowSOC := r.data.LowSOC
-	enabled := r.enabled
-	r.Unlock()
-
-	if !enabled {
-		r.logCallback(hal.LogLevelDebug, "activateBattery: reader disabled, skipping ON command.")
-		return
-	}
-
-	if lowSOC {
-		r.logCallback(hal.LogLevelDebug, "activateBattery: Low SOC, skipping ON command.")
-		// Send OFF if not Idle/Asleep?
-		if state != BatteryStateAsleep && state != BatteryStateIdle {
-			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sending OFF command (low SOC activation blocked): current_state=%s", state))
-			_ = r.sendCommand(r.service.ctx, BatteryCommandOff)
-		}
-		return
-	}
-
-	if !ready {
-		r.logCallback(hal.LogLevelDebug, "activateBattery: Not ReadyToScoot, skipping ON command.")
-		return
-	}
-
-	// If already active, nothing to do
-	if state == BatteryStateActive {
-		r.logCallback(hal.LogLevelDebug, "activateBattery: Already active.")
-		return
-	}
-
-	r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Sending ON command (current state: %s)", state))
-	if err := r.sendCommand(r.service.ctx, BatteryCommandOn); err != nil {
-		r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to send ON command: %v", err))
-		return
-	}
-
-	// Wait briefly and re-read status to verify activation (optional but good practice)
-	time.Sleep(timeStateVerify)
-	if err := r.readBatteryStatus(); err != nil {
-		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to verify state after ON command: %v", err))
-	} else {
-		r.Lock()
-		newState := r.data.State
-		r.Unlock()
-		if newState == BatteryStateActive {
-			r.logCallback(hal.LogLevelInfo, "Battery successfully activated (state verified).")
-		} else {
-			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Battery state is %s after ON command (expected Active).", newState))
-			// Set fault?
-			r.Lock()
-			r.data.Faults.NotFollowingCommand = true
-			_ = r.updateRedisStatus()
-			r.Unlock()
-		}
-	}
+	// This method is now deprecated - the state machine handles activation automatically
+	// Send an event to trigger activation through the state machine
+	r.logCallback(hal.LogLevelDebug, "activateBattery called - delegating to state machine")
+	r.stateMachine.SendEvent(EventSeatboxClosed)
 }
 
 // Helper function for determining ON/OFF command based on current state and conditions

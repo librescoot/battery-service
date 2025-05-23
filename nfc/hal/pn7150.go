@@ -670,10 +670,11 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 // simple discovery restarts don't resolve the issue
 // Caller must NOT hold the lock when calling this
 func (p *PN7150) FullReinitialize() error {
-	// Fast path: if we are already in the middle of an initialization or are
-	// uninitialized there is nothing for us to do – just return.
+	// Fast path: if we are already in the middle of an initialization, just return.
+	// Note: We don't skip when state is Uninitialized because that's exactly when
+	// we need to reinitialize (e.g., after power down or file descriptor issues)
 	p.Lock()
-	if p.state == stateInitializing || p.state == stateUninitialized {
+	if p.state == stateInitializing {
 		p.Unlock()
 		return nil
 	}

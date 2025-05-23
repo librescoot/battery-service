@@ -227,7 +227,7 @@ func (s *Service) updateSeatboxState() {
 
 // updateVehicleStateAndManagePolling fetches the current vehicle state from Redis,
 // updates the service's internal state, and starts/stops cb-battery polling accordingly.
-// It also triggers a check of battery 0's power state.
+// It also triggers appropriate state machine events for battery activation/deactivation.
 func (s *Service) updateVehicleStateAndManagePolling() {
 	s.Lock()
 	currentVehicleState := s.vehicleState
@@ -254,6 +254,13 @@ func (s *Service) updateVehicleStateAndManagePolling() {
 	s.Lock()
 	s.vehicleState = newState
 	previousPollingActive := s.cbBatteryPollTicker != nil
+	// Collect readers to notify outside the service lock
+	readersToNotify := make([]*BatteryReader, 0, 2)
+	for _, r := range s.readers {
+		if r != nil {
+			readersToNotify = append(readersToNotify, r)
+		}
+	}
 	s.Unlock()
 
 	if newState == "stand-by" {
@@ -263,15 +270,34 @@ func (s *Service) updateVehicleStateAndManagePolling() {
 		if !previousPollingActive {
 			s.startCbBatteryPolling()
 		}
+
+		// Send EventVehicleStandby to all battery readers
+		for _, r := range readersToNotify {
+			r.Lock()
+			present := r.data.Present
+			r.Unlock()
+			if present {
+				s.logger.Printf("[StateUpdate] Sending EventVehicleStandby to Battery %d", r.index)
+				r.stateMachine.SendEvent(EventVehicleStandby)
+			}
+		}
 	} else {
 		if previousPollingActive {
 			s.logger.Printf("[StateUpdate] Vehicle is NOT in stand-by (%s). Stopping cb-battery polling.", newState)
 			s.stopCbBatteryPolling()
 		}
-	}
 
-	// Always manage battery 0 power state after a vehicle state update or cb-battery charge update
-	s.manageBattery0PowerState()
+		// Send EventVehicleActive to all battery readers (for non-standby states like "parked")
+		for _, r := range readersToNotify {
+			r.Lock()
+			present := r.data.Present
+			r.Unlock()
+			if present {
+				s.logger.Printf("[StateUpdate] Sending EventVehicleActive to Battery %d for vehicle state '%s'", r.index, newState)
+				r.stateMachine.SendEvent(EventVehicleActive)
+			}
+		}
+	}
 }
 
 // fetchAndUpdateCbBatteryCharge fetches the cb-battery charge from Redis and updates the service state.

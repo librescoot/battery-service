@@ -32,7 +32,6 @@ func (l LogLevel) String() string {
 // LogCallback is a function type for logging messages
 type LogCallback func(level LogLevel, message string)
 
-
 const (
 	RFProtocolUnknown RFProtocol = 0x00
 )
@@ -53,4 +52,4 @@ func (p RFProtocol) String() string {
 type Tag struct {
 	RFProtocol RFProtocol
 	ID         []byte
-} 
+}
