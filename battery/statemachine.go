@@ -222,12 +222,12 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateActiveRequested, EventCommandFailed, StateError, sm.actionCommandFailed},
 		{StateActiveRequested, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
 		{StateActiveRequested, EventSeatboxOpened, StateDeactivating, sm.actionRequestDeactivation},
-		{StateActiveRequested, EventLowSOC, StateDeactivating, sm.actionRequestDeactivation},
+		{StateActiveRequested, EventLowSOC, StateActiveRequested, sm.actionLowSOCWhileActive},
 		{StateActiveRequested, EventDisabled, StateDisabled, sm.actionDisable},
 
 		// From Active
 		{StateActive, EventSeatboxOpened, StateDeactivating, sm.actionRequestDeactivation},
-		{StateActive, EventLowSOC, StateDeactivating, sm.actionRequestDeactivation},
+		{StateActive, EventLowSOC, StateActive, sm.actionLowSOCWhileActive},
 		{StateActive, EventCBChargeHigh, StateDeactivating, sm.actionRequestDeactivation},
 		{StateActive, EventVehicleStandby, StateDeactivating, sm.actionRequestDeactivation},
 		{StateActive, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
@@ -859,4 +859,34 @@ func (sm *BatteryStateMachine) actionBatteryInsertedWhileDisabled(machine *Batte
 		// Don't enable, stay in disabled state
 		return fmt.Errorf("battery activation conditions not met")
 	}
+}
+
+func (sm *BatteryStateMachine) actionLowSOCWhileActive(machine *BatteryStateMachine, event BatteryEvent) error {
+	// Get current vehicle state to determine if we should deactivate
+	sm.reader.service.Lock()
+	vehicleState := sm.reader.service.vehicleState
+	sm.reader.service.Unlock()
+
+	sm.logger(hal.LogLevelWarning, fmt.Sprintf("Battery SOC is low while active (vehicleState=%s)", vehicleState))
+
+	// Update Redis status with low SOC condition
+	if err := sm.reader.updateRedisStatus(); err != nil {
+		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after low SOC: %v", err))
+	}
+
+	// Only deactivate if vehicle is in standby mode
+	// During rides or in park mode, keep the battery active despite low SOC
+	if vehicleState == "stand-by" {
+		sm.logger(hal.LogLevelInfo, "Vehicle is in standby mode - deactivating battery due to low SOC")
+		// Trigger deactivation by sending an event that will transition to StateDeactivating
+		go func() {
+			// Small delay to ensure current state transition completes
+			time.Sleep(10 * time.Millisecond)
+			sm.SendEvent(EventVehicleStandby)
+		}()
+	} else {
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Vehicle is in %s mode - keeping battery active despite low SOC", vehicleState))
+	}
+
+	return nil
 }
