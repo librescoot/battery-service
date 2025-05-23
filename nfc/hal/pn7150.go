@@ -49,23 +49,24 @@ func (s state) String() string {
 // PN7150 implements the HAL interface for the NXP PN7150 NFC controller
 type PN7150 struct {
 	sync.Mutex
-	state           state
-	fd              int
-	devicePath      string // Store the actual device path
-	logCallback     LogCallback
-	app             interface{}
-	txBuf           [256]byte
-	txSize          int
-	rxBuf           []byte
-	standbyEnabled  bool
-	lpcdEnabled     bool
-	tagSelected     bool
-	numTags         int
-	tags            []Tag
-	debug           bool
-	paramWriteTry   uint
-	paramWriteTries uint
-	lastReinitTime  time.Time // Track when the HAL was last reinitialized
+	state               state
+	fd                  int
+	devicePath          string // Store the actual device path
+	logCallback         LogCallback
+	app                 interface{}
+	txBuf               [256]byte
+	txSize              int
+	rxBuf               []byte
+	standbyEnabled      bool
+	lpcdEnabled         bool
+	tagSelected         bool
+	numTags             int
+	tags                []Tag
+	debug               bool
+	paramWriteTry       uint
+	paramWriteTries     uint
+	lastReinitTime      time.Time // Track when the HAL was last reinitialized
+	transitionTableSent bool      // Track whether RF transition table has been sent
 }
 
 func NewPN7150(devName string, logCallback LogCallback, app interface{}, standbyEnabled, lpcdEnabled bool, debugMode bool) (*PN7150, error) {
@@ -227,74 +228,91 @@ func (p *PN7150) Initialize() error {
 		}
 	}
 
-	// Set up RF transitions using CORE_SET_CONFIG
-	type rfTransition struct {
-		id     byte
-		offset byte
-		value  []byte
-	}
+	// Set up RF transitions using CORE_SET_CONFIG - only send once during first initialization
+	if !p.transitionTableSent {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, "Sending RF transition table for first time")
+		}
 
-	transitions := []rfTransition{
-		{0x04, 0x35, []byte{0x90, 0x01, 0xf4, 0x01}},
-		{0x06, 0x44, []byte{0x01, 0x90, 0x03, 0x00}},
-		{0x06, 0x30, []byte{0xb0, 0x01, 0x10, 0x00}},
-		{0x06, 0x42, []byte{0x02, 0x00, 0xff, 0xff}},
-		{0x06, 0x3f, []byte{0x04}},
-		{0x20, 0x42, []byte{0x88, 0x00, 0xff, 0xff}},
-		{0x22, 0x44, []byte{0x23, 0x00}},
-		{0x22, 0x2d, []byte{0x50, 0x34, 0x0c, 0x00}},
-		{0x32, 0x42, []byte{0xf8, 0x00, 0xff, 0xff}},
-		{0x34, 0x2d, []byte{0x24, 0x37, 0x0c, 0x00}},
-		{0x34, 0x33, []byte{0x86, 0x80, 0x00, 0x70}},
-		{0x34, 0x44, []byte{0x22, 0x00}},
-		{0x42, 0x2d, []byte{0x15, 0x45, 0x0d, 0x00}},
-		{0x46, 0x44, []byte{0x22, 0x00}},
-		{0x46, 0x2d, []byte{0x05, 0x59, 0x0e, 0x00}},
-		{0x44, 0x42, []byte{0x88, 0x00, 0xff, 0xff}},
-		{0x56, 0x2d, []byte{0x05, 0x9f, 0x0c, 0x00}},
-		{0x54, 0x42, []byte{0x88, 0x00, 0xff, 0xff}},
-		{0x0a, 0x33, []byte{0x80, 0x86, 0x00, 0x70}},
-	}
+		type rfTransition struct {
+			id     byte
+			offset byte
+			value  []byte
+		}
 
-	// Build CORE_SET_CONFIG command
-	configCmd := []byte{
-		0x20,                   // MT=CMD (1 << 5), GID=CORE
-		0x02,                   // OID=SET_CONFIG
-		0x00,                   // Length placeholder
-		byte(len(transitions)), // Number of parameters
-	}
+		transitions := []rfTransition{
+			{0x04, 0x35, []byte{0x90, 0x01, 0xf4, 0x01}},
+			{0x06, 0x44, []byte{0x01, 0x90, 0x03, 0x00}},
+			{0x06, 0x30, []byte{0xb0, 0x01, 0x10, 0x00}},
+			{0x06, 0x42, []byte{0x02, 0x00, 0xff, 0xff}},
+			{0x06, 0x3f, []byte{0x04}},
+			{0x20, 0x42, []byte{0x88, 0x00, 0xff, 0xff}},
+			{0x22, 0x44, []byte{0x23, 0x00}},
+			{0x22, 0x2d, []byte{0x50, 0x34, 0x0c, 0x00}},
+			{0x32, 0x42, []byte{0xf8, 0x00, 0xff, 0xff}},
+			{0x34, 0x2d, []byte{0x24, 0x37, 0x0c, 0x00}},
+			{0x34, 0x33, []byte{0x86, 0x80, 0x00, 0x70}},
+			{0x34, 0x44, []byte{0x22, 0x00}},
+			{0x42, 0x2d, []byte{0x15, 0x45, 0x0d, 0x00}},
+			{0x46, 0x44, []byte{0x22, 0x00}},
+			{0x46, 0x2d, []byte{0x05, 0x59, 0x0e, 0x00}},
+			{0x44, 0x42, []byte{0x88, 0x00, 0xff, 0xff}},
+			{0x56, 0x2d, []byte{0x05, 0x9f, 0x0c, 0x00}},
+			{0x54, 0x42, []byte{0x88, 0x00, 0xff, 0xff}},
+			{0x0a, 0x33, []byte{0x80, 0x86, 0x00, 0x70}},
+		}
 
-	// Add each transition parameter
-	for _, t := range transitions {
-		configCmd = append(configCmd,
-			0xA0,                 // RF_TRANSITION_CFG >> 8
-			0x0D,                 // RF_TRANSITION_CFG & 0xFF
-			byte(2+len(t.value)), // Parameter length
-			t.id,                 // Transition ID
-			t.offset,             // Offset
-		)
-		configCmd = append(configCmd, t.value...)
-	}
+		// Build CORE_SET_CONFIG command
+		configCmd := []byte{
+			0x20,                   // MT=CMD (1 << 5), GID=CORE
+			0x02,                   // OID=SET_CONFIG
+			0x00,                   // Length placeholder
+			byte(len(transitions)), // Number of parameters
+		}
 
-	// Update length
-	configCmd[2] = byte(len(configCmd) - 3)
+		// Add each transition parameter
+		for _, t := range transitions {
+			configCmd = append(configCmd,
+				0xA0,                 // RF_TRANSITION_CFG >> 8
+				0x0D,                 // RF_TRANSITION_CFG & 0xFF
+				byte(2+len(t.value)), // Parameter length
+				t.id,                 // Transition ID
+				t.offset,             // Offset
+			)
+			configCmd = append(configCmd, t.value...)
+		}
 
-	// Send CORE_SET_CONFIG command
-	resp, err = p.transfer(configCmd)
-	if err != nil {
-		p.Unlock()
-		return fmt.Errorf("RF transitions configuration failed: %v", err)
-	}
+		// Update length
+		configCmd[2] = byte(len(configCmd) - 3)
 
-	nciResp, err := parseNCIResponse(resp)
-	if err != nil {
-		p.Unlock()
-		return fmt.Errorf("failed to parse RF transitions response: %v", err)
-	}
+		// Send CORE_SET_CONFIG command
+		resp, err = p.transfer(configCmd)
+		if err != nil {
+			p.Unlock()
+			return fmt.Errorf("RF transitions configuration failed: %v", err)
+		}
 
-	if !isSuccessResponse(nciResp) {
-		p.Unlock()
-		return fmt.Errorf("RF transitions configuration failed with status: %02x", nciResp.Status)
+		nciResp, err := parseNCIResponse(resp)
+		if err != nil {
+			p.Unlock()
+			return fmt.Errorf("failed to parse RF transitions response: %v", err)
+		}
+
+		if !isSuccessResponse(nciResp) {
+			p.Unlock()
+			return fmt.Errorf("RF transitions configuration failed with status: %02x", nciResp.Status)
+		}
+
+		// Mark transition table as sent
+		p.transitionTableSent = true
+
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, "RF transition table sent successfully - will be skipped on future initializations")
+		}
+	} else {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, "Skipping RF transition table (already sent during first initialization)")
+		}
 	}
 
 	// Set up RF discovery map
@@ -306,6 +324,7 @@ func (p *PN7150) Initialize() error {
 		return fmt.Errorf("RF discover map failed: %v", err)
 	}
 
+	var nciResp *nciResponse
 	nciResp, err = parseNCIResponse(resp)
 	if err != nil {
 		p.Unlock()
