@@ -44,6 +44,10 @@ const (
 	// CB-Battery charge thresholds
 	cbBatteryActivationThreshold   = 50 // Percent
 	cbBatteryDeactivationThreshold = 90 // Percent
+
+	// Aux-Battery voltage thresholds
+	auxBatteryActivationThreshold   = 11000 // millivolts (11V)
+	auxBatteryDeactivationThreshold = 12600 // millivolts (12.6V)
 )
 
 func min(a, b int) int {

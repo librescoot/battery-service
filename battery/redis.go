@@ -264,9 +264,9 @@ func (s *Service) updateVehicleStateAndManagePolling() {
 	s.Unlock()
 
 	if newState == "stand-by" {
-		s.logger.Printf("[StateUpdate] Vehicle is in stand-by. Ensuring cb-battery polling is active.")
-		// Fetch initial cb-battery charge immediately if moving to stand-by
-		s.fetchAndUpdateCbBatteryCharge()
+		s.logger.Printf("[StateUpdate] Vehicle is in stand-by. Ensuring cb-battery and aux-battery polling is active.")
+		// Fetch initial cb-battery charge and aux-battery voltage immediately if moving to stand-by
+		s.fetchAndUpdateBatteries()
 		if !previousPollingActive {
 			s.startCbBatteryPolling()
 		}
@@ -283,7 +283,7 @@ func (s *Service) updateVehicleStateAndManagePolling() {
 		}
 	} else {
 		if previousPollingActive {
-			s.logger.Printf("[StateUpdate] Vehicle is NOT in stand-by (%s). Stopping cb-battery polling.", newState)
+			s.logger.Printf("[StateUpdate] Vehicle is NOT in stand-by (%s). Stopping cb-battery and aux-battery polling.", newState)
 			s.stopCbBatteryPolling()
 		}
 
@@ -300,8 +300,9 @@ func (s *Service) updateVehicleStateAndManagePolling() {
 	}
 }
 
-// fetchAndUpdateCbBatteryCharge fetches the cb-battery charge from Redis and updates the service state.
-func (s *Service) fetchAndUpdateCbBatteryCharge() {
+// fetchAndUpdateBatteries fetches the cb-battery charge and aux-battery voltage from Redis and updates the service state.
+func (s *Service) fetchAndUpdateBatteries() {
+	// Fetch cb-battery charge
 	chargeStr, err := s.redis.HGet(s.ctx, "cb-battery", "charge").Result()
 	if err != nil {
 		if err == redis.Nil {
@@ -318,18 +319,44 @@ func (s *Service) fetchAndUpdateCbBatteryCharge() {
 		return
 	}
 
+	// Fetch aux-battery voltage
+	voltageStr, voltErr := s.redis.HGet(s.ctx, "aux-battery", "voltage").Result()
+	var voltage int = -1
+	if voltErr != nil {
+		if voltErr == redis.Nil {
+			s.logger.Printf("[AuxBattery] aux-battery voltage not found in Redis.")
+		} else {
+			s.logger.Printf("[AuxBattery] Error getting aux-battery voltage: %v", voltErr)
+		}
+	} else {
+		voltage, err = parseInt(voltageStr)
+		if err != nil {
+			s.logger.Printf("[AuxBattery] Error parsing aux-battery voltage '%s': %v", voltageStr, err)
+			voltage = -1
+		}
+	}
+
 	s.Lock()
 	oldCharge := s.cbBatteryCharge
+	oldVoltage := s.auxBatteryVoltage
 	s.cbBatteryCharge = charge
+	s.auxBatteryVoltage = voltage
 	s.Unlock()
 
 	if charge != oldCharge {
 		s.logger.Printf("[CbBattery] cb-battery charge updated to %d%% (was %d%%)", charge, oldCharge)
+	}
+	if voltage != oldVoltage && voltage > 0 {
+		s.logger.Printf("[AuxBattery] aux-battery voltage updated to %dmV (was %dmV)", voltage, oldVoltage)
+	}
+
+	// Check if power state management is needed
+	if charge != oldCharge || voltage != oldVoltage {
 		s.manageBattery0PowerState()
 	}
 }
 
-// startCbBatteryPolling starts the periodic polling of cb-battery charge.
+// startCbBatteryPolling starts the periodic polling of cb-battery charge and aux-battery voltage.
 func (s *Service) startCbBatteryPolling() {
 	s.Lock()
 	if s.cbBatteryPollTicker != nil {
@@ -340,11 +367,11 @@ func (s *Service) startCbBatteryPolling() {
 	s.cbBatteryPollTicker = time.NewTicker(timeCbBatteryPollInterval)
 	s.Unlock()
 
-	s.logger.Printf("[CbBatteryPoll] Starting periodic polling for cb-battery charge every %s.", timeCbBatteryPollInterval)
+	s.logger.Printf("[BatteryPoll] Starting periodic polling for cb-battery charge and aux-battery voltage every %s.", timeCbBatteryPollInterval)
 	go s.periodicCbBatteryPoll()
 }
 
-// stopCbBatteryPolling stops the periodic polling of cb-battery charge.
+// stopCbBatteryPolling stops the periodic polling of cb-battery charge and aux-battery voltage.
 func (s *Service) stopCbBatteryPolling() {
 	s.Lock()
 	if s.cbBatteryPollTicker == nil {
@@ -355,13 +382,13 @@ func (s *Service) stopCbBatteryPolling() {
 	s.cbBatteryPollTicker.Stop()
 	s.cbBatteryPollTicker = nil // Mark as inactive
 	s.Unlock()
-	s.logger.Printf("[CbBatteryPoll] Stopped periodic polling for cb-battery charge.")
+	s.logger.Printf("[BatteryPoll] Stopped periodic polling for cb-battery charge and aux-battery voltage.")
 }
 
-// periodicCbBatteryPoll is the goroutine that periodically fetches cb-battery charge.
+// periodicCbBatteryPoll is the goroutine that periodically fetches cb-battery charge and aux-battery voltage.
 func (s *Service) periodicCbBatteryPoll() {
-	s.logger.Printf("[CbBatteryPoll] Goroutine started.")
-	defer s.logger.Printf("[CbBatteryPoll] Goroutine stopped.")
+	s.logger.Printf("[BatteryPoll] Goroutine started.")
+	defer s.logger.Printf("[BatteryPoll] Goroutine stopped.")
 
 	for {
 		s.Lock() // Lock to safely access ticker and stopChan
@@ -370,19 +397,19 @@ func (s *Service) periodicCbBatteryPoll() {
 		s.Unlock()
 
 		if ticker == nil { // Ticker can be nil if stopCbBatteryPolling was called
-			s.logger.Printf("[CbBatteryPoll] Ticker is nil, exiting loop.")
+			s.logger.Printf("[BatteryPoll] Ticker is nil, exiting loop.")
 			return
 		}
 
 		select {
 		case <-ticker.C:
-			s.logger.Printf("[CbBatteryPoll] Tick: fetching cb-battery charge.")
-			s.fetchAndUpdateCbBatteryCharge() // This now calls manageBattery0PowerState internally upon change
+			s.logger.Printf("[BatteryPoll] Tick: fetching cb-battery charge and aux-battery voltage.")
+			s.fetchAndUpdateBatteries() // This now calls manageBattery0PowerState internally upon change
 		case <-stopChan:
-			s.logger.Printf("[CbBatteryPoll] Received stop signal, exiting loop.")
+			s.logger.Printf("[BatteryPoll] Received stop signal, exiting loop.")
 			return
 		case <-s.ctx.Done():
-			s.logger.Printf("[CbBatteryPoll] Service context cancelled, exiting loop.")
+			s.logger.Printf("[BatteryPoll] Service context cancelled, exiting loop.")
 			return
 		}
 	}

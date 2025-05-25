@@ -57,6 +57,7 @@ type Service struct {
 	// Fields for cb-battery monitoring and control
 	vehicleState          string
 	cbBatteryCharge       int
+	auxBatteryVoltage     int
 	cbBatteryPollTicker   *time.Ticker
 	cbBatteryPollStopChan chan struct{}
 

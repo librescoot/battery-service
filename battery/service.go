@@ -24,6 +24,7 @@ func NewService(config *ServiceConfig, logger *log.Logger, debugMode bool) (*Ser
 		// Initialize new fields
 		vehicleState:          "", // Will be fetched
 		cbBatteryCharge:       -1, // Indicates unknown
+		auxBatteryVoltage:     -1, // Indicates unknown
 		cbBatteryPollStopChan: make(chan struct{}),
 		lastHALReinit:         [2]time.Time{time.Now(), time.Now()}, // Initialize with current time
 	}

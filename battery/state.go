@@ -92,10 +92,11 @@ func (r *BatteryReader) determineAndSendCommandOnOff() (BatteryCommand, BatteryS
 
 	// --- Determine desired state and command ---
 
-	// Check cb-battery condition if vehicle is in stand-by for battery 0
+	// Check cb-battery and aux-battery condition if vehicle is in stand-by for battery 0
 	r.service.Lock()
 	vehicleState := r.service.vehicleState
 	cbCharge := r.service.cbBatteryCharge
+	auxVoltage := r.service.auxBatteryVoltage
 	r.service.Unlock()
 
 	// Conditions where OFF is desired
@@ -105,13 +106,18 @@ func (r *BatteryReader) determineAndSendCommandOnOff() (BatteryCommand, BatteryS
 		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Condition for OFF met (enabled=%v, lowSOC=%v)", enabled, lowSOC))
 	}
 
-	// Additional condition for OFF for battery 0 if in stand-by and cb-charge is high
-	if index == 0 && vehicleState == "stand-by" && cbCharge >= cbBatteryDeactivationThreshold {
-		if currentState == BatteryStateActive { // Only force OFF if active
-			shouldForceOff = true
-			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Condition for OFF met for Battery 0 (stand-by, cb-charge %d%% >= %d%%)", cbCharge, cbBatteryDeactivationThreshold))
-		} else {
-			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery 0 (stand-by, cb-charge %d%% >= %d%%) but not Active (state: %s). OFF not forced by this rule.", cbCharge, cbBatteryDeactivationThreshold, currentState))
+	// Additional condition for OFF for battery 0 if in stand-by and BOTH cb-charge is high AND aux-voltage is high
+	if index == 0 && vehicleState == "stand-by" {
+		cbChargeOk := cbCharge < 0 || cbCharge >= cbBatteryDeactivationThreshold
+		auxVoltageOk := auxVoltage < 0 || auxVoltage >= auxBatteryDeactivationThreshold
+		
+		if cbChargeOk && auxVoltageOk {
+			if currentState == BatteryStateActive { // Only force OFF if active
+				shouldForceOff = true
+				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Condition for OFF met for Battery 0 (stand-by, cb-charge %d%% >= %d%%, aux-voltage %dmV >= %dmV)", cbCharge, cbBatteryDeactivationThreshold, auxVoltage, auxBatteryDeactivationThreshold))
+			} else {
+				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery 0 (stand-by, cb-charge %d%% >= %d%%, aux-voltage %dmV >= %dmV) but not Active (state: %s). OFF not forced by this rule.", cbCharge, cbBatteryDeactivationThreshold, auxVoltage, auxBatteryDeactivationThreshold, currentState))
+			}
 		}
 	}
 
@@ -131,20 +137,33 @@ func (r *BatteryReader) determineAndSendCommandOnOff() (BatteryCommand, BatteryS
 
 	// Conditions where ON is desired (only for battery 0)
 	if index == 0 && ready {
-		// Check cb-battery level if in stand-by
+		// Check cb-battery and aux-battery levels if in stand-by
 		if vehicleState == "stand-by" {
+			shouldTurnOn := false
+			onReason := ""
+			
+			// Check cb-battery
 			if cbCharge >= 0 && cbCharge < cbBatteryActivationThreshold {
-				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery 0 ON condition (stand-by, cb-charge %d%% < %d%%).", cbCharge, cbBatteryActivationThreshold))
+				shouldTurnOn = true
+				onReason = fmt.Sprintf("cb-charge %d%% < %d%%", cbCharge, cbBatteryActivationThreshold)
+			}
+			
+			// Check aux-battery
+			if auxVoltage >= 0 && auxVoltage < auxBatteryActivationThreshold {
+				shouldTurnOn = true
+				if onReason != "" {
+					onReason += " OR "
+				}
+				onReason += fmt.Sprintf("aux-voltage %dmV < %dmV", auxVoltage, auxBatteryActivationThreshold)
+			}
+			
+			if shouldTurnOn {
+				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery 0 ON condition (stand-by, %s).", onReason))
 				// Proceed to check current state for ON
-			} else if cbCharge >= cbBatteryActivationThreshold {
-				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery 0 ON suppressed (stand-by, cb-charge %d%% >= %d%%). Current state: %s", cbCharge, cbBatteryActivationThreshold, currentState))
+			} else {
+				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery 0 ON suppressed (stand-by, cb-charge %d%%, aux-voltage %dmV). Current state: %s", cbCharge, auxVoltage, currentState))
 				expectedState = currentState       // No ON command, expect current state
 				err = nil                          // No command sent, no error
-				return sentCmd, expectedState, err // Don't send ON
-			} else { // cbCharge < 0 (unknown)
-				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Battery 0 ON suppressed (stand-by, cb-charge unknown %d%%). Current state: %s", cbCharge, currentState))
-				expectedState = currentState
-				err = nil
 				return sentCmd, expectedState, err // Don't send ON
 			}
 		}
@@ -163,7 +182,7 @@ func (r *BatteryReader) determineAndSendCommandOnOff() (BatteryCommand, BatteryS
 	}
 
 	// Default case: No command needed (e.g., battery 1 is present and ready, or battery 0 not ready, or conditions not met for ON/OFF)
-	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("No ON/OFF command needed (index=%d, ready=%v, state=%s, vehicleState=%s, cbCharge=%d). Expecting %s.", index, ready, currentState, vehicleState, cbCharge, expectedState))
+	r.logCallback(hal.LogLevelDebug, fmt.Sprintf("No ON/OFF command needed (index=%d, ready=%v, state=%s, vehicleState=%s, cbCharge=%d, auxVoltage=%d). Expecting %s.", index, ready, currentState, vehicleState, cbCharge, auxVoltage, expectedState))
 	err = nil // No command sent, no error
 	return sentCmd, expectedState, err
 }
@@ -195,11 +214,12 @@ func (r *BatteryReader) checkStateCorrectAfterRead(expectedState BatteryState) b
 }
 
 // manageBattery0PowerState checks conditions and sends ON/OFF commands to battery 0
-// based on vehicle state and cb-battery charge.
+// based on vehicle state, cb-battery charge, and aux-battery voltage.
 func (s *Service) manageBattery0PowerState() {
-	s.Lock() // Lock to read service-level state: vehicleState, cbBatteryCharge
+	s.Lock() // Lock to read service-level state: vehicleState, cbBatteryCharge, auxBatteryVoltage
 	vehicleState := s.vehicleState
 	cbCharge := s.cbBatteryCharge
+	auxVoltage := s.auxBatteryVoltage
 	reader0 := s.readers[0]
 	s.Unlock()
 
@@ -221,43 +241,70 @@ func (s *Service) manageBattery0PowerState() {
 	}
 
 	if vehicleState == "stand-by" {
-		s.logger.Printf("[PowerMgmtB0] Vehicle in stand-by. CB-Charge: %d%%. Battery 0 State: %s", cbCharge, currentState)
-		if cbCharge < 0 {
-			s.logger.Printf("[PowerMgmtB0] CB-Battery charge unknown (%d). No action.", cbCharge)
-			return
+		s.logger.Printf("[PowerMgmtB0] Vehicle in stand-by. CB-Charge: %d%%, Aux-Voltage: %dmV. Battery 0 State: %s", cbCharge, auxVoltage, currentState)
+		
+		// Check if we need to activate battery 0
+		shouldActivate := false
+		activationReason := ""
+		
+		// Check cb-battery charge
+		if cbCharge >= 0 && cbCharge < cbBatteryActivationThreshold {
+			shouldActivate = true
+			activationReason = fmt.Sprintf("CB-Charge %d%% < %d%%", cbCharge, cbBatteryActivationThreshold)
 		}
-
-		if cbCharge < cbBatteryActivationThreshold {
+		
+		// Check aux-battery voltage
+		if auxVoltage >= 0 && auxVoltage < auxBatteryActivationThreshold {
+			shouldActivate = true
+			if activationReason != "" {
+				activationReason += " AND "
+			}
+			activationReason += fmt.Sprintf("Aux-Voltage %dmV < %dmV", auxVoltage, auxBatteryActivationThreshold)
+		}
+		
+		if shouldActivate {
 			// Activate if not already Active and is ready
 			if currentState != BatteryStateActive && readyToScoot {
-				s.logger.Printf("[PowerMgmtB0] CB-Charge %d%% < %d%%. Activating Battery 0.", cbCharge, cbBatteryActivationThreshold)
+				s.logger.Printf("[PowerMgmtB0] %s. Activating Battery 0.", activationReason)
 				if err := reader0.sendCommand(s.ctx, BatteryCommandOn); err != nil {
 					s.logger.Printf("[PowerMgmtB0] Error sending ON command to Battery 0: %v", err)
-				} else {
-					// Optionally, verify state change after a delay, or let heartbeat/status poll handle it
-					// For now, assume command is processed. Subsequent status reads will reflect new state.
 				}
 			} else if currentState == BatteryStateActive {
-				s.logger.Printf("[PowerMgmtB0] CB-Charge %d%% < %d%%. Battery 0 already active.", cbCharge, cbBatteryActivationThreshold)
+				s.logger.Printf("[PowerMgmtB0] %s. Battery 0 already active.", activationReason)
 			} else if !readyToScoot {
-				s.logger.Printf("[PowerMgmtB0] CB-Charge %d%% < %d%%. Battery 0 not ready to scoot, cannot send ON.", cbCharge, cbBatteryActivationThreshold)
-			}
-		} else if cbCharge >= cbBatteryDeactivationThreshold {
-			// Deactivate if currently Active
-			if currentState == BatteryStateActive {
-				s.logger.Printf("[PowerMgmtB0] CB-Charge %d%% >= %d%%. Deactivating Battery 0.", cbCharge, cbBatteryDeactivationThreshold)
-				if err := reader0.sendCommand(s.ctx, BatteryCommandOff); err != nil {
-					s.logger.Printf("[PowerMgmtB0] Error sending OFF command to Battery 0: %v", err)
-				} else {
-					// Similar to ON, assume command processed. Subsequent status reads will reflect.
-				}
-			} else {
-				s.logger.Printf("[PowerMgmtB0] CB-Charge %d%% >= %d%%. Battery 0 not active (state: %s). No OFF command needed.", cbCharge, cbBatteryDeactivationThreshold, currentState)
+				s.logger.Printf("[PowerMgmtB0] %s. Battery 0 not ready to scoot, cannot send ON.", activationReason)
 			}
 		} else {
-			s.logger.Printf("[PowerMgmtB0] CB-Charge %d%% is between thresholds (%d%% - %d%%). No change to Battery 0 power state.", cbCharge, cbBatteryActivationThreshold, cbBatteryDeactivationThreshold)
+			// Check if we should deactivate battery 0
+			// Only deactivate if BOTH cb-battery is charged AND aux-battery has good voltage
+			cbChargeOk := cbCharge < 0 || cbCharge >= cbBatteryDeactivationThreshold
+			auxVoltageOk := auxVoltage < 0 || auxVoltage >= auxBatteryDeactivationThreshold
+			
+			if cbChargeOk && auxVoltageOk {
+				// Deactivate if currently Active
+				if currentState == BatteryStateActive {
+					deactivationReason := ""
+					if cbCharge >= 0 {
+						deactivationReason = fmt.Sprintf("CB-Charge %d%% >= %d%%", cbCharge, cbBatteryDeactivationThreshold)
+					}
+					if auxVoltage >= 0 {
+						if deactivationReason != "" {
+							deactivationReason += " AND "
+						}
+						deactivationReason += fmt.Sprintf("Aux-Voltage %dmV >= %dmV", auxVoltage, auxBatteryDeactivationThreshold)
+					}
+					s.logger.Printf("[PowerMgmtB0] %s. Deactivating Battery 0.", deactivationReason)
+					if err := reader0.sendCommand(s.ctx, BatteryCommandOff); err != nil {
+						s.logger.Printf("[PowerMgmtB0] Error sending OFF command to Battery 0: %v", err)
+					}
+				} else {
+					s.logger.Printf("[PowerMgmtB0] Both batteries OK (CB: %d%%, Aux: %dmV). Battery 0 not active (state: %s). No OFF command needed.", cbCharge, auxVoltage, currentState)
+				}
+			} else {
+				s.logger.Printf("[PowerMgmtB0] No action needed. CB-Charge: %d%% (threshold: %d%%), Aux-Voltage: %dmV (threshold: %dmV)", cbCharge, cbBatteryActivationThreshold, auxVoltage, auxBatteryActivationThreshold)
+			}
 		}
 	} else {
-		s.logger.Printf("[PowerMgmtB0] Vehicle not in stand-by (state: %s). CB-battery based control inactive.", vehicleState)
+		s.logger.Printf("[PowerMgmtB0] Vehicle not in stand-by (state: %s). CB-battery and aux-battery based control inactive.", vehicleState)
 	}
 }
