@@ -142,19 +142,6 @@ func buildCoreInit() []byte {
 	return buildNCIPacket(header, nil)
 }
 
-// NCI Core Set Config Command
-func buildCoreSetConfig(paramID uint16, value []byte) []byte {
-	payload := []byte{
-		0x01,                 // Number of parameters
-		byte(paramID >> 8),   // Parameter ID high byte
-		byte(paramID & 0xFF), // Parameter ID low byte
-		byte(len(value)),     // Parameter length
-	}
-	payload = append(payload, value...)
-	header := buildNCIHeader(nciMsgTypeCommand, nciGroupCore, nciCoreSetConfig, uint8(len(payload)))
-	return buildNCIPacket(header, payload)
-}
-
 // NCI RF Discovery Commands
 func buildRFDiscoverCmd(pollPeriod uint) []byte {
 	payload := []byte{
@@ -185,21 +172,6 @@ func buildRFDiscoverMapCmd() []byte {
 func buildRFDeactivateCmd() []byte {
 	header := buildNCIHeader(nciMsgTypeCommand, nciGroupRF, nciRFDeactivateOID, 1)
 	return buildNCIPacket(header, []byte{0x00}) // Idle mode
-}
-
-// T2T Read Command
-func buildRFT2TReadCmd(blockAddr byte) []byte {
-	header := buildNCIHeader(nciMsgTypeCommand, nciGroupRF, nciRFT2TReadOID, 1)
-	return buildNCIPacket(header, []byte{blockAddr})
-}
-
-// T2T Write Command
-func buildRFT2TWriteCmd(blockAddr byte, data []byte) []byte {
-	header := buildNCIHeader(nciMsgTypeCommand, nciGroupRF, nciRFT2TWriteOID, 5)
-	payload := make([]byte, 5)
-	payload[0] = blockAddr
-	copy(payload[1:], data)
-	return buildNCIPacket(header, payload)
 }
 
 // Response parsing functions

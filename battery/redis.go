@@ -350,9 +350,52 @@ func (s *Service) fetchAndUpdateBatteries() {
 		s.logger.Printf("[AuxBattery] aux-battery voltage updated to %dmV (was %dmV)", voltage, oldVoltage)
 	}
 
-	// Check if power state management is needed
+	// Check if battery level events need to be sent
 	if charge != oldCharge || voltage != oldVoltage {
-		s.manageBattery0PowerState()
+		// Send events to battery 0's state machine if levels have changed
+		if s.readers[0] != nil && s.readers[0].stateMachine != nil {
+			// For cb-battery charge changes
+			if charge != oldCharge && charge >= 0 {
+				// Check if we crossed the deactivation threshold (90%)
+				if oldCharge < cbBatteryDeactivationThreshold && charge >= cbBatteryDeactivationThreshold {
+					s.logger.Printf("[CbBattery] CB battery charge high (%d%% >= %d%%), sending event", charge, cbBatteryDeactivationThreshold)
+					s.readers[0].stateMachine.SendEvent(EventCBChargeHigh)
+				} else if oldCharge >= cbBatteryDeactivationThreshold && charge < cbBatteryDeactivationThreshold {
+					s.logger.Printf("[CbBattery] CB battery charge dropped below deactivation threshold (%d%% < %d%%)", charge, cbBatteryDeactivationThreshold)
+					// Don't send an event here - let the heartbeat re-evaluate
+				}
+				
+				// Check if we crossed the activation threshold (50%)
+				if oldCharge >= cbBatteryActivationThreshold && charge < cbBatteryActivationThreshold {
+					s.logger.Printf("[CbBattery] CB battery charge low (%d%% < %d%%), sending event", charge, cbBatteryActivationThreshold)
+					s.readers[0].stateMachine.SendEvent(EventCBChargeLow)
+				} else if oldCharge < cbBatteryActivationThreshold && charge >= cbBatteryActivationThreshold {
+					s.logger.Printf("[CbBattery] CB battery charge rose above activation threshold (%d%% >= %d%%)", charge, cbBatteryActivationThreshold)
+					// Don't send an event here - let the heartbeat re-evaluate
+				}
+			}
+			
+			// For aux-battery voltage changes
+			if voltage != oldVoltage && voltage >= 0 {
+				// Check if we crossed the deactivation threshold (12600mV)
+				if oldVoltage < auxBatteryDeactivationThreshold && voltage >= auxBatteryDeactivationThreshold {
+					s.logger.Printf("[AuxBattery] Aux battery voltage OK (%dmV >= %dmV), sending event", voltage, auxBatteryDeactivationThreshold)
+					s.readers[0].stateMachine.SendEvent(EventAuxBatteryOK)
+				} else if oldVoltage >= auxBatteryDeactivationThreshold && voltage < auxBatteryDeactivationThreshold {
+					s.logger.Printf("[AuxBattery] Aux battery voltage dropped below deactivation threshold (%dmV < %dmV)", voltage, auxBatteryDeactivationThreshold)
+					// Don't send an event here - let the heartbeat re-evaluate
+				}
+				
+				// Check if we crossed the activation threshold (11000mV)
+				if oldVoltage >= auxBatteryActivationThreshold && voltage < auxBatteryActivationThreshold {
+					s.logger.Printf("[AuxBattery] Aux battery voltage low (%dmV < %dmV), sending event", voltage, auxBatteryActivationThreshold)
+					s.readers[0].stateMachine.SendEvent(EventAuxBatteryLow)
+				} else if oldVoltage < auxBatteryActivationThreshold && voltage >= auxBatteryActivationThreshold {
+					s.logger.Printf("[AuxBattery] Aux battery voltage rose above activation threshold (%dmV >= %dmV)", voltage, auxBatteryActivationThreshold)
+					// Don't send an event here - let the heartbeat re-evaluate
+				}
+			}
+		}
 	}
 }
 

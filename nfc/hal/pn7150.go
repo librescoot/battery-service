@@ -365,14 +365,6 @@ func (p *PN7150) Initialize() error {
 	return nil
 }
 
-// Helper function to convert bool to byte
-func boolToByte(b bool) byte {
-	if b {
-		return 1
-	}
-	return 0
-}
-
 // SetPower controls the device power state through IOCTL
 func (p *PN7150) SetPower(on bool) error {
 	if p.fd < 0 {
@@ -400,18 +392,6 @@ func (p *PN7150) SetPower(on bool) error {
 	if errno != 0 {
 		return fmt.Errorf("ioctl error: %v", errno)
 	}
-	return nil
-}
-
-// checkParams verifies the device parameters
-func (p *PN7150) checkParams() error {
-	// TODO: Implement parameter checking
-	return nil
-}
-
-// writeParams writes the device parameters
-func (p *PN7150) writeParams() error {
-	// TODO: Implement parameter writing
 	return nil
 }
 
