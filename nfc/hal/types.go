@@ -53,3 +53,19 @@ type Tag struct {
 	RFProtocol RFProtocol
 	ID         []byte
 }
+
+// TagEventType represents the type of tag event
+type TagEventType int
+
+const (
+	// TagArrival indicates a tag has been detected
+	TagArrival TagEventType = iota
+	// TagDeparture indicates a tag has been removed
+	TagDeparture
+)
+
+// TagEvent represents a tag arrival or departure event
+type TagEvent struct {
+	Type TagEventType
+	Tag  *Tag
+}

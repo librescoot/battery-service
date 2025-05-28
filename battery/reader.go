@@ -1,8 +1,10 @@
 package battery
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"battery-service/nfc/hal"
@@ -12,10 +14,12 @@ import (
 func (r *BatteryReader) Start() error {
 	// Enable the reader by default
 	r.enabled = true
-	r.batteryRemovedThreshold = 5          // At least 5 consecutive absences before battery is considered removed
 	r.isPoweredDown = false                // Ensure we start with the reader powered up
-	r.zeroTagDetections = 0                // Initialize zero tag detection counter
-	r.consecutiveZeroInitializingCount = 0 // Initialize counter for zero detections while initializing
+	
+	// Initialize operation context for cancelling operations when tag departs
+	r.Lock()
+	r.operationCtx, r.operationCancel = context.WithCancel(r.service.ctx)
+	r.Unlock()
 
 	// Initialize NFC HAL
 	if err := r.hal.Initialize(); err != nil {
@@ -38,6 +42,13 @@ func (r *BatteryReader) Start() error {
 func (r *BatteryReader) Stop() {
 	// Stop the state machine first
 	r.stateMachine.Stop()
+
+	// Cancel any pending operations
+	r.Lock()
+	if r.operationCancel != nil {
+		r.operationCancel()
+	}
+	r.Unlock()
 
 	close(r.stopChan)
 
@@ -71,7 +82,7 @@ func (r *BatteryReader) setEnabled(enabled bool) {
 	}
 }
 
-// monitorTags continuously monitors for tag presence
+// monitorTags continuously monitors for tag presence using channel-based detection
 func (r *BatteryReader) monitorTags() {
 	// Initialize battery state as not present
 	r.Lock()
@@ -84,131 +95,46 @@ func (r *BatteryReader) monitorTags() {
 	}
 	r.Unlock()
 
-	// Default poll period in milliseconds
-	const defaultPollPeriod uint = 500
+	// Get the tag event channel from HAL
+	tagEventChan := r.hal.GetTagEventChannel()
 
 	for {
 		select {
 		case <-r.stopChan:
 			return
-		default:
+
+		case event := <-tagEventChan:
 			// Check if the reader is temporarily powered down
 			r.Lock()
 			isPoweredDown := r.isPoweredDown
 			r.Unlock()
 
 			if isPoweredDown {
-				// Skip tag detection when powered down, use longer sleep to reduce CPU usage
-				time.Sleep(1 * time.Second)
+				// Ignore events when powered down
 				continue
 			}
 
-			// Proceed with tag detection
-			r.nfcMutex.Lock()
-			tags, err := r.hal.DetectTags()
-			r.nfcMutex.Unlock()
-			if err != nil {
-				r.logCallback(hal.LogLevelError, fmt.Sprintf("Tag detection error: %v", err))
-				// Short sleep after error before retrying detection
-				time.Sleep(timeDeparture) // Use a short delay like timeDeparture
-				continue
-			}
-
-			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Detected %d tags", len(tags)))
-
-			if len(tags) == 1 && (tags[0].RFProtocol == hal.RFProtocolT2T || tags[0].RFProtocol == hal.RFProtocolISODEP) {
-				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Found %s tag with ID: %x", tags[0].RFProtocol, tags[0].ID))
-				r.handleTagPresent() // Handles state change and Redis update
-
-				// Reset zero tag counter when we find a tag
-				r.Lock()
-				r.zeroTagDetections = 0
-				r.Unlock()
-			} else if len(tags) > 1 {
-				r.logCallback(hal.LogLevelWarning, "Multiple tags detected, ignoring")
-				r.handleTagAbsent() // Handles state change and Redis update
-
-				// Reset zero tag counter when we find multiple tags
-				r.Lock()
-				r.zeroTagDetections = 0
-				r.Unlock()
-			} else {
-				// No tags detected
-				r.handleTagAbsent() // Handles state change and Redis update
-
-				// Increment zero tag counter and check if we need to restart discovery
-				r.Lock()
-				r.zeroTagDetections++
-				zeroTagCount := r.zeroTagDetections
-				r.Unlock()
-
-				// Every 5 consecutive zero detections, restart discovery
-				if zeroTagCount >= 5 {
-					r.logCallback(hal.LogLevelInfo, "5 consecutive zero tag detections - restarting discovery")
-
-					r.nfcMutex.Lock()
-					// Get current HAL state
-					halState := r.hal.GetState()
-
-					// Only attempt to restart discovery if HAL is in a valid state
-					if halState == hal.StateInitializing {
-						r.logCallback(hal.LogLevelWarning, "Cannot restart discovery - HAL is still initializing")
-
-						// If initialization has been stuck for some time, try hardware reset
-						if r.consecutiveZeroInitializingCount > 3 {
-							r.logCallback(hal.LogLevelWarning, "HAL stuck in initializing state - attempting hardware reset")
-							r.consecutiveZeroInitializingCount = 0
-							r.nfcMutex.Unlock() // Release mutex before reset
-
-							// Use simple approach to reset the hardware
-							if err := r.forceHardwareReset(); err != nil {
-								r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to reset hardware: %v", err))
-							}
-						} else {
-							r.consecutiveZeroInitializingCount++
-							r.nfcMutex.Unlock()
-						}
-
-						// Reset counter to avoid continuous logging
-						r.Lock()
-						r.zeroTagDetections = 1
-						r.Unlock()
-					} else if halState != hal.StateUninitialized && halState != hal.StateInitializing {
-						// Stop discovery first
-						_ = r.hal.StopDiscovery() // Ignore errors, we'll try to restart anyway
-
-						// Start discovery again
-						if err := r.hal.StartDiscovery(defaultPollPeriod); err != nil {
-							r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to restart discovery: %v", err))
-						} else {
-							r.logCallback(hal.LogLevelInfo, "Successfully restarted discovery")
-						}
-						r.nfcMutex.Unlock()
-
-						// Reset counter
-						r.Lock()
-						r.zeroTagDetections = 0
-						r.Unlock()
+			switch event.Type {
+			case hal.TagArrival:
+				if event.Tag != nil {
+					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Tag arrived: %s tag with ID: %x", event.Tag.RFProtocol, event.Tag.ID))
+					
+					// Check if it's a valid battery tag
+					if event.Tag.RFProtocol == hal.RFProtocolT2T || event.Tag.RFProtocol == hal.RFProtocolISODEP {
+						// Send tag arrived event for discovery states
+						r.stateMachine.SendEvent(EventTagArrived)
+						r.handleTagPresent() // Handles state change and Redis update
 					} else {
-						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Cannot restart discovery - HAL in state: %s", halState))
-						r.nfcMutex.Unlock()
-
-						// Use simple HAL recovery approach
-						r.logCallback(hal.LogLevelInfo, "Attempting to recover from uninitialized state")
-						if err := r.simpleHALRecovery(); err != nil {
-							r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed HAL recovery during uninitialized recovery: %v", err))
-						}
-
-						// Reset counter
-						r.Lock()
-						r.zeroTagDetections = 0
-						r.Unlock()
+						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Unsupported tag protocol: %s", event.Tag.RFProtocol))
+						r.handleTagAbsent() // Treat unsupported tags as absent
 					}
 				}
+
+			case hal.TagDeparture:
+				r.logCallback(hal.LogLevelDebug, "Tag departed")
+				r.handleTagAbsent() // Handles state change and Redis update
 			}
 
-			// Always use a short sleep interval to ensure responsiveness for absence detection
-			time.Sleep(500 * time.Millisecond)
 		}
 	}
 }
@@ -216,8 +142,6 @@ func (r *BatteryReader) monitorTags() {
 // handleTagPresent handles a present tag
 func (r *BatteryReader) handleTagPresent() {
 	r.Lock()
-	// Reset the consecutive absence counter when tag is detected
-	r.consecutiveTagAbsences = 0
 
 	if !r.data.Present {
 		r.data.Present = true // Mark as present immediately
@@ -249,21 +173,18 @@ func (r *BatteryReader) handleTagAbsent() {
 	r.Lock()
 	defer r.Unlock()
 
+	// Don't process tag absence if HAL is intentionally powered down
+	if r.isPoweredDown {
+		r.logCallback(hal.LogLevelDebug, "Ignoring tag absence - HAL is powered down")
+		return
+	}
+
 	// Check if battery was previously present
 	if r.data.Present {
-		// Simple counter approach: increment consecutive absences
-		r.consecutiveTagAbsences++
-
-		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Tag absence detected (%d/%d)",
-			r.consecutiveTagAbsences, r.batteryRemovedThreshold))
-
-		// Only mark as removed if consistently absent for the threshold period
-		if r.consecutiveTagAbsences >= r.batteryRemovedThreshold {
-			r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery removed after %d consecutive absences", r.consecutiveTagAbsences))
-
-			// Send battery removal event to state machine
-			r.stateMachine.SendEvent(EventBatteryRemoved)
-		}
+		r.logCallback(hal.LogLevelInfo, "Tag departed - sending immediate departure event")
+		
+		// Send tag departed event immediately for reactive behavior
+		r.stateMachine.SendEvent(EventTagDeparted)
 	}
 }
 
@@ -305,9 +226,18 @@ func (r *BatteryReader) readBatteryStatus() error {
 
 		// Read Status0
 		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Attempt %d: Reading Status0...", attempt))
-		data, err = r.readRegisterWithRetry(r.service.ctx, addrStatus0)
+		
+		// Use operation context so reads can be cancelled when tag departs
+		data, err = r.readRegisterWithRetry(r.getOperationContext(), addrStatus0)
 		if err != nil {
 			lastMainError = fmt.Errorf("attempt %d: failed to read Status0: %w", attempt, err)
+			
+			// Don't retry HAL recovery for context cancelled errors (tag departed)
+			if strings.Contains(err.Error(), "context cancel") {
+				r.logCallback(hal.LogLevelDebug, "Status0 read cancelled due to tag departure, not retrying")
+				return lastMainError
+			}
+			
 			if errors.Is(err, errHALRecreatedRetryRead) && attempt < maxAttemptsAfterHALRecreation {
 				r.logCallback(hal.LogLevelWarning, "HAL recreated during Status0 read, retrying entire status read.")
 				continue // Retry the entire readBatteryStatus sequence
@@ -377,9 +307,16 @@ func (r *BatteryReader) readBatteryStatus() error {
 
 		// Read Status1
 		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Attempt %d: Reading Status1...", attempt))
-		data, err = r.readRegisterWithRetry(r.service.ctx, addrStatus1)
+		data, err = r.readRegisterWithRetry(r.getOperationContext(), addrStatus1)
 		if err != nil {
 			lastMainError = fmt.Errorf("attempt %d: failed to read Status1: %w", attempt, err)
+			
+			// Don't retry HAL recovery for context cancelled errors (tag departed)
+			if strings.Contains(err.Error(), "context cancel") {
+				r.logCallback(hal.LogLevelDebug, "Status1 read cancelled due to tag departure, not retrying")
+				return lastMainError
+			}
+			
 			if errors.Is(err, errHALRecreatedRetryRead) && attempt < maxAttemptsAfterHALRecreation {
 				r.logCallback(hal.LogLevelWarning, "HAL recreated during Status1 read, retrying entire status read.")
 				continue // Retry the entire readBatteryStatus sequence
@@ -415,9 +352,16 @@ func (r *BatteryReader) readBatteryStatus() error {
 
 		// Read Status2
 		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Attempt %d: Reading Status2...", attempt))
-		data, err = r.readRegisterWithRetry(r.service.ctx, addrStatus2)
+		data, err = r.readRegisterWithRetry(r.getOperationContext(), addrStatus2)
 		if err != nil {
 			lastMainError = fmt.Errorf("attempt %d: failed to read Status2: %w", attempt, err)
+			
+			// Don't retry HAL recovery for context cancelled errors (tag departed)
+			if strings.Contains(err.Error(), "context cancel") {
+				r.logCallback(hal.LogLevelDebug, "Status2 read cancelled due to tag departure, not retrying")
+				return lastMainError
+			}
+			
 			if errors.Is(err, errHALRecreatedRetryRead) && attempt < maxAttemptsAfterHALRecreation {
 				r.logCallback(hal.LogLevelWarning, "HAL recreated during Status2 read, retrying entire status read.")
 				continue // Retry the entire readBatteryStatus sequence
@@ -451,9 +395,6 @@ func (r *BatteryReader) readBatteryStatus() error {
 		if currentLowSOC && !previousLowSOC {
 			r.logCallback(hal.LogLevelInfo, "Low SOC condition detected")
 			r.stateMachine.SendEvent(EventLowSOC)
-		} else if !currentLowSOC && previousLowSOC {
-			r.logCallback(hal.LogLevelInfo, "SOC restored")
-			r.stateMachine.SendEvent(EventSOCRestored)
 		}
 
 		// Update Redis with the new status
@@ -520,24 +461,12 @@ func (r *BatteryReader) safelyPowerDownHAL() error {
 	return nil
 }
 
-// forceHardwareReset performs hardware reset using simple approach
-func (r *BatteryReader) forceHardwareReset() error {
-	r.logCallback(hal.LogLevelWarning, "Performing hardware reset using simple approach")
-
-	// First mark as not powered down
-	r.Lock()
-	r.isPoweredDown = false
-	r.Unlock()
-
-	return r.simpleHALRecovery()
-}
-
 // simpleHALRecovery performs HAL recovery using FullReinitialize to handle file descriptor issues
 func (r *BatteryReader) simpleHALRecovery() error {
-	r.logCallback(hal.LogLevelInfo, "Performing HAL recovery with file descriptor renewal")
+	r.logCallback(hal.LogLevelInfo, "Performing full HAL recovery with file descriptor renewal")
 
-	// Use FullReinitialize which properly handles file descriptor renewal
-	// This is critical when "bad file descriptor" errors occur
+	// Always use FullReinitialize which properly handles file descriptor renewal
+	// This is critical for proper recovery from 0300 errors and connection issues
 	r.nfcMutex.Lock()
 	errInit := r.hal.FullReinitialize()
 	r.nfcMutex.Unlock()
@@ -547,11 +476,10 @@ func (r *BatteryReader) simpleHALRecovery() error {
 		return fmt.Errorf("failed to reinitialize HAL during recovery: %w", errInit)
 	}
 
-	r.logCallback(hal.LogLevelInfo, "HAL recovery completed successfully with file descriptor renewal")
+	r.logCallback(hal.LogLevelInfo, "Full HAL recovery completed successfully with file descriptor renewal")
+	
+	// Give the NFC hardware time to stabilize after reinitialization
+	time.Sleep(100 * time.Millisecond)
+	
 	return nil
-}
-
-// createNewHAL creates a new HAL instance using simple deinitialize/initialize approach
-func (r *BatteryReader) createNewHAL() error {
-	return r.simpleHALRecovery()
 }

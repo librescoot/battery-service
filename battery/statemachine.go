@@ -17,16 +17,10 @@ const (
 	EventSeatboxOpened
 	EventSeatboxClosed
 	EventReadyToScoot
-	EventNotReadyToScoot
 	EventLowSOC
-	EventSOCRestored
-	EventCommandSent
 	EventCommandFailed
 	EventStateVerified
 	EventStateVerificationFailed
-	EventCBChargeHigh
-	EventCBChargeLow
-	EventVehicleStandby
 	EventVehicleActive
 	EventDisabled
 	EventEnabled
@@ -34,8 +28,10 @@ const (
 	EventMaintenanceTick
 	EventHALError
 	EventHALRecovered
-	EventAuxBatteryLow
-	EventAuxBatteryOK
+	EventBatteryAlreadyActive
+	EventTagDeparted        // Tag departed during operation
+	EventTagArrived         // Tag detected by discovery
+	EventDiscoveryTimeout   // Discovery timeout expired
 )
 
 // String returns a string representation of the battery event
@@ -51,26 +47,14 @@ func (e BatteryEvent) String() string {
 		return "SeatboxClosed"
 	case EventReadyToScoot:
 		return "ReadyToScoot"
-	case EventNotReadyToScoot:
-		return "NotReadyToScoot"
 	case EventLowSOC:
 		return "LowSOC"
-	case EventSOCRestored:
-		return "SOCRestored"
-	case EventCommandSent:
-		return "CommandSent"
 	case EventCommandFailed:
 		return "CommandFailed"
 	case EventStateVerified:
 		return "StateVerified"
 	case EventStateVerificationFailed:
 		return "StateVerificationFailed"
-	case EventCBChargeHigh:
-		return "CBChargeHigh"
-	case EventCBChargeLow:
-		return "CBChargeLow"
-	case EventVehicleStandby:
-		return "VehicleStandby"
 	case EventVehicleActive:
 		return "VehicleActive"
 	case EventDisabled:
@@ -85,10 +69,14 @@ func (e BatteryEvent) String() string {
 		return "HALError"
 	case EventHALRecovered:
 		return "HALRecovered"
-	case EventAuxBatteryLow:
-		return "AuxBatteryLow"
-	case EventAuxBatteryOK:
-		return "AuxBatteryOK"
+	case EventBatteryAlreadyActive:
+		return "BatteryAlreadyActive"
+	case EventTagDeparted:
+		return "TagDeparted"
+	case EventTagArrived:
+		return "TagArrived"
+	case EventDiscoveryTimeout:
+		return "DiscoveryTimeout"
 	default:
 		return "Unknown"
 	}
@@ -99,6 +87,8 @@ type BatteryMachineState int
 
 const (
 	StateNotPresent BatteryMachineState = iota
+	StateDiscovering         // Actively trying to discover tag
+	StateWaitingForArrival   // Waiting for tag to arrive with timeout
 	StateInitializing
 	StateIdleStandby
 	StateIdleReady
@@ -115,6 +105,10 @@ func (s BatteryMachineState) String() string {
 	switch s {
 	case StateNotPresent:
 		return "NotPresent"
+	case StateDiscovering:
+		return "Discovering"
+	case StateWaitingForArrival:
+		return "WaitingForArrival"
 	case StateInitializing:
 		return "Initializing"
 	case StateIdleStandby:
@@ -158,6 +152,8 @@ type BatteryStateMachine struct {
 	stateHistory    []StateHistoryEntry
 	maxHistorySize  int
 	logger          func(level hal.LogLevel, message string)
+	lastEventTime   map[BatteryEvent]time.Time // Track last time each event was sent
+	eventDebounce   time.Duration              // Minimum time between duplicate events
 }
 
 type stateEventKey struct {
@@ -179,11 +175,13 @@ func NewBatteryStateMachine(reader *BatteryReader) *BatteryStateMachine {
 		reader:          reader,
 		currentState:    StateNotPresent,
 		transitions:     make(map[stateEventKey]*StateTransition),
-		eventQueue:      make(chan BatteryEvent, 100), // Buffered to prevent blocking
+		eventQueue:      make(chan BatteryEvent, 100), // Increased buffer to prevent overflow
 		stopChan:        make(chan struct{}),
 		maxHistorySize:  50,
 		lastStateChange: time.Now(),
 		logger:          reader.logCallback,
+		lastEventTime:   make(map[BatteryEvent]time.Time),
+		eventDebounce:   20 * time.Millisecond, // Reduced debounce for faster response
 	}
 
 	sm.setupTransitions()
@@ -196,39 +194,54 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		// From NotPresent
 		{StateNotPresent, EventBatteryInserted, StateInitializing, sm.actionInitializeBattery},
 		{StateNotPresent, EventDisabled, StateDisabled, sm.actionDisable},
+		{StateNotPresent, EventTagArrived, StateInitializing, sm.actionInitializeBattery},
+
+		// From Discovering
+		{StateDiscovering, EventTagArrived, StateInitializing, sm.actionInitializeBattery},
+		{StateDiscovering, EventDiscoveryTimeout, StateWaitingForArrival, sm.actionStartWaitingForArrival},
+		{StateDiscovering, EventDisabled, StateDisabled, sm.actionDisable},
+
+		// From WaitingForArrival
+		{StateWaitingForArrival, EventTagArrived, StateInitializing, sm.actionInitializeBattery},
+		{StateWaitingForArrival, EventDiscoveryTimeout, StateNotPresent, sm.actionHandleDeparture},
+		{StateWaitingForArrival, EventDisabled, StateDisabled, sm.actionDisable},
 
 		// From Initializing
 		{StateInitializing, EventReadyToScoot, StateIdleReady, sm.actionBatteryReady},
 		{StateInitializing, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
+		{StateInitializing, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
 		{StateInitializing, EventHALError, StateError, sm.actionHALError},
 		{StateInitializing, EventDisabled, StateDisabled, sm.actionDisable},
 		{StateInitializing, EventVehicleActive, StateInitializing, nil}, // Stay in Initializing, wait for ReadyToScoot
 
 		// From IdleStandby
-		{StateIdleStandby, EventSeatboxClosed, StateIdleReady, sm.actionSeatboxClosed},
-		{StateIdleStandby, EventCBChargeLow, StateIdleReady, sm.actionCheckActivationConditions},
-		{StateIdleStandby, EventVehicleActive, StateIdleReady, sm.actionVehicleActive},
+		{StateIdleStandby, EventSeatboxClosed, StateActiveRequested, sm.actionRequestActivation},
+		{StateIdleStandby, EventVehicleActive, StateActiveRequested, sm.actionRequestActivation},
 		{StateIdleStandby, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
+		{StateIdleStandby, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
 		{StateIdleStandby, EventLowSOC, StateIdleStandby, sm.actionLowSOC},
 		{StateIdleStandby, EventMaintenanceTick, StateMaintenance, sm.actionStartMaintenance},
 		{StateIdleStandby, EventHeartbeatTick, StateIdleStandby, sm.actionHeartbeat},
 		{StateIdleStandby, EventDisabled, StateDisabled, sm.actionDisable},
+		{StateIdleStandby, EventBatteryAlreadyActive, StateActive, sm.actionBatteryAlreadyActive},
 
 		// From IdleReady
 		{StateIdleReady, EventSeatboxOpened, StateIdleStandby, sm.actionSeatboxOpened},
-		{StateIdleReady, EventCBChargeHigh, StateIdleStandby, sm.actionCBChargeHigh},
-		{StateIdleReady, EventVehicleStandby, StateIdleStandby, sm.actionVehicleStandby},
 		{StateIdleReady, EventSeatboxClosed, StateActiveRequested, sm.actionRequestActivation},
+		{StateIdleReady, EventVehicleActive, StateActiveRequested, sm.actionRequestActivation},
 		{StateIdleReady, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
+		{StateIdleReady, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
 		{StateIdleReady, EventLowSOC, StateIdleStandby, sm.actionLowSOC},
 		{StateIdleReady, EventHeartbeatTick, StateIdleReady, sm.actionHeartbeat},
 		{StateIdleReady, EventDisabled, StateDisabled, sm.actionDisable},
+		{StateIdleReady, EventBatteryAlreadyActive, StateActive, sm.actionBatteryAlreadyActive},
 
 		// From ActiveRequested
 		{StateActiveRequested, EventStateVerified, StateActive, sm.actionActivationSuccess},
 		{StateActiveRequested, EventStateVerificationFailed, StateError, sm.actionActivationFailed},
 		{StateActiveRequested, EventCommandFailed, StateError, sm.actionCommandFailed},
 		{StateActiveRequested, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
+		{StateActiveRequested, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
 		{StateActiveRequested, EventSeatboxOpened, StateDeactivating, sm.actionRequestDeactivation},
 		{StateActiveRequested, EventLowSOC, StateActiveRequested, sm.actionLowSOCWhileActive},
 		{StateActiveRequested, EventDisabled, StateDisabled, sm.actionDisable},
@@ -236,10 +249,8 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		// From Active
 		{StateActive, EventSeatboxOpened, StateDeactivating, sm.actionRequestDeactivation},
 		{StateActive, EventLowSOC, StateActive, sm.actionLowSOCWhileActive},
-		{StateActive, EventCBChargeHigh, StateActive, sm.actionCheckDeactivationConditions},
-		{StateActive, EventVehicleStandby, StateActive, sm.actionCheckDeactivationConditions},
-		{StateActive, EventAuxBatteryOK, StateActive, sm.actionCheckDeactivationConditions},
 		{StateActive, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
+		{StateActive, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
 		{StateActive, EventHeartbeatTick, StateActive, sm.actionHeartbeat},
 		{StateActive, EventMaintenanceTick, StateActive, sm.actionActiveStatusPoll},
 		{StateActive, EventHALError, StateError, sm.actionHALError},
@@ -250,6 +261,8 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateDeactivating, EventStateVerificationFailed, StateError, sm.actionDeactivationFailed},
 		{StateDeactivating, EventCommandFailed, StateError, sm.actionCommandFailed},
 		{StateDeactivating, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
+		{StateDeactivating, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
+		{StateDeactivating, EventTagArrived, StateInitializing, sm.actionInitializeBattery}, // Handle tag re-arrival during deactivation
 		{StateDeactivating, EventDisabled, StateDisabled, sm.actionDisable},
 
 		// From Error
@@ -257,19 +270,22 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateError, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
 		{StateError, EventHeartbeatTick, StateError, sm.actionHeartbeatInError},
 		{StateError, EventDisabled, StateDisabled, sm.actionDisable},
+		{StateError, EventBatteryAlreadyActive, StateActive, sm.actionBatteryAlreadyActive},
 
 		// From Disabled
 		{StateDisabled, EventEnabled, StateNotPresent, sm.actionEnable},
 		{StateDisabled, EventVehicleActive, StateNotPresent, sm.actionVehicleActiveWhileDisabled},
-		{StateDisabled, EventCBChargeLow, StateNotPresent, sm.actionEnable},
 		{StateDisabled, EventBatteryInserted, StateDisabled, sm.actionBatteryInsertedWhileDisabled},
 		{StateDisabled, EventBatteryRemoved, StateDisabled, sm.actionBatteryRemoved},
 
 		// From Maintenance
 		{StateMaintenance, EventMaintenanceTick, StateIdleStandby, sm.actionMaintenanceComplete},
 		{StateMaintenance, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
+		{StateMaintenance, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
 		{StateMaintenance, EventHALError, StateError, sm.actionHALError},
 		{StateMaintenance, EventDisabled, StateDisabled, sm.actionDisable},
+		{StateMaintenance, EventBatteryAlreadyActive, StateMaintenance, nil}, // Queue for later processing
+		{StateMaintenance, EventVehicleActive, StateIdleStandby, sm.actionMaintenanceCompleteWithActivation}, // Handle vehicle becoming active during maintenance
 	}
 
 	// Build transition map
@@ -290,15 +306,39 @@ func (sm *BatteryStateMachine) Stop() {
 	close(sm.stopChan)
 }
 
-// SendEvent sends an event to the state machine
+// SendEvent sends an event to the state machine with debouncing
 func (sm *BatteryStateMachine) SendEvent(event BatteryEvent) {
+	// Check if we should debounce this event
+	sm.Lock()
+	lastTime, exists := sm.lastEventTime[event]
+	now := time.Now()
+	
+	// Skip if this event was sent too recently (except for critical events)
+	if exists && now.Sub(lastTime) < sm.eventDebounce {
+		// Allow certain critical events to bypass debouncing
+		switch event {
+		case EventBatteryInserted, EventBatteryRemoved, 
+		     EventCommandFailed, EventStateVerified, EventStateVerificationFailed:
+			// Allow these critical events through
+		default:
+			// Debounce non-critical events
+			sm.Unlock()
+			sm.logger(hal.LogLevelDebug, fmt.Sprintf("Debouncing event %s (last sent %v ago)", event, now.Sub(lastTime)))
+			return
+		}
+	}
+	
+	sm.lastEventTime[event] = now
+	sm.Unlock()
+	
 	select {
 	case sm.eventQueue <- event:
+		sm.logger(hal.LogLevelDebug, fmt.Sprintf("Event %s queued (queue depth: %d)", event, len(sm.eventQueue)))
 	case <-sm.stopChan:
 		return
 	default:
-		// Event queue is full, log warning but don't block
-		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Event queue full, dropping event: %s", event))
+		// Event queue is full, log error and track metrics
+		sm.logger(hal.LogLevelError, fmt.Sprintf("Event queue full, dropping event: %s (queue size: %d)", event, len(sm.eventQueue)))
 	}
 }
 
@@ -389,4 +429,9 @@ func (sm *BatteryStateMachine) CanTransition(event BatteryEvent) bool {
 	key := stateEventKey{sm.currentState, event}
 	_, exists := sm.transitions[key]
 	return exists
+}
+
+// GetEventQueueDepth returns the current number of events in the queue
+func (sm *BatteryStateMachine) GetEventQueueDepth() int {
+	return len(sm.eventQueue)
 }

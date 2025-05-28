@@ -53,20 +53,19 @@ type PN7150 struct {
 	fd                  int
 	devicePath          string // Store the actual device path
 	logCallback         LogCallback
-	app                 interface{}
 	txBuf               [256]byte
 	txSize              int
 	rxBuf               []byte
-	standbyEnabled      bool
-	lpcdEnabled         bool
 	tagSelected         bool
 	numTags             int
 	tags                []Tag
 	debug               bool
-	paramWriteTry       uint
-	paramWriteTries     uint
-	lastReinitTime      time.Time // Track when the HAL was last reinitialized
 	transitionTableSent bool      // Track whether RF transition table has been sent
+	
+	// Channel-based tag detection
+	tagEventChan        chan TagEvent
+	tagEventReaderStop  chan struct{}
+	tagEventReaderRunning bool
 }
 
 func NewPN7150(devName string, logCallback LogCallback, app interface{}, standbyEnabled, lpcdEnabled bool, debugMode bool) (*PN7150, error) {
@@ -79,13 +78,11 @@ func NewPN7150(devName string, logCallback LogCallback, app interface{}, standby
 		fd:              fd,
 		devicePath:      devName, // Store the device path
 		logCallback:     logCallback,
-		app:             app,
 		rxBuf:           make([]byte, nciBufferSize),
-		standbyEnabled:  standbyEnabled,
-		lpcdEnabled:     lpcdEnabled,
 		tags:            make([]Tag, maxTags),
 		debug:           debugMode,
-		paramWriteTries: 3, // Maximum number of parameter write attempts
+		tagEventChan:    make(chan TagEvent, 10), // Buffered channel for tag events
+		tagEventReaderStop: make(chan struct{}),
 	}
 
 	return hal, nil
@@ -127,36 +124,61 @@ func (p *PN7150) Initialize() error {
 	// Wait for device to stabilize after power up
 	time.Sleep(100 * time.Millisecond)
 
-	// Send Core Reset command with RF config reset
-	resetCmd := buildCoreReset()
-	resp, err := p.transfer(resetCmd)
-	if err != nil {
-		p.Unlock()
-		return fmt.Errorf("core reset failed: %v", err)
-	}
-
-	// Wait for reset notification
-	time.Sleep(10 * time.Millisecond)
-
-	// Send Core Init command
-	initCmd := buildCoreInit()
-	resp, err = p.transfer(initCmd)
-	if err != nil {
-		p.Unlock()
-		return fmt.Errorf("core init failed: %v", err)
-	}
-
-	// Extract firmware version
-	if len(resp) >= 20 {
-		hwVer := resp[17]
-		romVer := resp[18]
-		fwVerMajor := resp[19]
-		fwVerMinor := resp[20]
-		if p.logCallback != nil {
-			p.logCallback(LogLevelInfo, fmt.Sprintf("Reader info: hw_version: %d, rom_version: %d, fw_version: %d.%d",
-				hwVer, romVer, fwVerMajor, fwVerMinor))
+	const maxInitRetries = 3
+	var lastErr error
+	var resp []byte
+	var err error
+	
+	for initRetry := 0; initRetry < maxInitRetries; initRetry++ {
+		if initRetry > 0 {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelWarning, fmt.Sprintf("Initialization retry %d/%d", initRetry+1, maxInitRetries))
+			}
+			// Wait before retry
+			time.Sleep(100 * time.Millisecond)
 		}
+
+		// Send Core Reset command with RF config reset
+		resetCmd := buildCoreReset()
+		resp, err = p.transfer(resetCmd)
+		if err != nil {
+			lastErr = fmt.Errorf("core reset failed: %v", err)
+			continue
+		}
+
+		// Wait for reset notification
+		time.Sleep(10 * time.Millisecond)
+
+		// Send Core Init command
+		initCmd := buildCoreInit()
+		resp, err = p.transfer(initCmd)
+		if err != nil {
+			lastErr = fmt.Errorf("core init failed: %v", err)
+			continue
+		}
+		
+		// If we got here, initialization succeeded
+		lastErr = nil
+		
+		// Extract firmware version from the Core Init response
+		if len(resp) >= 20 {
+			hwVer := resp[17]
+			romVer := resp[18]
+			fwVerMajor := resp[19]
+			fwVerMinor := resp[20]
+			if p.logCallback != nil {
+				p.logCallback(LogLevelInfo, fmt.Sprintf("Reader info: hw_version: %d, rom_version: %d, fw_version: %d.%d",
+					hwVer, romVer, fwVerMajor, fwVerMinor))
+			}
+		}
+		break
 	}
+
+	if lastErr != nil {
+		p.Unlock()
+		return lastErr
+	}
+
 
 	// Send NCI Proprietary Activation command
 	propActCmd := []byte{
@@ -286,7 +308,7 @@ func (p *PN7150) Initialize() error {
 		configCmd[2] = byte(len(configCmd) - 3)
 
 		// Send CORE_SET_CONFIG command
-		resp, err = p.transfer(configCmd)
+		resp, err := p.transfer(configCmd)
 		if err != nil {
 			p.Unlock()
 			return fmt.Errorf("RF transitions configuration failed: %v", err)
@@ -324,8 +346,7 @@ func (p *PN7150) Initialize() error {
 		return fmt.Errorf("RF discover map failed: %v", err)
 	}
 
-	var nciResp *nciResponse
-	nciResp, err = parseNCIResponse(resp)
+	nciResp, err := parseNCIResponse(resp)
 	if err != nil {
 		p.Unlock()
 		return fmt.Errorf("failed to parse RF discover map response: %v", err)
@@ -336,9 +357,6 @@ func (p *PN7150) Initialize() error {
 		return fmt.Errorf("RF discover map failed with status: %02x", nciResp.Status)
 	}
 
-	// Set lastReinitTime during initialization to match behavior of FullReinitialize
-	p.lastReinitTime = time.Now()
-
 	p.state = stateIdle
 	p.Unlock()
 
@@ -346,6 +364,12 @@ func (p *PN7150) Initialize() error {
 	err = p.StartDiscovery(100)
 	if err != nil {
 		return fmt.Errorf("failed to start discovery after initialization: %v", err)
+	}
+
+	// Start the tag event reader goroutine
+	if !p.tagEventReaderRunning {
+		p.tagEventReaderRunning = true
+		go p.tagEventReader()
 	}
 
 	// After successful Initialize(), wait briefly for a tag to be rediscovered so callers don't
@@ -399,6 +423,16 @@ func (p *PN7150) SetPower(on bool) error {
 func (p *PN7150) Deinitialize() {
 	p.Lock()
 	defer p.Unlock()
+
+	// Stop the tag event reader goroutine
+	if p.tagEventReaderRunning {
+		p.tagEventReaderRunning = false
+		close(p.tagEventReaderStop)
+		// Wait a bit for the goroutine to stop
+		time.Sleep(50 * time.Millisecond)
+		// Recreate the stop channel for next initialization
+		p.tagEventReaderStop = make(chan struct{})
+	}
 
 	if p.fd >= 0 {
 		unix.Close(p.fd)
@@ -650,12 +684,11 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 		if p.logCallback != nil {
 			p.logCallback(LogLevelDebug, "Tag departure")
 		}
-		// Only transition to discovering if we're not in the middle of a read operation
-		if p.state != statePresent || !p.tagSelected {
-			p.numTags = 0
-			p.state = stateDiscovering
-			p.tagSelected = false
-		}
+		// When a deactivation notification is received, it means no tag is currently active.
+		// Always clear current tag information and transition to discovering state.
+		p.numTags = 0
+		p.state = stateDiscovering
+		p.tagSelected = false
 	}
 
 	if p.state == statePresent && p.numTags > 0 {
@@ -679,7 +712,7 @@ func (p *PN7150) FullReinitialize() error {
 	}
 
 	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "Performing simplified HAL reinitialization")
+		p.logCallback(LogLevelInfo, "Performing full HAL reinitialization with file descriptor renewal")
 	}
 
 	// Remember the device path and close the current file descriptor (if any).
@@ -814,44 +847,27 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 
 			// Check for special response codes - critical error 0300
 			if len(resp) >= 5 && resp[3] == 0x03 && resp[4] == 0x00 {
-				// Got 0300 response - need to reinitialize
-				if p.logCallback != nil {
-					p.logCallback(LogLevelDebug, "Received 0300 response - reinitializing communication")
-				}
-
+				// Got 0300 response - need to handle it
 				consecutive0300Errors++
-				if consecutive0300Errors >= 2 {
-					// Multiple 0300 errors in a row - do full reinitialization
-					if p.logCallback != nil {
-						p.logCallback(LogLevelWarning, fmt.Sprintf("Multiple 0300 errors (%d) - performing full HAL reinitialization", consecutive0300Errors))
-					}
-
-					// Release lock before full reinitialization
-					p.Unlock()
-					err = p.FullReinitialize()
-					// Re-acquire lock
-					p.Lock()
-
-					if err != nil {
-						lastErr = fmt.Errorf("failed full reinitialization: %v", err)
-						break
-					}
-
-					// Even after full reinitialization, we can't continue with this read
-					lastErr = fmt.Errorf("aborted read after full HAL reinitialization")
-					break
+				
+				// Always do full reinitialization for 0300 errors
+				if p.logCallback != nil {
+					p.logCallback(LogLevelWarning, fmt.Sprintf("0300 error (%d occurrences) - performing full HAL reinitialization", consecutive0300Errors))
 				}
 
-				// First 0300 error – immediately perform full reinitialization
+				// Release lock before full reinitialization
 				p.Unlock()
 				err = p.FullReinitialize()
+				// Re-acquire lock
 				p.Lock()
 
 				if err != nil {
 					lastErr = fmt.Errorf("failed full reinitialization: %v", err)
-				} else {
-					lastErr = fmt.Errorf("performed full HAL reinitialization after first 0300 error")
+					break
 				}
+
+				// Even after full reinitialization, we can't continue with this read
+				lastErr = fmt.Errorf("aborted read after HAL reinitialization")
 				break
 			}
 
@@ -876,7 +892,12 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 			return resp[3:], nil
 		}
 
-		// If we get here, we need to retry
+		// If we broke from inner loop with no error (soft recovery), continue retry
+		if lastErr == nil {
+			continue
+		}
+		
+		// Otherwise we have an error, add delay and retry
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -993,7 +1014,10 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 					break
 				}
 
-				// First 0300 error – immediately perform full reinitialization
+				// Always perform full reinitialization for 0300 errors
+				if p.logCallback != nil {
+					p.logCallback(LogLevelWarning, "0300 error in write - performing full HAL reinitialization")
+				}
 				p.Unlock()
 				err = p.FullReinitialize()
 				p.Lock()
@@ -1001,7 +1025,9 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 				if err != nil {
 					lastErr = fmt.Errorf("failed full reinitialization: %v", err)
 				} else {
-					lastErr = fmt.Errorf("performed full HAL reinitialization after first 0300 error")
+					if p.logCallback != nil {
+						p.logCallback(LogLevelInfo, "Full HAL reinitialization completed after 0300 error")
+					}
 				}
 				break
 			}
@@ -1055,7 +1081,12 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 			break
 		}
 
-		// If we get here, we need to retry
+		// If we broke from inner loop with no error (soft recovery), continue retry
+		if lastErr == nil {
+			continue
+		}
+		
+		// Otherwise we have an error, add delay and retry
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -1068,9 +1099,9 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 	return fmt.Errorf("write failed with unknown error")
 }
 
-// GetFD implements HAL.GetFD
-func (p *PN7150) GetFD() int {
-	return p.fd
+// GetTagEventChannel implements HAL.GetTagEventChannel
+func (p *PN7150) GetTagEventChannel() <-chan TagEvent {
+	return p.tagEventChan
 }
 
 // flushReadBuffer reads and discards any pending data
@@ -1128,7 +1159,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 		}
 	}
 
-	// Read response or notifications
+	// Direct read
 	pfd := unix.PollFd{
 		Fd:     int32(p.fd),
 		Events: unix.POLLIN,
@@ -1241,4 +1272,114 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 			return p.rxBuf[:totalLen], nil
 		}
 	}
+}
+
+// tagEventReader is a goroutine that continuously monitors for tag arrival/departure events
+func (p *PN7150) tagEventReader() {
+	var previousTags []Tag
+	ticker := time.NewTicker(100 * time.Millisecond) // Poll every 100ms
+	defer ticker.Stop()
+
+	if p.logCallback != nil {
+		p.logCallback(LogLevelDebug, "Tag event reader started")
+	}
+
+	for {
+		select {
+		case <-p.tagEventReaderStop:
+			if p.logCallback != nil {
+				p.logCallback(LogLevelDebug, "Tag event reader stopped")
+			}
+			return
+		case <-ticker.C:
+			// Only process if we're in discovering or present state
+			state := p.GetState()
+			if state != StateDiscovering && state != StatePresent {
+				continue
+			}
+
+			// Get current tags
+			currentTags, err := p.DetectTags()
+			if err != nil {
+				continue
+			}
+
+			// Check for tag arrivals
+			for _, currentTag := range currentTags {
+				found := false
+				for _, prevTag := range previousTags {
+					if tagsEqual(&currentTag, &prevTag) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					// New tag arrived
+					tagCopy := currentTag
+					event := TagEvent{
+						Type: TagArrival,
+						Tag:  &tagCopy,
+					}
+					select {
+					case p.tagEventChan <- event:
+						if p.logCallback != nil {
+							p.logCallback(LogLevelInfo, fmt.Sprintf("Tag arrived: %X", currentTag.ID))
+						}
+					default:
+						// Channel full, drop event
+						if p.logCallback != nil {
+							p.logCallback(LogLevelWarning, "Tag event channel full, dropping arrival event")
+						}
+					}
+				}
+			}
+
+			// Check for tag departures
+			for _, prevTag := range previousTags {
+				found := false
+				for _, currentTag := range currentTags {
+					if tagsEqual(&prevTag, &currentTag) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					// Tag departed
+					tagCopy := prevTag
+					event := TagEvent{
+						Type: TagDeparture,
+						Tag:  &tagCopy,
+					}
+					select {
+					case p.tagEventChan <- event:
+						if p.logCallback != nil {
+							p.logCallback(LogLevelInfo, fmt.Sprintf("Tag departed: %X", prevTag.ID))
+						}
+					default:
+						// Channel full, drop event
+						if p.logCallback != nil {
+							p.logCallback(LogLevelWarning, "Tag event channel full, dropping departure event")
+						}
+					}
+				}
+			}
+
+			// Update previous tags
+			previousTags = make([]Tag, len(currentTags))
+			copy(previousTags, currentTags)
+		}
+	}
+}
+
+// tagsEqual compares two tags for equality based on their IDs
+func tagsEqual(a, b *Tag) bool {
+	if len(a.ID) != len(b.ID) {
+		return false
+	}
+	for i := range a.ID {
+		if a.ID[i] != b.ID[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -3,18 +3,11 @@ package battery
 import (
 	"fmt"
 	"reflect"
-	"strconv"
-	"time"
 
 	"battery-service/nfc/hal"
 
 	"github.com/redis/go-redis/v9"
 )
-
-// parseInt is a helper for parsing string to int
-func parseInt(s string) (int, error) {
-	return strconv.Atoi(s)
-}
 
 // faultCodeMap maps boolean fault fields in BatteryFaults to their numeric codes
 var faultCodeMap = map[string]int{
@@ -179,7 +172,7 @@ func (s *Service) handleRedisSubscription() {
 
 	// Fetch initial vehicle state and cb-battery charge
 	s.logger.Printf("[Redis] Fetching initial vehicle state and cb-battery charge")
-	s.updateVehicleStateAndManagePolling() // This will also fetch cb-battery charge if needed
+	s.updateVehicleState()
 
 	// Listen for messages
 	ch := pubsub.Channel()
@@ -195,10 +188,10 @@ func (s *Service) handleRedisSubscription() {
 			// as other keys might imply a seatbox change.
 			s.updateSeatboxState()
 
-			// If the vehicle state itself changed, update it and manage polling
+			// If the vehicle state itself changed, update it
 			if msg.Payload == "state" {
 				s.logger.Printf("[Redis] Vehicle state change notification received.")
-				s.updateVehicleStateAndManagePolling()
+				s.updateVehicleState()
 			}
 		}
 	}
@@ -225,10 +218,9 @@ func (s *Service) updateSeatboxState() {
 	s.handleSeatboxStateChange(isOpen)
 }
 
-// updateVehicleStateAndManagePolling fetches the current vehicle state from Redis,
-// updates the service's internal state, and starts/stops cb-battery polling accordingly.
-// It also triggers appropriate state machine events for battery activation/deactivation.
-func (s *Service) updateVehicleStateAndManagePolling() {
+// updateVehicleState fetches the current vehicle state from Redis,
+// updates the service's internal state.
+func (s *Service) updateVehicleState() {
 	s.Lock()
 	currentVehicleState := s.vehicleState
 	s.Unlock()
@@ -245,7 +237,7 @@ func (s *Service) updateVehicleStateAndManagePolling() {
 	}
 
 	if newState == currentVehicleState {
-		s.logger.Printf("[StateUpdate] Vehicle state unchanged: '%s'. No action required regarding polling logic here.", newState)
+		s.logger.Printf("[StateUpdate] Vehicle state unchanged: '%s'.", newState)
 		return
 	}
 
@@ -253,7 +245,6 @@ func (s *Service) updateVehicleStateAndManagePolling() {
 
 	s.Lock()
 	s.vehicleState = newState
-	previousPollingActive := s.cbBatteryPollTicker != nil
 	// Collect readers to notify outside the service lock
 	readersToNotify := make([]*BatteryReader, 0, 2)
 	for _, r := range s.readers {
@@ -263,197 +254,15 @@ func (s *Service) updateVehicleStateAndManagePolling() {
 	}
 	s.Unlock()
 
-	if newState == "stand-by" {
-		s.logger.Printf("[StateUpdate] Vehicle is in stand-by. Ensuring cb-battery and aux-battery polling is active.")
-		// Fetch initial cb-battery charge and aux-battery voltage immediately if moving to stand-by
-		s.fetchAndUpdateBatteries()
-		if !previousPollingActive {
-			s.startCbBatteryPolling()
-		}
-
-		// Send EventVehicleStandby to all battery readers
-		for _, r := range readersToNotify {
-			r.Lock()
-			present := r.data.Present
-			r.Unlock()
-			if present {
-				s.logger.Printf("[StateUpdate] Sending EventVehicleStandby to Battery %d", r.index)
-				r.stateMachine.SendEvent(EventVehicleStandby)
-			}
-		}
-	} else {
-		if previousPollingActive {
-			s.logger.Printf("[StateUpdate] Vehicle is NOT in stand-by (%s). Stopping cb-battery and aux-battery polling.", newState)
-			s.stopCbBatteryPolling()
-		}
-
-		// Send EventVehicleActive to all battery readers (for non-standby states like "parked")
-		for _, r := range readersToNotify {
-			r.Lock()
-			present := r.data.Present
-			r.Unlock()
-			if present {
-				s.logger.Printf("[StateUpdate] Sending EventVehicleActive to Battery %d for vehicle state '%s'", r.index, newState)
-				r.stateMachine.SendEvent(EventVehicleActive)
-			}
+	// Send EventVehicleActive to all battery readers (all states are now considered active)
+	for _, r := range readersToNotify {
+		r.Lock()
+		present := r.data.Present
+		r.Unlock()
+		if present {
+			s.logger.Printf("[StateUpdate] Sending EventVehicleActive to Battery %d for vehicle state '%s'", r.index, newState)
+			r.stateMachine.SendEvent(EventVehicleActive)
 		}
 	}
 }
 
-// fetchAndUpdateBatteries fetches the cb-battery charge and aux-battery voltage from Redis and updates the service state.
-func (s *Service) fetchAndUpdateBatteries() {
-	// Fetch cb-battery charge
-	chargeStr, err := s.redis.HGet(s.ctx, "cb-battery", "charge").Result()
-	if err != nil {
-		if err == redis.Nil {
-			s.logger.Printf("[CbBattery] cb-battery charge not found in Redis.")
-		} else {
-			s.logger.Printf("[CbBattery] Error getting cb-battery charge: %v", err)
-		}
-		return
-	}
-
-	charge, err := parseInt(chargeStr)
-	if err != nil {
-		s.logger.Printf("[CbBattery] Error parsing cb-battery charge '%s': %v", chargeStr, err)
-		return
-	}
-
-	// Fetch aux-battery voltage
-	voltageStr, voltErr := s.redis.HGet(s.ctx, "aux-battery", "voltage").Result()
-	var voltage int = -1
-	if voltErr != nil {
-		if voltErr == redis.Nil {
-			s.logger.Printf("[AuxBattery] aux-battery voltage not found in Redis.")
-		} else {
-			s.logger.Printf("[AuxBattery] Error getting aux-battery voltage: %v", voltErr)
-		}
-	} else {
-		voltage, err = parseInt(voltageStr)
-		if err != nil {
-			s.logger.Printf("[AuxBattery] Error parsing aux-battery voltage '%s': %v", voltageStr, err)
-			voltage = -1
-		}
-	}
-
-	s.Lock()
-	oldCharge := s.cbBatteryCharge
-	oldVoltage := s.auxBatteryVoltage
-	s.cbBatteryCharge = charge
-	s.auxBatteryVoltage = voltage
-	s.Unlock()
-
-	if charge != oldCharge {
-		s.logger.Printf("[CbBattery] cb-battery charge updated to %d%% (was %d%%)", charge, oldCharge)
-	}
-	if voltage != oldVoltage && voltage > 0 {
-		s.logger.Printf("[AuxBattery] aux-battery voltage updated to %dmV (was %dmV)", voltage, oldVoltage)
-	}
-
-	// Check if battery level events need to be sent
-	if charge != oldCharge || voltage != oldVoltage {
-		// Send events to battery 0's state machine if levels have changed
-		if s.readers[0] != nil && s.readers[0].stateMachine != nil {
-			// For cb-battery charge changes
-			if charge != oldCharge && charge >= 0 {
-				// Check if we crossed the deactivation threshold (90%)
-				if oldCharge < cbBatteryDeactivationThreshold && charge >= cbBatteryDeactivationThreshold {
-					s.logger.Printf("[CbBattery] CB battery charge high (%d%% >= %d%%), sending event", charge, cbBatteryDeactivationThreshold)
-					s.readers[0].stateMachine.SendEvent(EventCBChargeHigh)
-				} else if oldCharge >= cbBatteryDeactivationThreshold && charge < cbBatteryDeactivationThreshold {
-					s.logger.Printf("[CbBattery] CB battery charge dropped below deactivation threshold (%d%% < %d%%)", charge, cbBatteryDeactivationThreshold)
-					// Don't send an event here - let the heartbeat re-evaluate
-				}
-				
-				// Check if we crossed the activation threshold (50%)
-				if oldCharge >= cbBatteryActivationThreshold && charge < cbBatteryActivationThreshold {
-					s.logger.Printf("[CbBattery] CB battery charge low (%d%% < %d%%), sending event", charge, cbBatteryActivationThreshold)
-					s.readers[0].stateMachine.SendEvent(EventCBChargeLow)
-				} else if oldCharge < cbBatteryActivationThreshold && charge >= cbBatteryActivationThreshold {
-					s.logger.Printf("[CbBattery] CB battery charge rose above activation threshold (%d%% >= %d%%)", charge, cbBatteryActivationThreshold)
-					// Don't send an event here - let the heartbeat re-evaluate
-				}
-			}
-			
-			// For aux-battery voltage changes
-			if voltage != oldVoltage && voltage >= 0 {
-				// Check if we crossed the deactivation threshold (12600mV)
-				if oldVoltage < auxBatteryDeactivationThreshold && voltage >= auxBatteryDeactivationThreshold {
-					s.logger.Printf("[AuxBattery] Aux battery voltage OK (%dmV >= %dmV), sending event", voltage, auxBatteryDeactivationThreshold)
-					s.readers[0].stateMachine.SendEvent(EventAuxBatteryOK)
-				} else if oldVoltage >= auxBatteryDeactivationThreshold && voltage < auxBatteryDeactivationThreshold {
-					s.logger.Printf("[AuxBattery] Aux battery voltage dropped below deactivation threshold (%dmV < %dmV)", voltage, auxBatteryDeactivationThreshold)
-					// Don't send an event here - let the heartbeat re-evaluate
-				}
-				
-				// Check if we crossed the activation threshold (11000mV)
-				if oldVoltage >= auxBatteryActivationThreshold && voltage < auxBatteryActivationThreshold {
-					s.logger.Printf("[AuxBattery] Aux battery voltage low (%dmV < %dmV), sending event", voltage, auxBatteryActivationThreshold)
-					s.readers[0].stateMachine.SendEvent(EventAuxBatteryLow)
-				} else if oldVoltage < auxBatteryActivationThreshold && voltage >= auxBatteryActivationThreshold {
-					s.logger.Printf("[AuxBattery] Aux battery voltage rose above activation threshold (%dmV >= %dmV)", voltage, auxBatteryActivationThreshold)
-					// Don't send an event here - let the heartbeat re-evaluate
-				}
-			}
-		}
-	}
-}
-
-// startCbBatteryPolling starts the periodic polling of cb-battery charge and aux-battery voltage.
-func (s *Service) startCbBatteryPolling() {
-	s.Lock()
-	if s.cbBatteryPollTicker != nil {
-		s.Unlock()
-		s.logger.Printf("[CbBatteryPoll] Polling already active.")
-		return
-	}
-	s.cbBatteryPollTicker = time.NewTicker(timeCbBatteryPollInterval)
-	s.Unlock()
-
-	s.logger.Printf("[BatteryPoll] Starting periodic polling for cb-battery charge and aux-battery voltage every %s.", timeCbBatteryPollInterval)
-	go s.periodicCbBatteryPoll()
-}
-
-// stopCbBatteryPolling stops the periodic polling of cb-battery charge and aux-battery voltage.
-func (s *Service) stopCbBatteryPolling() {
-	s.Lock()
-	if s.cbBatteryPollTicker == nil {
-		s.Unlock()
-		s.logger.Printf("[CbBatteryPoll] Polling not active, cannot stop.")
-		return
-	}
-	s.cbBatteryPollTicker.Stop()
-	s.cbBatteryPollTicker = nil // Mark as inactive
-	s.Unlock()
-	s.logger.Printf("[BatteryPoll] Stopped periodic polling for cb-battery charge and aux-battery voltage.")
-}
-
-// periodicCbBatteryPoll is the goroutine that periodically fetches cb-battery charge and aux-battery voltage.
-func (s *Service) periodicCbBatteryPoll() {
-	s.logger.Printf("[BatteryPoll] Goroutine started.")
-	defer s.logger.Printf("[BatteryPoll] Goroutine stopped.")
-
-	for {
-		s.Lock() // Lock to safely access ticker and stopChan
-		ticker := s.cbBatteryPollTicker
-		stopChan := s.cbBatteryPollStopChan
-		s.Unlock()
-
-		if ticker == nil { // Ticker can be nil if stopCbBatteryPolling was called
-			s.logger.Printf("[BatteryPoll] Ticker is nil, exiting loop.")
-			return
-		}
-
-		select {
-		case <-ticker.C:
-			s.logger.Printf("[BatteryPoll] Tick: fetching cb-battery charge and aux-battery voltage.")
-			s.fetchAndUpdateBatteries() // This now calls manageBattery0PowerState internally upon change
-		case <-stopChan:
-			s.logger.Printf("[BatteryPoll] Received stop signal, exiting loop.")
-			return
-		case <-s.ctx.Done():
-			s.logger.Printf("[BatteryPoll] Service context cancelled, exiting loop.")
-			return
-		}
-	}
-}

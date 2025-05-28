@@ -86,12 +86,6 @@ const (
 	nciRFDeactivationTypeSleep uint8 = 0x01
 )
 
-// Error types
-var (
-	errParamsIncorrect = fmt.Errorf("parameters incorrect")
-	errUnexpectedReset = fmt.Errorf("unexpected reset")
-)
-
 // NCI Packet Header
 type nciHeader struct {
 	MT_PBF_GID uint8 // Message Type (5 bits) | Packet Boundary Flag (1 bit) | Group ID (2 bits)

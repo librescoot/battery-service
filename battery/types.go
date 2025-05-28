@@ -19,50 +19,56 @@ var errHALRecreatedRetryRead = fmt.Errorf("HAL was recreated, retry read operati
 type BatteryReader struct {
 	sync.Mutex
 	index                            int
+	role                             BatteryRole          // Role of this battery (active or inactive)
 	hal                              hal.HAL
 	data                             BatteryData
 	enabled                          bool
-	config                           *BatteryConfig
+	deviceName                       string               // NFC device path
+	logLevel                         int                  // Log level for this reader
 	service                          *Service
 	lastCmd                          time.Time
 	justInserted                     bool
-	justOpened                       bool
 	readyToScoot                     bool                 // Flag indicating battery responded with ReadyToScoot
 	stopChan                         chan struct{}        // Channel to signal goroutine shutdown
 	nfcMutex                         sync.Mutex           // Serializes access to NFC HAL operations
 	lastPublishedData                BatteryData          // Stores the state as of the last successful Redis update with PUBLISH
 	lastBattery1MaintPollTime        time.Time            // Tracks last maintenance poll for battery 1
 	lastIdleAsleepPollTime           time.Time            // Tracks last poll time for battery 0 when idle/asleep in stand-by
-	consecutiveTagAbsences           int                  // Count consecutive tag absences before considering battery removed
 	lastReinitialization             time.Time            // Track when HAL was last reinitialized
-	batteryRemovedThreshold          int                  // Number of consecutive absences before battery is considered removed
 	isPoweredDown                    bool                 // Indicates reader is temporarily powered down during low-frequency polling
-	zeroTagDetections                int                  // Count consecutive zero tag detections to restart discovery
-	consecutiveZeroInitializingCount int                  // Count consecutive zero tag detections while in initializing state
 	stateMachine                     *BatteryStateMachine // State machine for managing battery transitions
+	
+	// Operation cancellation context - cancelled when tag departs to abort pending operations
+	operationCtx    context.Context
+	operationCancel context.CancelFunc
+}
+
+// getOperationContext returns the operation context if available, otherwise the service context
+func (r *BatteryReader) getOperationContext() context.Context {
+	r.Lock()
+	defer r.Unlock()
+	if r.operationCtx != nil {
+		return r.operationCtx
+	}
+	return r.service.ctx
 }
 
 // Service represents the battery service that manages multiple readers
 type Service struct {
 	sync.Mutex
-	config      *ServiceConfig
-	readers     [2]*BatteryReader
-	logger      *log.Logger
-	redis       *redis.Client
-	ctx         context.Context
-	cancel      context.CancelFunc
-	debug       bool // Add debug flag here
-	seatboxOpen bool // Track current seatbox state
+	config           *ServiceConfig
+	batteryConfig    *BatteryConfiguration
+	readers          []*BatteryReader
+	logger           *log.Logger
+	redis            *redis.Client
+	ctx              context.Context
+	cancel           context.CancelFunc
+	debug            bool // Add debug flag here
+	seatboxOpen      bool // Track current seatbox state
 
-	// Fields for cb-battery monitoring and control
+	// Vehicle state tracking
 	vehicleState          string
-	cbBatteryCharge       int
-	auxBatteryVoltage     int
-	cbBatteryPollTicker   *time.Ticker
-	cbBatteryPollStopChan chan struct{}
 
-	// Fields for HAL reinitialization tracking
-	lastHALReinit [2]time.Time // Track HAL reinitialization time for each battery
 }
 
 // BatteryState represents the state of the battery
@@ -188,21 +194,11 @@ type BatteryData struct {
 	CycleCount        uint16
 	RemainingCapacity uint16
 	FullCapacity      uint16
-	EmptyOr0Data      int // Keep for tracking zero data occurrences
-}
-
-// BatteryConfig represents the configuration for a battery reader
-type BatteryConfig struct {
-	DeviceName string
-	LogLevel   int
 }
 
 // ServiceConfig represents the configuration for the battery service
 type ServiceConfig struct {
 	RedisServerAddress string
 	RedisServerPort    uint16
-	OffUpdateTime      uint
 	TestMainPower      bool
-	HeartbeatTimeout   uint16
-	Batteries          [2]BatteryConfig
 }

@@ -30,11 +30,11 @@ type HAL interface {
 	// WriteBinary writes binary data to a tag at the given address
 	WriteBinary(address uint16, data []byte) error
 
-	// GetFD returns the file descriptor for polling
-	GetFD() int
-
 	// GetState returns the current state of the HAL
 	GetState() State
+
+	// GetTagEventChannel returns a channel that receives tag events
+	GetTagEventChannel() <-chan TagEvent
 }
 
 // State represents the state of the NFC controller
