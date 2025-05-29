@@ -20,7 +20,7 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 		sm.reader.operationCancel() // Cancel any existing context
 	}
 	sm.reader.operationCtx, sm.reader.operationCancel = context.WithCancel(sm.reader.service.ctx)
-	isActiveBattery := sm.reader.index == 0
+	isActiveBattery := sm.reader.role == BatteryRoleActive
 	sm.reader.Unlock()
 
 	// First, inform battery it's in the scooter
@@ -132,9 +132,9 @@ func (sm *BatteryStateMachine) actionBatteryReady(machine *BatteryStateMachine, 
 		return fmt.Errorf("failed to update Redis: %w", err)
 	}
 
-	// For battery 0, always activate regardless of conditions
-	if sm.reader.index == 0 {
-		sm.logger(hal.LogLevelInfo, "Battery 0 initialization: triggering activation")
+	// For active role battery, always activate regardless of conditions
+	if sm.reader.role == BatteryRoleActive {
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery %d (active role) initialization: triggering activation", sm.reader.index))
 		// Schedule activation
 		go func() {
 			time.Sleep(timeCmd) // Use standard command delay
@@ -147,7 +147,7 @@ func (sm *BatteryStateMachine) actionBatteryReady(machine *BatteryStateMachine, 
 			}
 		}()
 	} else {
-		// Battery 1 - check seatbox state
+		// Inactive battery - check seatbox state
 		sm.reader.service.Lock()
 		seatboxOpen := sm.reader.service.seatboxOpen
 		sm.reader.service.Unlock()
@@ -203,8 +203,8 @@ func (sm *BatteryStateMachine) actionSeatboxClosed(machine *BatteryStateMachine,
 
 
 func (sm *BatteryStateMachine) actionRequestActivation(machine *BatteryStateMachine, event BatteryEvent) error {
-	// Only battery 0 can be activated
-	if sm.reader.index != 0 {
+	// Only active role battery can be activated
+	if sm.reader.role != BatteryRoleActive {
 		return nil
 	}
 

@@ -254,13 +254,14 @@ func (s *Service) updateVehicleState() {
 	}
 	s.Unlock()
 
-	// Send EventVehicleActive to all battery readers (all states are now considered active)
+	// Send EventVehicleActive to battery readers with active role
 	for _, r := range readersToNotify {
 		r.Lock()
 		present := r.data.Present
+		role := r.role
 		r.Unlock()
-		if present {
-			s.logger.Printf("[StateUpdate] Sending EventVehicleActive to Battery %d for vehicle state '%s'", r.index, newState)
+		if present && role == BatteryRoleActive {
+			s.logger.Printf("[StateUpdate] Sending EventVehicleActive to Battery %d (active role) for vehicle state '%s'", r.index, newState)
 			r.stateMachine.SendEvent(EventVehicleActive)
 		}
 	}

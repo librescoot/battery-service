@@ -4,10 +4,11 @@ package battery
 type BatteryRole string
 
 const (
-	// BatteryRoleActive is for the main battery that needs to be activated and monitored frequently
+	// BatteryRoleActive is for batteries that need to be activated and monitored frequently
+	// Multiple batteries can have this role and will all be activated
 	BatteryRoleActive BatteryRole = "active"
 	
-	// BatteryRoleInactive is for secondary batteries that only need periodic maintenance polling
+	// BatteryRoleInactive is for batteries that only need periodic maintenance polling
 	BatteryRoleInactive BatteryRole = "inactive"
 )
 
