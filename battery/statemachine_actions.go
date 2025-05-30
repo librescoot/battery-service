@@ -169,6 +169,7 @@ func (sm *BatteryStateMachine) actionBatteryRemoved(machine *BatteryStateMachine
 	sm.reader.data.Present = false
 	sm.reader.readyToScoot = false
 	sm.reader.justInserted = false
+	sm.reader.halReinitCount = 0 // Reset HAL reinit counter for clean state
 	sm.reader.Unlock()
 
 	// Send BatteryRemoved command
@@ -396,6 +397,28 @@ func (sm *BatteryStateMachine) actionDeactivationFailed(machine *BatteryStateMac
 
 func (sm *BatteryStateMachine) actionHeartbeatInError(machine *BatteryStateMachine, event BatteryEvent) error {
 	sm.logger(hal.LogLevelDebug, "Heartbeat in error state - attempting recovery")
+
+	// Check HAL reinit counter first
+	sm.reader.Lock()
+	halReinitCount := sm.reader.halReinitCount
+	sm.reader.Unlock()
+
+	// If we've had too many HAL reinits, assume battery is gone
+	const maxHALReinits = 5
+	if halReinitCount >= maxHALReinits {
+		sm.logger(hal.LogLevelWarning, fmt.Sprintf("HAL reinit count reached %d, assuming battery departed", halReinitCount))
+		// Reset the counter to avoid repeated triggers
+		sm.reader.Lock()
+		sm.reader.halReinitCount = 0
+		sm.reader.Unlock()
+		
+		// Send battery removed event to handle departure
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			sm.SendEvent(EventBatteryRemoved)
+		}()
+		return nil
+	}
 
 	// Read current battery status to check actual state
 	if err := sm.reader.readBatteryStatus(); err != nil {

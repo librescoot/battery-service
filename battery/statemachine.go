@@ -333,7 +333,7 @@ func (sm *BatteryStateMachine) SendEvent(event BatteryEvent) {
 	
 	select {
 	case sm.eventQueue <- event:
-		sm.logger(hal.LogLevelDebug, fmt.Sprintf("Event %s queued (queue depth: %d)", event, len(sm.eventQueue)))
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Event %s queued (queue depth: %d)", event, len(sm.eventQueue)))
 	case <-sm.stopChan:
 		return
 	default:
@@ -375,7 +375,7 @@ func (sm *BatteryStateMachine) processEvent(event BatteryEvent) {
 		return
 	}
 
-	sm.logger(hal.LogLevelDebug, fmt.Sprintf("State transition: %s + %s -> %s", currentState, event, transition.ToState))
+	sm.logger(hal.LogLevelInfo, fmt.Sprintf("State transition: %s + %s -> %s", currentState, event, transition.ToState))
 
 	var err error
 	if transition.Action != nil {

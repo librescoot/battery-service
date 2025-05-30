@@ -46,6 +46,13 @@ func (r *BatteryReader) startHeartbeat() {
 					consecutiveFailures++
 					if consecutiveFailures >= 3 {
 						r.logCallback(hal.LogLevelError, fmt.Sprintf("Reader appears stuck - no successful operations for %v, triggering full recovery", time.Since(lastSuccessfulOperation)))
+						// Increment HAL reinit counter
+						r.Lock()
+						r.halReinitCount++
+						reinitCount := r.halReinitCount
+						r.Unlock()
+						r.logCallback(hal.LogLevelInfo, fmt.Sprintf("HAL reinit count: %d", reinitCount))
+						
 						// Trigger full HAL recovery
 						r.nfcMutex.Lock()
 						if err := r.hal.FullReinitialize(); err != nil {

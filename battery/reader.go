@@ -95,15 +95,28 @@ func (r *BatteryReader) monitorTags() {
 	}
 	r.Unlock()
 
-	// Get the tag event channel from HAL
-	tagEventChan := r.hal.GetTagEventChannel()
-
 	for {
+		// Get the tag event channel from HAL
+		tagEventChan := r.hal.GetTagEventChannel()
+		
 		select {
 		case <-r.stopChan:
 			return
+			
+		case <-time.After(1 * time.Second):
+			// Timeout to refresh channel periodically (handles channel recreation after HAL reinit)
+			continue
 
-		case event := <-tagEventChan:
+		case event, ok := <-tagEventChan:
+			if !ok {
+				// Channel closed, HAL might be reinitializing
+				r.logCallback(hal.LogLevelWarning, "Tag event channel closed, waiting for HAL reinit")
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			
+			r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Processing tag event: type=%d", event.Type))
+			
 			// Check if the reader is temporarily powered down
 			r.Lock()
 			isPoweredDown := r.isPoweredDown
@@ -125,6 +138,7 @@ func (r *BatteryReader) monitorTags() {
 
 			switch event.Type {
 			case hal.TagArrival:
+				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Processing tag arrival event, tag=%v", event.Tag))
 				if event.Tag != nil {
 					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Tag arrived: %s tag with ID: %x", event.Tag.RFProtocol, event.Tag.ID))
 					
@@ -137,6 +151,8 @@ func (r *BatteryReader) monitorTags() {
 						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Unsupported tag protocol: %s", event.Tag.RFProtocol))
 						r.handleTagAbsent() // Treat unsupported tags as absent
 					}
+				} else {
+					r.logCallback(hal.LogLevelWarning, "Tag arrival event received but tag data is nil")
 				}
 
 			case hal.TagDeparture:
@@ -162,6 +178,7 @@ func (r *BatteryReader) handleTagPresent() {
 
 	if !r.data.Present {
 		r.data.Present = true // Mark as present immediately
+		r.halReinitCount = 0 // Reset HAL reinit counter for fresh battery
 		r.Unlock()
 
 		r.logCallback(hal.LogLevelInfo, "Battery inserted")
@@ -414,6 +431,11 @@ func (r *BatteryReader) readBatteryStatus() error {
 			r.stateMachine.SendEvent(EventLowSOC)
 		}
 
+		// Reset HAL reinit counter on successful status read
+		r.Lock()
+		r.halReinitCount = 0
+		r.Unlock()
+		
 		// Update Redis with the new status
 		if errUpdate := r.updateRedisStatus(); errUpdate != nil {
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after status read: %v", errUpdate))
@@ -481,6 +503,14 @@ func (r *BatteryReader) safelyPowerDownHAL() error {
 // simpleHALRecovery performs HAL recovery using FullReinitialize to handle file descriptor issues
 func (r *BatteryReader) simpleHALRecovery() error {
 	r.logCallback(hal.LogLevelInfo, "Performing full HAL recovery with file descriptor renewal")
+
+	// Increment HAL reinit counter
+	r.Lock()
+	r.halReinitCount++
+	reinitCount := r.halReinitCount
+	r.Unlock()
+	
+	r.logCallback(hal.LogLevelInfo, fmt.Sprintf("HAL reinit count: %d", reinitCount))
 
 	// Always use FullReinitialize which properly handles file descriptor renewal
 	// This is critical for proper recovery from 0300 errors and connection issues

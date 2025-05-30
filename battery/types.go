@@ -41,6 +41,9 @@ type BatteryReader struct {
 	// Operation cancellation context - cancelled when tag departs to abort pending operations
 	operationCtx    context.Context
 	operationCancel context.CancelFunc
+	
+	// Track consecutive HAL reinitializations for detecting stuck states
+	halReinitCount int
 }
 
 // getOperationContext returns the operation context if available, otherwise the service context
