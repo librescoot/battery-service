@@ -639,8 +639,38 @@ func (sm *BatteryStateMachine) actionHALError(machine *BatteryStateMachine, even
 	sm.reader.data.Faults.ReaderError = true
 	sm.reader.Unlock()
 
-	sm.logger(hal.LogLevelError, "HAL error occurred")
-	return sm.reader.updateRedisStatus()
+	sm.logger(hal.LogLevelError, "HAL error occurred - triggering full recovery sequence")
+	
+	// Update Redis first
+	if err := sm.reader.updateRedisStatus(); err != nil {
+		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis during HAL error: %v", err))
+	}
+
+	sm.logger(hal.LogLevelInfo, "Deinitializing HAL for recovery...")
+	
+	// Deinitialize the HAL
+	sm.reader.hal.Deinitialize()
+	
+	sm.logger(hal.LogLevelInfo, fmt.Sprintf("Waiting %v before reinitializing...", timeReinit))
+	time.Sleep(timeReinit)
+	
+	// Reinitialize the HAL
+	sm.logger(hal.LogLevelInfo, "Reinitializing HAL after recovery wait...")
+	if err := sm.reader.hal.Initialize(); err != nil {
+		sm.logger(hal.LogLevelError, fmt.Sprintf("Failed to reinitialize HAL during recovery: %v", err))
+		// Schedule another recovery attempt via heartbeat
+		return err
+	}
+	
+	sm.logger(hal.LogLevelInfo, "HAL recovery sequence completed successfully")
+	
+	// Trigger a recovery event to transition out of error state
+	go func() {
+		time.Sleep(100 * time.Millisecond) // Small delay to let state settle
+		sm.SendEvent(EventHALRecovered)
+	}()
+	
+	return nil
 }
 
 func (sm *BatteryStateMachine) actionRecovery(machine *BatteryStateMachine, event BatteryEvent) error {

@@ -15,9 +15,10 @@ const (
 
 	// Timing constants
 	timeHeartbeatIntervalScooter    = 10 * time.Second        // Interval for ScooterHeartbeat when present
-	timeCmd                         = 200 * time.Millisecond
-	timeDeparture                   = 250 * time.Millisecond  // Reduced from 500ms
+	timeCmd                         = 400 * time.Millisecond  // Aligned with C version (BMS_TIME_CMD)
+	timeDeparture                   = 500 * time.Millisecond  // Aligned with C version
 	timeStateVerify                 = 200 * time.Millisecond  // Reduced from 400ms
+	timeReinit                      = 2 * time.Second         // Time to wait before reinit (matches C's BMS_TIME_REINIT)
 	timeHALTimeout                  = 7 * time.Second  // Timeout for individual HAL operations (Increased from 5s)
 	timeActiveStatusPoll            = 20 * time.Second // Interval to poll status when battery is active
 	timeBattery1MaintPollInterval   = 5 * time.Minute  // Polling interval for battery 1 during maintenance

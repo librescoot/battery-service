@@ -66,6 +66,7 @@ const (
 
 // TagEvent represents a tag arrival or departure event
 type TagEvent struct {
-	Type TagEventType
-	Tag  *Tag
+	Type  TagEventType
+	Tag   *Tag
+	Error error // Optional error information for debugging
 }

@@ -114,6 +114,15 @@ func (r *BatteryReader) monitorTags() {
 				continue
 			}
 
+			// Check if the event contains a serious error
+			if event.Error != nil && (strings.Contains(event.Error.Error(), "unexpected reset") || 
+				strings.Contains(event.Error.Error(), "serious error")) {
+				r.logCallback(hal.LogLevelError, fmt.Sprintf("HAL reported serious error: %v", event.Error))
+				// Trigger HAL error event in state machine
+				r.stateMachine.SendEvent(EventHALError)
+				continue
+			}
+
 			switch event.Type {
 			case hal.TagArrival:
 				if event.Tag != nil {
@@ -132,6 +141,14 @@ func (r *BatteryReader) monitorTags() {
 
 			case hal.TagDeparture:
 				r.logCallback(hal.LogLevelDebug, "Tag departed")
+				// Cancel any ongoing operations immediately
+				r.Lock()
+				if r.operationCancel != nil {
+					r.operationCancel()
+					// Create new context for future operations
+					r.operationCtx, r.operationCancel = context.WithCancel(r.service.ctx)
+				}
+				r.Unlock()
 				r.handleTagAbsent() // Handles state change and Redis update
 			}
 

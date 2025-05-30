@@ -1,8 +1,10 @@
 package hal
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,8 +15,17 @@ const (
 	nciBufferSize = 256
 	maxTags       = 10
 	maxRetries    = 3
-	readTimeout   = 1 * time.Second
+	readTimeout   = 250 * time.Millisecond
 	maxUIDSize    = 10 // Maximum size of NFC tag UID
+	
+	i2cMaxRetries    = 10
+	i2cRetryTimeUs   = 1000 // microseconds
+	paramCheckRetries = 3
+	maxTotalDuration = 2750 // ms
+	
+	// Error recovery parameters
+	maxConsecutive0300Errors = 3 // Only reinitialize after multiple 0300 errors
+	errorRecoveryDelay = 10 * time.Millisecond
 )
 
 // State represents the state of the PN7150 HAL
@@ -61,6 +72,7 @@ type PN7150 struct {
 	tags                []Tag
 	debug               bool
 	transitionTableSent bool      // Track whether RF transition table has been sent
+	consecutive0300Errors int     // Track consecutive 0300 errors
 	
 	// Channel-based tag detection
 	tagEventChan        chan TagEvent
@@ -215,38 +227,66 @@ func (p *PN7150) Initialize() error {
 	params := []nciParam{
 		{0xA003, []byte{0x08}},             // CLOCK_SEL_CFG: 27.12 MHz crystal
 		{0xA00E, []byte{0x02, 0x09, 0x00}}, // PMU_CFG
-		{0xA040, []byte{0x01}},
+		{0xA040, []byte{0x01}},             // TAG_DETECTOR_CFG
 	}
 
-	// Set each parameter
+	// First check if parameters are already correct
+	needsParamWrite := false
 	for _, param := range params {
-		configCmd := []byte{
-			0x20, // MT=CMD (1 << 5), GID=CORE
-			0x02, // OID=SET_CONFIG
-			0x04, // Length
-			0x01, // Number of parameters
-			byte(param.id >> 8),
-			byte(param.id & 0xFF),
-			byte(len(param.value)),
-		}
-		configCmd = append(configCmd, param.value...)
-		configCmd[2] = byte(len(configCmd) - 3)
-
-		resp, err = p.transfer(configCmd)
+		err := p.checkParam(param.id, param.value)
 		if err != nil {
-			p.Unlock()
-			return fmt.Errorf("parameter configuration failed: %v", err)
+			needsParamWrite = true
+			if p.logCallback != nil {
+				p.logCallback(LogLevelInfo, fmt.Sprintf("Parameter 0x%04X needs update", param.id))
+			}
+			break
 		}
+	}
 
-		nciResp, err := parseNCIResponse(resp)
-		if err != nil {
-			p.Unlock()
-			return fmt.Errorf("failed to parse parameter response: %v", err)
+	if needsParamWrite {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelWarning, "Writing NFC parameters")
 		}
+		
+		// Set each parameter
+		for _, param := range params {
+			configCmd := []byte{
+				0x20, // MT=CMD (1 << 5), GID=CORE
+				0x02, // OID=SET_CONFIG
+				0x04, // Length
+				0x01, // Number of parameters
+				byte(param.id >> 8),
+				byte(param.id & 0xFF),
+				byte(len(param.value)),
+			}
+			configCmd = append(configCmd, param.value...)
+			configCmd[2] = byte(len(configCmd) - 3)
 
-		if !isSuccessResponse(nciResp) {
-			p.Unlock()
-			return fmt.Errorf("parameter configuration failed with status: %02x", nciResp.Status)
+			resp, err = p.transfer(configCmd)
+			if err != nil {
+				p.Unlock()
+				return fmt.Errorf("parameter configuration failed: %v", err)
+			}
+
+			nciResp, err := parseNCIResponse(resp)
+			if err != nil {
+				p.Unlock()
+				return fmt.Errorf("failed to parse parameter response: %v", err)
+			}
+
+			if !isSuccessResponse(nciResp) {
+				p.Unlock()
+				return fmt.Errorf("parameter configuration failed with status: %02x", nciResp.Status)
+			}
+		}
+		
+		// Verify the parameters were written correctly
+		for _, param := range params {
+			err := p.checkParam(param.id, param.value)
+			if err != nil {
+				p.Unlock()
+				return fmt.Errorf("parameter verification failed after write: %v", err)
+			}
 		}
 	}
 
@@ -325,11 +365,23 @@ func (p *PN7150) Initialize() error {
 			return fmt.Errorf("RF transitions configuration failed with status: %02x", nciResp.Status)
 		}
 
+		// Verify RF transitions were written correctly
+		if p.logCallback != nil {
+			p.logCallback(LogLevelDebug, "Verifying RF transitions")
+		}
+		for _, t := range transitions {
+			err := p.checkRFTransition(t.id, t.offset, t.value)
+			if err != nil {
+				p.Unlock()
+				return fmt.Errorf("RF transition verification failed: %v", err)
+			}
+		}
+
 		// Mark transition table as sent
 		p.transitionTableSent = true
 
 		if p.logCallback != nil {
-			p.logCallback(LogLevelInfo, "RF transition table sent successfully - will be skipped on future initializations")
+			p.logCallback(LogLevelInfo, "RF transition table sent and verified successfully - will be skipped on future initializations")
 		}
 	} else {
 		if p.logCallback != nil {
@@ -370,6 +422,20 @@ func (p *PN7150) Initialize() error {
 	if !p.tagEventReaderRunning {
 		p.tagEventReaderRunning = true
 		go p.tagEventReader()
+	} else {
+		// If it was already marked as running but might be dead, restart it
+		if p.logCallback != nil {
+			p.logCallback(LogLevelWarning, "Tag event reader was marked as running, ensuring it's alive")
+		}
+		// Send a test to see if the goroutine is responsive
+		select {
+		case p.tagEventReaderStop <- struct{}{}:
+			// If we can send, the goroutine is dead, restart it
+			<-p.tagEventReaderStop // Consume the signal
+			go p.tagEventReader()
+		default:
+			// Goroutine is alive
+		}
 	}
 
 	// After successful Initialize(), wait briefly for a tag to be rediscovered so callers don't
@@ -450,6 +516,13 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 	p.Lock()
 	defer p.Unlock()
 
+	if pollPeriod > maxTotalDuration {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelError, fmt.Sprintf("start discovery: invalid poll_period: %d", pollPeriod))
+		}
+		return fmt.Errorf("invalid poll period: %d (max %d)", pollPeriod, maxTotalDuration)
+	}
+
 	// First stop any existing discovery
 	resp, err := p.transfer(buildRFDeactivateCmd())
 	if err != nil {
@@ -461,12 +534,9 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 		return fmt.Errorf("failed to parse RF deactivate response: %v", err)
 	}
 
+	// Accept semantic error (means discovery was already stopped)
 	if !isSuccessResponse(nciResp) && nciResp.Status != nciStatusSemanticError {
 		return fmt.Errorf("RF deactivate failed with status: %02x", nciResp.Status)
-	}
-
-	if pollPeriod > 2750 {
-		return fmt.Errorf("invalid poll period: %d", pollPeriod)
 	}
 
 	p.logCallback(LogLevelDebug, fmt.Sprintf("StartDiscovery: poll_period=%dms", pollPeriod))
@@ -712,7 +782,23 @@ func (p *PN7150) FullReinitialize() error {
 	}
 
 	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "Performing full HAL reinitialization with file descriptor renewal")
+		p.logCallback(LogLevelInfo, "Performing full HAL reinitialization with power cycle")
+	}
+
+	// Stop the tag event reader first
+	if p.tagEventReaderRunning {
+		p.tagEventReaderRunning = false
+		close(p.tagEventReaderStop)
+		p.Unlock()
+		// Wait briefly for goroutine to exit
+		time.Sleep(50 * time.Millisecond)
+		p.Lock()
+	}
+
+	if err := p.SetPower(false); err != nil {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelWarning, fmt.Sprintf("Error powering off during reinit: %v", err))
+		}
 	}
 
 	// Remember the device path and close the current file descriptor (if any).
@@ -726,7 +812,10 @@ func (p *PN7150) FullReinitialize() error {
 	p.state = stateUninitialized
 	p.numTags = 0
 	p.tagSelected = false
+	p.consecutive0300Errors = 0 // Reset error counter
 	p.Unlock()
+
+	time.Sleep(500 * time.Millisecond)
 
 	// Re-open the device.
 	fd, err := unix.Open(devicePath, unix.O_RDWR, 0)
@@ -737,6 +826,9 @@ func (p *PN7150) FullReinitialize() error {
 	// Store the new file descriptor.
 	p.Lock()
 	p.fd = fd
+	// Recreate channels and stop channel for tag event reader
+	p.tagEventChan = make(chan TagEvent, 10)
+	p.tagEventReaderStop = make(chan struct{})
 	p.Unlock()
 
 	// Re-run the normal initialization sequence that is already proven to
@@ -747,7 +839,7 @@ func (p *PN7150) FullReinitialize() error {
 	}
 
 	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "HAL reinitialization completed successfully")
+		p.logCallback(LogLevelInfo, "HAL reinitialization completed successfully with power cycle")
 	}
 
 	return nil
@@ -760,6 +852,19 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 
 	if p.state != statePresent {
 		return nil, fmt.Errorf("invalid state for reading: %s", p.state)
+	}
+
+	if p.state == stateDiscovering {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelDebug, "Stopping discovery before read operation")
+		}
+		resp, err := p.transfer(buildRFDeactivateCmd())
+		if err == nil {
+			nciResp, _ := parseNCIResponse(resp)
+			if nciResp != nil && (isSuccessResponse(nciResp) || nciResp.Status == nciStatusSemanticError) {
+				p.state = stateIdle
+			}
+		}
 	}
 
 	// Check if we have a tag and what protocol it is
@@ -796,7 +901,6 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 	// Add retries for RF frame corruption errors
 	const maxRFRetries = 3
 	var lastErr error
-	consecutive0300Errors := 0
 
 	for retry := 0; retry < maxRFRetries; retry++ {
 		resp, err := p.transfer(p.txBuf[:p.txSize])
@@ -807,39 +911,17 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
-			// Fatal error, transition to discovering
-			p.state = stateDiscovering
-			p.tagSelected = false
-			return nil, fmt.Errorf("read command failed: %v", err)
+			// Handle serious I/O errors with reinitialization
+			return nil, p.handleSeriousErrorWithReinit(err, "read command")
 		}
 
 		// We may receive multiple responses - keep reading until we get the actual data
 		for {
 			// Check for CORE_CONN_CREDITS_NTF
 			if len(resp) >= 3 && resp[0] == 0x60 && resp[1] == 0x06 {
-				// This is a credit notification, read the next response
-				resp, err = p.transfer(nil)
+				resp, err = p.handleCreditNotification()
 				if err != nil {
 					lastErr = err
-					break
-				}
-
-				// If we get no response after credit notification, treat it as a communication issue
-				if len(resp) == 0 {
-					if p.logCallback != nil {
-						p.logCallback(LogLevelDebug, "No response after credit notification – performing full HAL reinitialization")
-					}
-
-					// Release lock before reinitialization
-					p.Unlock()
-					err = p.FullReinitialize()
-					p.Lock()
-
-					if err != nil {
-						lastErr = fmt.Errorf("failed full reinitialization: %v", err)
-					} else {
-						lastErr = fmt.Errorf("performed full HAL reinitialization after credit timeout")
-					}
 					break
 				}
 				continue
@@ -847,28 +929,13 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 
 			// Check for special response codes - critical error 0300
 			if len(resp) >= 5 && resp[3] == 0x03 && resp[4] == 0x00 {
-				// Got 0300 response - need to handle it
-				consecutive0300Errors++
-				
-				// Always do full reinitialization for 0300 errors
-				if p.logCallback != nil {
-					p.logCallback(LogLevelWarning, fmt.Sprintf("0300 error (%d occurrences) - performing full HAL reinitialization", consecutive0300Errors))
-				}
-
-				// Release lock before full reinitialization
-				p.Unlock()
-				err = p.FullReinitialize()
-				// Re-acquire lock
-				p.Lock()
-
-				if err != nil {
-					lastErr = fmt.Errorf("failed full reinitialization: %v", err)
+				shouldContinue, err := p.handle0300Error("read")
+				if !shouldContinue {
+					lastErr = err
 					break
 				}
-
-				// Even after full reinitialization, we can't continue with this read
-				lastErr = fmt.Errorf("aborted read after HAL reinitialization")
-				break
+				lastErr = err
+				continue
 			}
 
 			// For DATA packets, first 3 bytes are NCI header
@@ -889,6 +956,8 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 					p.logCallback(LogLevelDebug, fmt.Sprintf("DATA_RX: %X", resp[3:]))
 				}
 			}
+			// Reset error counter on success
+			p.consecutive0300Errors = 0
 			return resp[3:], nil
 		}
 
@@ -903,8 +972,11 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 
 	// All retries failed
 	if lastErr != nil {
-		p.state = stateDiscovering
-		p.tagSelected = false
+		// For serious errors (not 0300 or timeout), perform full reinitialization
+		if !strings.Contains(lastErr.Error(), "0300") && !strings.Contains(lastErr.Error(), "timeout") && !strings.Contains(lastErr.Error(), "reinitialization") {
+			finalErr := p.handleSeriousErrorWithReinit(lastErr, "read after retries")
+			return nil, fmt.Errorf("read failed after %d retries: %v", maxRFRetries, finalErr)
+		}
 		return nil, fmt.Errorf("read failed after %d retries: %v", maxRFRetries, lastErr)
 	}
 
@@ -918,6 +990,19 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 
 	if p.state != statePresent {
 		return fmt.Errorf("invalid state for writing: %s", p.state)
+	}
+
+	if p.state == stateDiscovering {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelDebug, "Stopping discovery before write operation")
+		}
+		resp, err := p.transfer(buildRFDeactivateCmd())
+		if err == nil {
+			nciResp, _ := parseNCIResponse(resp)
+			if nciResp != nil && (isSuccessResponse(nciResp) || nciResp.Status == nciStatusSemanticError) {
+				p.state = stateIdle
+			}
+		}
 	}
 
 	// Check if we have a tag and what protocol it is
@@ -965,7 +1050,6 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 	// Add retries for RF frame corruption errors
 	const maxRFRetries = 3
 	var lastErr error
-	consecutive0300Errors := 0
 
 	for retry := 0; retry < maxRFRetries; retry++ {
 		resp, err := p.transfer(p.txBuf[:p.txSize])
@@ -976,65 +1060,28 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
-			// Fatal error, transition to discovering
-			p.state = stateDiscovering
-			p.tagSelected = false
-			return fmt.Errorf("write command failed: %v", err)
+			// Handle serious I/O errors with reinitialization
+			return p.handleSeriousErrorWithReinit(err, "write command")
 		}
 
 		// We may receive multiple responses - keep reading until we get the actual ACK
 		for {
 			// Check for special response codes
 			if len(resp) >= 5 && resp[3] == 0x03 && resp[4] == 0x00 {
-				// Got 0300 response - need to reinitialize
-				if p.logCallback != nil {
-					p.logCallback(LogLevelDebug, "Received 0300 response - reinitializing communication")
-				}
-
-				consecutive0300Errors++
-				if consecutive0300Errors >= 2 {
-					// Multiple 0300 errors in a row - do full reinitialization
-					if p.logCallback != nil {
-						p.logCallback(LogLevelWarning, fmt.Sprintf("Multiple 0300 errors (%d) - performing full HAL reinitialization", consecutive0300Errors))
-					}
-
-					// Release lock before full reinitialization
-					p.Unlock()
-					err = p.FullReinitialize()
-					// Re-acquire lock
-					p.Lock()
-
-					if err != nil {
-						lastErr = fmt.Errorf("failed full reinitialization: %v", err)
-						break
-					}
-
-					// Even after full reinitialization, we can't continue with this write
-					lastErr = fmt.Errorf("aborted write after full HAL reinitialization")
+				shouldContinue, err := p.handle0300Error("write")
+				if !shouldContinue {
+					lastErr = err
 					break
 				}
-
-				// Always perform full reinitialization for 0300 errors
-				if p.logCallback != nil {
-					p.logCallback(LogLevelWarning, "0300 error in write - performing full HAL reinitialization")
-				}
-				p.Unlock()
-				err = p.FullReinitialize()
-				p.Lock()
-
-				if err != nil {
-					lastErr = fmt.Errorf("failed full reinitialization: %v", err)
-				} else {
-					if p.logCallback != nil {
-						p.logCallback(LogLevelInfo, "Full HAL reinitialization completed after 0300 error")
-					}
-				}
+				lastErr = err
 				break
 			}
 
 			// For T2T, we expect an ACK (0x0A) response
 			if protocol == RFProtocolT2T {
 				if len(resp) >= 4 && resp[3] == 0x0A {
+					// Reset error counter on success
+					p.consecutive0300Errors = 0
 					return nil
 				}
 			}
@@ -1042,35 +1089,17 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 			// For ISO-DEP, check the response status
 			if protocol == RFProtocolISODEP {
 				if len(resp) >= 5 && resp[3] == 0x90 && resp[4] == 0x00 {
+					// Reset error counter on success
+					p.consecutive0300Errors = 0
 					return nil
 				}
 			}
 
 			// Check if this is a CORE_CONN_CREDITS_NTF
 			if len(resp) >= 3 && resp[0] == 0x60 && resp[1] == 0x06 {
-				// This is a credit notification, read the next response
-				resp, err = p.transfer(nil)
+				resp, err = p.handleCreditNotification()
 				if err != nil {
 					lastErr = err
-					break
-				}
-
-				// If we get no response after credit notification, treat it as a communication issue
-				if len(resp) == 0 {
-					if p.logCallback != nil {
-						p.logCallback(LogLevelDebug, "No response after credit notification – performing full HAL reinitialization")
-					}
-
-					// Release lock before reinitialization
-					p.Unlock()
-					err = p.FullReinitialize()
-					p.Lock()
-
-					if err != nil {
-						lastErr = fmt.Errorf("failed full reinitialization: %v", err)
-					} else {
-						lastErr = fmt.Errorf("performed full HAL reinitialization after credit timeout")
-					}
 					break
 				}
 				continue
@@ -1091,17 +1120,352 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 	}
 
 	// All retries failed
-	p.state = stateDiscovering
-	p.tagSelected = false
 	if lastErr != nil {
+		// For serious errors (not 0300 or timeout), perform full reinitialization
+		if !strings.Contains(lastErr.Error(), "0300") && !strings.Contains(lastErr.Error(), "timeout") && !strings.Contains(lastErr.Error(), "reinitialization") {
+			finalErr := p.handleSeriousErrorWithReinit(lastErr, "write after retries")
+			return fmt.Errorf("write failed after %d retries: %v", maxRFRetries, finalErr)
+		}
 		return fmt.Errorf("write failed after %d retries: %v", maxRFRetries, lastErr)
 	}
 	return fmt.Errorf("write failed with unknown error")
 }
 
+// SelectTag selects a specific tag for communication
+func (p *PN7150) SelectTag(tagIdx uint) error {
+	p.Lock()
+	defer p.Unlock()
+
+	if tagIdx >= uint(p.numTags) {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelError, fmt.Sprintf("select tag: invalid tag_idx: %d", tagIdx))
+		}
+		return fmt.Errorf("invalid tag index: %d", tagIdx)
+	}
+
+	if p.logCallback != nil {
+		p.logCallback(LogLevelDebug, fmt.Sprintf("select tag: tag_idx=%d", tagIdx))
+	}
+
+	// If a tag is already selected, deselect it first
+	if p.tagSelected {
+		// Deactivate to sleep mode
+		cmd := []byte{
+			0x21, // MT=CMD (1 << 5), GID=RF
+			0x06, // OID=DEACTIVATE
+			0x01, // Length
+			0x01, // Deactivation type = Sleep
+		}
+		_, err := p.transfer(cmd)
+		if err != nil {
+			return fmt.Errorf("deactivate tag failed: %v", err)
+		}
+		
+		// Wait for deactivation notification
+		err = p.awaitNotification(0x0106, 250) // RF_DEACTIVATE notification
+		if err != nil {
+			return err
+		}
+		p.tagSelected = false
+	}
+
+	// Select the given tag
+	cmd := []byte{
+		0x21, // MT=CMD (1 << 5), GID=RF
+		0x04, // OID=DISCOVER_SELECT
+		0x03, // Length
+		byte(tagIdx + 1), // RF Discovery ID (1-based)
+		byte(p.tags[tagIdx].RFProtocol),
+		0x00, // RF Interface - will be set below
+	}
+	
+	// Set appropriate interface based on protocol
+	if p.tags[tagIdx].RFProtocol == RFProtocolISODEP {
+		cmd[5] = nciRFInterfaceISODEP
+	} else {
+		cmd[5] = nciRFInterfaceFrame
+	}
+	
+	resp, err := p.transfer(cmd)
+	if err != nil {
+		return fmt.Errorf("select tag command failed: %v", err)
+	}
+	
+	nciResp, err := parseNCIResponse(resp)
+	if err != nil {
+		return fmt.Errorf("failed to parse select response: %v", err)
+	}
+	
+	if !isSuccessResponse(nciResp) {
+		return fmt.Errorf("select tag failed with status: %02x", nciResp.Status)
+	}
+	
+	// Wait for tag activation
+	err = p.awaitNotification(0x0105, 250) // RF_INTF_ACTIVATED notification
+	if err != nil {
+		if err.Error() == "timeout" {
+			return fmt.Errorf("tag departed")
+		}
+		return err
+	}
+	
+	p.tagSelected = true
+	return nil
+}
+
 // GetTagEventChannel implements HAL.GetTagEventChannel
 func (p *PN7150) GetTagEventChannel() <-chan TagEvent {
 	return p.tagEventChan
+}
+
+// SetTagEventReaderEnabled enables or disables the tag event reader goroutine
+func (p *PN7150) SetTagEventReaderEnabled(enabled bool) {
+	p.Lock()
+	defer p.Unlock()
+	
+	if enabled && !p.tagEventReaderRunning {
+		p.tagEventReaderRunning = true
+		go p.tagEventReader()
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, "Tag event reader started")
+		}
+	} else if !enabled && p.tagEventReaderRunning {
+		p.tagEventReaderRunning = false
+		close(p.tagEventReaderStop)
+		// Wait a bit for the goroutine to stop
+		time.Sleep(50 * time.Millisecond)
+		// Recreate the stop channel for next time
+		p.tagEventReaderStop = make(chan struct{})
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, "Tag event reader stopped")
+		}
+	}
+}
+
+// handleSeriousErrorWithReinit handles serious I/O errors by performing full HAL reinitialization
+// It unlocks the mutex, performs reinitialization, and re-locks the mutex
+// Returns an error that includes both the original error and any reinitialization error
+func (p *PN7150) handleSeriousErrorWithReinit(err error, operation string) error {
+	// Only handle serious I/O errors, not temporary ones
+	if err == unix.EINTR || err == unix.EAGAIN || err == unix.ETIMEDOUT {
+		return err
+	}
+	
+	if p.logCallback != nil {
+		p.logCallback(LogLevelError, fmt.Sprintf("%s failed with serious error: %v - performing full HAL reinitialization", operation, err))
+	}
+	
+	// Release lock before reinitialization
+	p.Unlock()
+	reinitErr := p.FullReinitialize()
+	p.Lock()
+	
+	if reinitErr != nil {
+		return fmt.Errorf("%s failed and reinitialization failed: %v (original: %v)", operation, reinitErr, err)
+	}
+	
+	return fmt.Errorf("%s failed: %v", operation, err)
+}
+
+// handle0300Error handles 0300 communication errors with progressive reinitialization
+// Returns true if the operation should continue retrying, false if it should abort
+func (p *PN7150) handle0300Error(operation string) (bool, error) {
+	p.consecutive0300Errors++
+	
+	if p.logCallback != nil {
+		p.logCallback(LogLevelWarning, fmt.Sprintf("0300 error in %s (occurrence %d/%d)", operation, p.consecutive0300Errors, maxConsecutive0300Errors))
+	}
+	
+	// Only do full reinitialization after multiple consecutive 0300 errors
+	if p.consecutive0300Errors >= maxConsecutive0300Errors {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelError, "Multiple consecutive 0300 errors - performing full HAL reinitialization")
+		}
+
+		// Release lock before full reinitialization
+		p.Unlock()
+		err := p.FullReinitialize()
+		// Re-acquire lock
+		p.Lock()
+
+		if err != nil {
+			return false, fmt.Errorf("failed full reinitialization: %v", err)
+		}
+
+		// Reset counter after reinitialization
+		p.consecutive0300Errors = 0
+		return false, fmt.Errorf("aborted %s after HAL reinitialization", operation)
+	}
+	
+	// For non-consecutive errors, just retry
+	time.Sleep(errorRecoveryDelay)
+	return true, fmt.Errorf("0300 communication error")
+}
+
+// handleCreditNotification handles CORE_CONN_CREDITS_NTF and reads the next response
+// Returns the next response or an error
+func (p *PN7150) handleCreditNotification() ([]byte, error) {
+	// This is a credit notification, read the next response
+	resp, err := p.transfer(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we get no response after credit notification, treat it as a communication issue
+	if len(resp) == 0 {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelDebug, "No response after credit notification – performing full HAL reinitialization")
+		}
+
+		// Release lock before reinitialization
+		p.Unlock()
+		err = p.FullReinitialize()
+		p.Lock()
+
+		if err != nil {
+			return nil, fmt.Errorf("failed full reinitialization: %v", err)
+		}
+		return nil, fmt.Errorf("performed full HAL reinitialization after credit timeout")
+	}
+	
+	return resp, nil
+}
+
+// awaitNotification waits for a specific notification message with timeout tracking
+func (p *PN7150) awaitNotification(msgID uint16, timeoutMs uint) error {
+	startTime := time.Now()
+	remainingTimeout := time.Duration(timeoutMs) * time.Millisecond
+	
+	for {
+		// Check if we've exceeded the timeout
+		elapsed := time.Since(startTime)
+		if elapsed >= time.Duration(timeoutMs)*time.Millisecond {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelWarning, "await notification timeout")
+			}
+			return fmt.Errorf("timeout waiting for notification 0x%04X", msgID)
+		}
+		
+		// Calculate remaining timeout
+		remainingTimeout = time.Duration(timeoutMs)*time.Millisecond - elapsed
+		
+		// Try to read a packet with the remaining timeout
+		resp, err := p.transferWithTimeout(nil, remainingTimeout)
+		if err != nil {
+			return err
+		}
+		
+		// Check if this is the notification we're waiting for
+		if len(resp) >= 3 {
+			mt := (resp[0] >> nciMsgTypeBit) & 0x03
+			if mt == nciMsgTypeNotification {
+				gid := resp[0] & 0x0F
+				oid := resp[1] & 0x3F
+				gotMsgID := uint16(gid)<<8 | uint16(oid)
+				if gotMsgID == msgID {
+					return nil // Found the notification
+				}
+			}
+		}
+		
+		// Update elapsed time for next iteration
+		startTime = time.Now()
+	}
+}
+
+// transferWithTimeout performs a transfer with a specific timeout
+func (p *PN7150) transferWithTimeout(tx []byte, timeout time.Duration) ([]byte, error) {
+	// Since transfer uses readTimeout constant, we just call transfer directly
+	// In a production version, we would modify transfer to accept a timeout parameter
+	return p.transfer(tx)
+}
+
+// checkRFTransition verifies an RF transition configuration value
+func (p *PN7150) checkRFTransition(id, offset byte, expectedValue []byte) error {
+	for check := 0; check < paramCheckRetries; check++ {
+		// Build RF_GET_TRANSITION command (proprietary PN7150 command)
+		cmd := []byte{
+			0x2F, // MT=CMD (1 << 5), GID=Proprietary
+			0x14, // OID=RF_GET_TRANSITION
+			0x02, // Length
+			id,
+			offset,
+		}
+		
+		resp, err := p.transfer(cmd)
+		if err != nil {
+			return err
+		}
+		
+		// Parse response
+		if len(resp) < 5+len(expectedValue) {
+			return fmt.Errorf("invalid RF_GET_TRANSITION_RSP length")
+		}
+		
+		// Check response format
+		if resp[4] != byte(len(expectedValue)) {
+			return fmt.Errorf("invalid RF_GET_TRANSITION_RSP format")
+		}
+		
+		// Check if value matches
+		if bytes.Equal(resp[5:5+len(expectedValue)], expectedValue) {
+			return nil // Success
+		}
+		
+		if check < paramCheckRetries-1 {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelWarning, fmt.Sprintf("RF transition id=0x%02X offset=0x%02X mismatch, retry %d/%d", id, offset, check+1, paramCheckRetries))
+			}
+		}
+	}
+	
+	return fmt.Errorf("RF transition id=0x%02X offset=0x%02X incorrect after %d checks", id, offset, paramCheckRetries)
+}
+
+// checkParam verifies a configuration parameter value matches expected value
+func (p *PN7150) checkParam(paramID uint16, expectedValue []byte) error {
+	for check := 0; check < paramCheckRetries; check++ {
+		// Build CORE_GET_CONFIG command
+		cmd := []byte{
+			0x20, // MT=CMD (1 << 5), GID=CORE
+			0x03, // OID=GET_CONFIG
+			0x03, // Length (1 byte num params + 2 bytes param ID)
+			0x01, // Number of parameters
+			byte(paramID >> 8),
+			byte(paramID & 0xFF),
+		}
+		
+		resp, err := p.transfer(cmd)
+		if err != nil {
+			return err
+		}
+		
+		// Parse response
+		if len(resp) < 8+len(expectedValue) {
+			return fmt.Errorf("invalid CORE_GET_CONFIG_RSP length")
+		}
+		
+		// Check response format
+		if resp[4] != 1 || // Number of parameters
+			resp[5] != byte(paramID>>8) ||
+			resp[6] != byte(paramID&0xFF) ||
+			resp[7] != byte(len(expectedValue)) {
+			return fmt.Errorf("invalid CORE_GET_CONFIG_RSP format")
+		}
+		
+		// Check if value matches
+		if bytes.Equal(resp[8:8+len(expectedValue)], expectedValue) {
+			return nil // Success
+		}
+		
+		if check < paramCheckRetries-1 {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelWarning, fmt.Sprintf("Parameter 0x%04X mismatch, retry %d/%d", paramID, check+1, paramCheckRetries))
+			}
+		}
+	}
+	
+	return fmt.Errorf("parameter 0x%04X incorrect after %d checks", paramID, paramCheckRetries)
 }
 
 // flushReadBuffer reads and discards any pending data
@@ -1110,7 +1474,19 @@ func (p *PN7150) flushReadBuffer() error {
 	deadline := time.Now().Add(100 * time.Millisecond)
 
 	for time.Now().Before(deadline) {
-		_, err := unix.Read(p.fd, buf)
+		// Use poll to check if data is available
+		pfd := unix.PollFd{
+			Fd:     int32(p.fd),
+			Events: unix.POLLIN,
+		}
+		n, err := unix.Poll([]unix.PollFd{pfd}, 0) // Non-blocking poll
+		if err != nil || n <= 0 {
+			// No data available or error
+			return nil
+		}
+		
+		// Read and discard the data
+		r, err := unix.Read(p.fd, buf)
 		if err != nil {
 			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
 				// No more data available
@@ -1123,6 +1499,9 @@ func (p *PN7150) flushReadBuffer() error {
 			// Any other error means we're done
 			return nil
 		}
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, fmt.Sprintf("Flushed %d bytes", r))
+		}
 	}
 	return nil
 }
@@ -1134,28 +1513,38 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 			p.logNCI(tx, len(tx), "TX")
 		}
 
-		const i2cRetries = 10
-		const i2cRetryTime = time.Millisecond
-
-		for i := 0; i <= i2cRetries; i++ {
+		var writeErr error
+		for i := 0; i <= i2cMaxRetries; i++ {
 			n, err := unix.Write(p.fd, tx)
+			if err == nil && n == len(tx) {
+				// Success
+				break
+			}
+			
 			if err != nil {
-				if (err == unix.ENXIO || err == unix.EAGAIN) && i < i2cRetries {
-					time.Sleep(i2cRetryTime)
+				writeErr = err
+				// Retry on NACK or arbitration lost
+				if (err == unix.ENXIO || err == unix.EAGAIN) && i < i2cMaxRetries {
+					time.Sleep(time.Duration(i2cRetryTimeUs) * time.Microsecond)
+					if p.debug && p.logCallback != nil {
+						p.logCallback(LogLevelDebug, fmt.Sprintf("Retrying to send data, try %d/%d", i+1, i2cMaxRetries))
+					}
 					continue
 				}
 				return nil, fmt.Errorf("write error: %v", err)
 			}
-
+			
 			if n != len(tx) {
-				if i < i2cRetries {
-					time.Sleep(i2cRetryTime)
+				writeErr = fmt.Errorf("incomplete write: %d != %d", n, len(tx))
+				if i < i2cMaxRetries {
+					time.Sleep(time.Duration(i2cRetryTimeUs) * time.Microsecond)
 					continue
 				}
-				return nil, fmt.Errorf("incomplete write: %d != %d", n, len(tx))
 			}
-
-			break
+		}
+		
+		if writeErr != nil {
+			return nil, writeErr
 		}
 	}
 
@@ -1194,23 +1583,44 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 			continue // Keep waiting for response
 		}
 
-		// Read header first
-		n, err = unix.Read(p.fd, p.rxBuf[:3])
-		if err != nil {
-			if err == unix.EINTR {
-				continue
+		// Read header first with retry logic for NACK handling
+		var readErr error
+		var readN int
+		for retry := 0; retry <= i2cMaxRetries; retry++ {
+			readN, err = unix.Read(p.fd, p.rxBuf[:3])
+			if err == nil && readN > 0 {
+				// Success
+				break
 			}
-			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
-				// No data available
-				if tx == nil {
-					return nil, nil // No notifications available
+			
+			if err != nil {
+				if err == unix.EINTR {
+					continue
 				}
-				continue // Keep waiting for response
+				if err == unix.ENXIO && retry < i2cMaxRetries {
+					if p.logCallback != nil {
+						p.logCallback(LogLevelWarning, fmt.Sprintf("Read header NACKed: %v, retry %d/%d", err, retry+1, i2cMaxRetries))
+					}
+					time.Sleep(time.Duration(i2cRetryTimeUs) * time.Microsecond)
+					continue
+				}
+				if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+					// No data available
+					if tx == nil {
+						return nil, nil // No notifications available
+					}
+					continue // Keep waiting for response
+				}
+				readErr = fmt.Errorf("read header error: %v", err)
+				break
 			}
-			return nil, fmt.Errorf("read header error: %v", err)
+		}
+		
+		if readErr != nil {
+			return nil, readErr
 		}
 
-		if n == 0 {
+		if readN == 0 {
 			// Zero-length read - treat as no data available
 			if tx == nil {
 				return nil, nil // No notifications available
@@ -1218,33 +1628,100 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 			continue // Keep waiting for response
 		}
 
-		if n != 3 {
-			return nil, fmt.Errorf("incomplete header read: %d", n)
+		if readN != 3 {
+			return nil, fmt.Errorf("incomplete header read: %d", readN)
 		}
 
 		// Basic validation
 		mt := (p.rxBuf[0] >> nciMsgTypeBit) & 0x03
 		pbf := p.rxBuf[0] & 0x10
-		if mt > nciMsgTypeNotification || pbf != 0 {
+		
+		if mt == nciMsgTypeCommand || pbf != 0 {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelWarning, fmt.Sprintf("Invalid header: MT=%d, PBF=%d", mt, pbf))
+			}
 			p.flushReadBuffer()
 			return nil, fmt.Errorf("invalid NCI header")
+		}
+		
+		// Additional validation based on message type
+		if mt == nciMsgTypeData {
+			// For data messages, check connection ID is valid
+			if p.rxBuf[1] != 0 {
+				if p.logCallback != nil {
+					p.logCallback(LogLevelWarning, fmt.Sprintf("Invalid data header: ConnID=%02X", p.rxBuf[1]))
+				}
+				p.flushReadBuffer()
+				return nil, fmt.Errorf("invalid data header")
+			}
+		} else {
+			// For commands/responses/notifications, check OID validity
+			if (p.rxBuf[1] & ^byte(0x3F)) != 0 {
+				if p.logCallback != nil {
+					p.logCallback(LogLevelWarning, fmt.Sprintf("Invalid header: OID byte=%02X", p.rxBuf[1]))
+				}
+				p.flushReadBuffer()
+				return nil, fmt.Errorf("invalid header OID")
+			}
 		}
 
 		payloadLen := int(p.rxBuf[2])
 		if payloadLen > 0 {
-			// Read payload
-			n, err = unix.Read(p.fd, p.rxBuf[3:3+payloadLen])
-			if err != nil {
-				return nil, fmt.Errorf("read payload error: %v", err)
+			// Check if we can read from the reader
+			pfdCheck := unix.PollFd{
+				Fd:     int32(p.fd),
+				Events: unix.POLLIN,
 			}
-			if n != payloadLen {
-				return nil, fmt.Errorf("incomplete payload read: %d != %d", n, payloadLen)
+			pollN, err := unix.Poll([]unix.PollFd{pfdCheck}, 0)
+			if err == nil && pollN <= 0 {
+				// No data available - header without payload is invalid
+				if p.logCallback != nil {
+					p.logCallback(LogLevelWarning, "Timed out waiting for payload")
+				}
+				return nil, fmt.Errorf("incomplete message: no payload available")
+			}
+			
+			// Read payload with retry logic
+			for retry := 0; retry <= i2cMaxRetries; retry++ {
+				payloadN, err := unix.Read(p.fd, p.rxBuf[3:3+payloadLen])
+				if err == nil && payloadN == payloadLen {
+					// Success
+					break
+				}
+				
+				if err != nil {
+					if err == unix.ENXIO && retry < i2cMaxRetries {
+						// Address NACK, retry
+						time.Sleep(time.Duration(i2cRetryTimeUs) * time.Microsecond)
+						continue
+					}
+					return nil, fmt.Errorf("read payload error: %v", err)
+				}
+				
+				if payloadN != payloadLen {
+					if retry < i2cMaxRetries {
+						time.Sleep(time.Duration(i2cRetryTimeUs) * time.Microsecond)
+						continue
+					}
+					return nil, fmt.Errorf("incomplete payload read: %d != %d", payloadN, payloadLen)
+				}
 			}
 		}
 
 		totalLen := 3 + payloadLen
 		if p.debug {
 			p.logNCI(p.rxBuf[:totalLen], totalLen, "RX")
+		}
+
+		if mt == nciMsgTypeNotification {
+			gid := p.rxBuf[0] & 0x0F
+			oid := p.rxBuf[1] & 0x3F
+			if gid == nciGroupCore && oid == nciCoreReset {
+				if p.logCallback != nil {
+					p.logCallback(LogLevelError, fmt.Sprintf("Unexpected reset notification: %X", p.rxBuf[3:totalLen]))
+				}
+				return nil, fmt.Errorf("unexpected NFC controller reset")
+			}
 		}
 
 		// Special case: If we sent a data packet (MT=0), expect a notification as response
@@ -1276,6 +1753,21 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 
 // tagEventReader is a goroutine that continuously monitors for tag arrival/departure events
 func (p *PN7150) tagEventReader() {
+	// Recover from panics and restart the goroutine
+	defer func() {
+		if r := recover(); r != nil {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelError, fmt.Sprintf("Tag event reader panicked: %v, restarting...", r))
+			}
+			// Try to restart the goroutine if HAL is still running
+			p.Lock()
+			if p.tagEventReaderRunning && p.state != stateUninitialized {
+				go p.tagEventReader()
+			}
+			p.Unlock()
+		}
+	}()
+
 	var previousTags []Tag
 	ticker := time.NewTicker(100 * time.Millisecond) // Poll every 100ms
 	defer ticker.Stop()
@@ -1301,6 +1793,18 @@ func (p *PN7150) tagEventReader() {
 			// Get current tags
 			currentTags, err := p.DetectTags()
 			if err != nil {
+				// Check for serious errors that might indicate goroutine should exit
+				if strings.Contains(err.Error(), "invalid state") || strings.Contains(err.Error(), "unexpected reset") {
+					if p.logCallback != nil {
+						p.logCallback(LogLevelError, fmt.Sprintf("Tag event reader detected serious error: %v, exiting for reinit", err))
+					}
+					// Send a tag departed event to trigger recovery
+					select {
+					case p.tagEventChan <- TagEvent{Type: TagDeparture}:
+					default:
+					}
+					return
+				}
 				continue
 			}
 
