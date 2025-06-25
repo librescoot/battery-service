@@ -44,7 +44,7 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 		sm.logger(hal.LogLevelWarning, "Failed to send InsertedInScooter after 3 attempts, continuing anyway")
 	}
 
-	// For active battery (slot 0), use fast-path initialization for quicker activation
+	// For active battery (slot 0), use fast-path initialization for quicker activation  
 	if isActiveBattery {
 		sm.logger(hal.LogLevelInfo, "Fast initialization for active battery")
 		
@@ -61,9 +61,12 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 		sm.reader.data.State = BatteryStateIdle // Assume idle for fast path
 		sm.reader.Unlock()
 
-		// Send ready event immediately
-		sm.logger(hal.LogLevelDebug, "Fast-path: sending EventReadyToScoot immediately")
-		sm.SendEvent(EventReadyToScoot)
+		// Schedule ready event with small delay to ensure state machine is ready
+		go func() {
+			time.Sleep(50 * time.Millisecond) // Small delay to ensure state machine is processing
+			sm.logger(hal.LogLevelDebug, "Fast-path: sending EventReadyToScoot")
+			sm.SendEvent(EventReadyToScoot)
+		}()
 
 		// Background status read for accurate data
 		go func() {

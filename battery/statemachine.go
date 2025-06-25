@@ -352,7 +352,7 @@ func (sm *BatteryStateMachine) processEvent(event BatteryEvent) {
 
 	transition, exists := sm.transitions[key]
 	if !exists {
-		sm.logger(hal.LogLevelDebug, fmt.Sprintf("No transition for state %s on event %s", currentState, event))
+		sm.logger(hal.LogLevelDebug, fmt.Sprintf("Battery %d: No transition for state %s on event %s", sm.reader.index, currentState, event))
 		return
 	}
 

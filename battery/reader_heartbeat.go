@@ -31,6 +31,10 @@ func (r *BatteryReader) startHeartbeat() {
 				r.RUnlock()
 
 				if !present || !enabled {
+					// Debug logging to understand why Battery 0 might not be polling
+					if r.index == 0 {
+						r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery 0: Skipping poll - present=%v, enabled=%v", present, enabled))
+					}
 					continue
 				}
 
@@ -70,18 +74,26 @@ func (r *BatteryReader) startHeartbeat() {
 				shouldPoll := false
 				pollReason := ""
 				
+				timeSinceLastPoll := time.Since(lastStatusPoll)
+				
 				if isActive {
 					// Active battery (slot 0) - more frequent polling
-					if state == BatteryStateActive && time.Since(lastStatusPoll) >= timeActiveStatusPoll {
+					if state == BatteryStateActive && timeSinceLastPoll >= timeActiveStatusPoll {
 						shouldPoll = true
 						pollReason = "active battery status poll"
-					} else if state != BatteryStateActive && time.Since(lastStatusPoll) >= timeHeartbeatIntervalScooter*2 {
+					} else if state != BatteryStateActive && timeSinceLastPoll >= timeHeartbeatIntervalScooter*2 {
 						shouldPoll = true
 						pollReason = "active battery state monitoring"
 					}
+					
+					// Debug logging for Battery 0 to understand why polling isn't happening
+					if r.index == 0 && !shouldPoll {
+						r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery 0: No poll needed - state=%s, timeSinceLastPoll=%v, activeThreshold=%v, monitoringThreshold=%v", 
+							state, timeSinceLastPoll, timeActiveStatusPoll, timeHeartbeatIntervalScooter*2))
+					}
 				} else {
 					// Inactive battery (slot 1) - less frequent polling
-					if time.Since(lastStatusPoll) >= timeBattery1MaintPollInterval {
+					if timeSinceLastPoll >= timeBattery1MaintPollInterval {
 						shouldPoll = true
 						pollReason = "inactive battery maintenance poll"
 					}
@@ -91,6 +103,12 @@ func (r *BatteryReader) startHeartbeat() {
 				if present && time.Since(lastStatusPoll) >= timeHeartbeatIntervalScooter*6 {
 					shouldPoll = true
 					pollReason = "presence verification poll"
+				}
+
+				// Additional debug for Battery 0 to understand polling behavior
+				if r.index == 0 {
+					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery 0: Poll decision - shouldPoll=%v, reason='%s', isActive=%v, state=%s, timeSinceLastPoll=%v", 
+						shouldPoll, pollReason, isActive, state, timeSinceLastPoll))
 				}
 
 				if shouldPoll {
