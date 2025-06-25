@@ -189,6 +189,15 @@ func (sm *BatteryStateMachine) actionBatteryRemoved(machine *BatteryStateMachine
 }
 
 func (sm *BatteryStateMachine) actionSeatboxOpened(machine *BatteryStateMachine, event BatteryEvent) error {
+	// SAFETY: Cancel any ongoing operations when seatbox opens
+	sm.reader.Lock()
+	if sm.reader.operationCancel != nil {
+		sm.reader.operationCancel()
+		// Create new context for the command
+		sm.reader.operationCtx, sm.reader.operationCancel = context.WithCancel(sm.reader.service.ctx)
+	}
+	sm.reader.Unlock()
+
 	// Send UserOpenedSeatbox command
 	if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandUserOpenedSeatbox); err != nil {
 		return fmt.Errorf("failed to send UserOpenedSeatbox: %w", err)
@@ -305,9 +314,17 @@ func (sm *BatteryStateMachine) actionRequestActivation(machine *BatteryStateMach
 }
 
 func (sm *BatteryStateMachine) actionRequestDeactivation(machine *BatteryStateMachine, event BatteryEvent) error {
+	// SAFETY: Cancel any ongoing operations immediately when seatbox opens
 	sm.reader.Lock()
+	if sm.reader.operationCancel != nil {
+		sm.reader.operationCancel()
+		// Create new context for the OFF command
+		sm.reader.operationCtx, sm.reader.operationCancel = context.WithCancel(sm.reader.service.ctx)
+	}
 	state := sm.reader.data.State
 	sm.reader.Unlock()
+
+	sm.logger(hal.LogLevelWarning, "SAFETY: Seatbox opened - cancelling operations and sending OFF command")
 
 	if state == BatteryStateIdle || state == BatteryStateAsleep {
 		// Send event asynchronously to avoid deadlock
@@ -318,7 +335,7 @@ func (sm *BatteryStateMachine) actionRequestDeactivation(machine *BatteryStateMa
 		return nil
 	}
 
-	// Send OFF command immediately
+	// Send OFF command immediately (respecting 400ms hardware timing)
 	if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandOff); err != nil {
 		// Check if context was cancelled (tag departed)
 		if strings.Contains(err.Error(), "context cancel") || strings.Contains(err.Error(), "invalid state") {
