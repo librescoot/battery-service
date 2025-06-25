@@ -138,10 +138,10 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 
 		// Check for truncated response
 		if len(data) < 16 {
-			// If we get a truncated response, add a longer delay
+			// If we get a truncated response, use shorter retry delay
 			lastErr = fmt.Errorf("truncated response: got %d bytes, expected 16", len(data))
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Retry %d: %v", retry+1, lastErr))
-			time.Sleep(timeCmd) // Use standard delay
+			time.Sleep(timeCmd / 2) // Faster retry for truncated responses
 			continue
 		}
 
@@ -151,7 +151,7 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 			time.Sleep(50 * time.Millisecond) // Short stabilization delay
 		}
 
-		// OPTIMIZATION: Skip verification read to speed up polling
+		// OPTIMIZATION: Data validated by length check - consider successful
 		verified = true
 		successfulReads++
 		break

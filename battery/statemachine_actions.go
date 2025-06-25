@@ -44,30 +44,35 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 		sm.logger(hal.LogLevelWarning, "Failed to send InsertedInScooter after 3 attempts, continuing anyway")
 	}
 
-	// For active battery (slot 0), skip initial status read to speed up activation
+	// For active battery (slot 0), use fast-path initialization for quicker activation
 	if isActiveBattery {
-		sm.logger(hal.LogLevelInfo, "Fast initialization for active battery - assuming idle state")
+		sm.logger(hal.LogLevelInfo, "Fast initialization for active battery")
 		
-		// Set up battery data with assumed idle state
+		// Quick InsertedInScooter command without retries for speed
+		if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandInsertedInScooter); err != nil {
+			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Fast InsertedInScooter failed: %v, continuing", err))
+		}
+		
+		// Set up minimal battery data for fast transition
 		sm.reader.Lock()
 		sm.reader.readyToScoot = true
 		sm.reader.justInserted = true
 		sm.reader.data.Present = true
-		sm.reader.data.State = BatteryStateIdle // Assume idle state for fast activation
+		sm.reader.data.State = BatteryStateIdle // Assume idle for fast path
 		sm.reader.Unlock()
 
-		// Send the ready event immediately
-		sm.logger(hal.LogLevelDebug, "Sending EventReadyToScoot after fast initialization")
+		// Send ready event immediately
+		sm.logger(hal.LogLevelDebug, "Fast-path: sending EventReadyToScoot immediately")
 		sm.SendEvent(EventReadyToScoot)
 
-		// Start background status read after initialization completes
+		// Background status read for accurate data
 		go func() {
-			time.Sleep(500 * time.Millisecond) // Give state machine time to transition
-			sm.logger(hal.LogLevelDebug, "Performing background status read after fast initialization")
+			time.Sleep(200 * time.Millisecond) // Shorter delay for faster response
+			sm.logger(hal.LogLevelDebug, "Fast-path: performing background status read")
 			if err := sm.reader.readBatteryStatus(); err != nil {
-				sm.logger(hal.LogLevelWarning, fmt.Sprintf("Background status read failed: %v", err))
+				sm.logger(hal.LogLevelWarning, fmt.Sprintf("Fast-path background status read failed: %v", err))
 			} else {
-				sm.logger(hal.LogLevelInfo, "Background status read completed successfully")
+				sm.logger(hal.LogLevelDebug, "Fast-path background status read completed")
 			}
 		}()
 
