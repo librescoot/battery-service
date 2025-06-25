@@ -30,6 +30,7 @@ const (
 	EventHALRecovered
 	EventBatteryAlreadyActive
 	EventTagDeparted        // Tag departed during operation
+	EventTagArrived         // Tag detected by HAL
 )
 
 // String returns a string representation of the battery event
@@ -71,6 +72,8 @@ func (e BatteryEvent) String() string {
 		return "BatteryAlreadyActive"
 	case EventTagDeparted:
 		return "TagDeparted"
+	case EventTagArrived:
+		return "TagArrived"
 	default:
 		return "Unknown"
 	}
@@ -181,6 +184,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 	transitions := []StateTransition{
 		// From NotPresent - direct transitions to Initializing
 		{StateNotPresent, EventBatteryInserted, StateInitializing, sm.actionInitializeBattery},
+		{StateNotPresent, EventTagArrived, StateInitializing, sm.actionInitializeBattery},
 		{StateNotPresent, EventDisabled, StateDisabled, sm.actionDisable},
 
 		// From Initializing
