@@ -78,6 +78,7 @@ type PN7150 struct {
 	tagEventChan        chan TagEvent
 	tagEventReaderStop  chan struct{}
 	tagEventReaderRunning bool
+	detectionFailures   int // Track consecutive detection failures for departure detection
 }
 
 func NewPN7150(devName string, logCallback LogCallback, app interface{}, standbyEnabled, lpcdEnabled bool, debugMode bool) (*PN7150, error) {
@@ -1801,8 +1802,51 @@ func (p *PN7150) tagEventReader() {
 					}
 					return
 				}
+				
+				// Increment detection failures for robust departure detection
+				p.Lock()
+				p.detectionFailures++
+				failures := p.detectionFailures
+				p.Unlock()
+				
+				// If we have consecutive failures and previously had tags, treat as departure
+				if failures >= 3 && len(previousTags) > 0 {
+					if p.logCallback != nil {
+						p.logCallback(LogLevelWarning, fmt.Sprintf("Tag detection failed %d times, treating as departure", failures))
+					}
+					
+					// Generate departure event for each previously detected tag
+					for _, prevTag := range previousTags {
+						tagCopy := prevTag
+						event := TagEvent{
+							Type: TagDeparture,
+							Tag:  &tagCopy,
+						}
+						select {
+						case p.tagEventChan <- event:
+							if p.logCallback != nil {
+								p.logCallback(LogLevelInfo, fmt.Sprintf("Tag departed (detection failure): %X", prevTag.ID))
+							}
+						default:
+							if p.logCallback != nil {
+								p.logCallback(LogLevelWarning, "Tag event channel full, dropping departure event")
+							}
+						}
+					}
+					
+					// Clear previous tags and reset failure counter
+					previousTags = nil
+					p.Lock()
+					p.detectionFailures = 0
+					p.Unlock()
+				}
 				continue
 			}
+			
+			// Reset detection failures on successful detection
+			p.Lock()
+			p.detectionFailures = 0
+			p.Unlock()
 
 			// Check for tag arrivals
 			for _, currentTag := range currentTags {

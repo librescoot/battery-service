@@ -12,7 +12,7 @@ import (
 type BatteryEvent int
 
 const (
-	EventBatteryInserted BatteryEvent = iota
+	EventBatteryInserted BatteryEvent = iota // DEPRECATED - use EventTagArrived instead
 	EventBatteryRemoved
 	EventSeatboxOpened
 	EventSeatboxClosed
@@ -192,19 +192,14 @@ func NewBatteryStateMachine(reader *BatteryReader) *BatteryStateMachine {
 func (sm *BatteryStateMachine) setupTransitions() {
 	transitions := []StateTransition{
 		// From NotPresent
-		{StateNotPresent, EventBatteryInserted, StateInitializing, sm.actionInitializeBattery},
+		// {StateNotPresent, EventBatteryInserted, StateInitializing, sm.actionInitializeBattery}, // DEPRECATED - use EventTagArrived
 		{StateNotPresent, EventDisabled, StateDisabled, sm.actionDisable},
 		{StateNotPresent, EventTagArrived, StateInitializing, sm.actionInitializeBattery},
 
 		// From Discovering
 		{StateDiscovering, EventTagArrived, StateInitializing, sm.actionInitializeBattery},
-		{StateDiscovering, EventDiscoveryTimeout, StateWaitingForArrival, sm.actionStartWaitingForArrival},
+		{StateDiscovering, EventDiscoveryTimeout, StateNotPresent, sm.actionHandleDeparture},
 		{StateDiscovering, EventDisabled, StateDisabled, sm.actionDisable},
-
-		// From WaitingForArrival
-		{StateWaitingForArrival, EventTagArrived, StateInitializing, sm.actionInitializeBattery},
-		{StateWaitingForArrival, EventDiscoveryTimeout, StateNotPresent, sm.actionHandleDeparture},
-		{StateWaitingForArrival, EventDisabled, StateDisabled, sm.actionDisable},
 
 		// From Initializing
 		{StateInitializing, EventReadyToScoot, StateIdleReady, sm.actionBatteryReady},
@@ -271,11 +266,12 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateError, EventHeartbeatTick, StateError, sm.actionHeartbeatInError},
 		{StateError, EventDisabled, StateDisabled, sm.actionDisable},
 		{StateError, EventBatteryAlreadyActive, StateActive, sm.actionBatteryAlreadyActive},
+		{StateError, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
 
 		// From Disabled
 		{StateDisabled, EventEnabled, StateNotPresent, sm.actionEnable},
 		{StateDisabled, EventVehicleActive, StateNotPresent, sm.actionVehicleActiveWhileDisabled},
-		{StateDisabled, EventBatteryInserted, StateDisabled, sm.actionBatteryInsertedWhileDisabled},
+		{StateDisabled, EventTagArrived, StateDisabled, sm.actionBatteryInsertedWhileDisabled}, // Use EventTagArrived
 		{StateDisabled, EventBatteryRemoved, StateDisabled, sm.actionBatteryRemoved},
 
 		// From Maintenance

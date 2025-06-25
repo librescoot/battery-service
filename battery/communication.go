@@ -219,30 +219,6 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 		}
 	}
 
-	// If the target command is ON and the battery is currently Idle or Asleep,
-	// perform HAL recovery to ensure clean NFC session for activation
-	if cmd == BatteryCommandOn {
-		r.Lock()
-		currentState := r.data.State
-		r.Unlock()
-
-		if currentState == BatteryStateAsleep || currentState == BatteryStateIdle {
-			r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery is %s, target is ON. Performing HAL recovery for clean activation.", currentState))
-
-			// Use simple HAL recovery approach
-			err := r.simpleHALRecovery()
-
-			if err != nil {
-				r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed HAL recovery for %s battery: %v. Proceeding with command might fail.", currentState, err))
-				// Original code proceeded even if HAL recreation failed here, so we maintain that behavior.
-			} else {
-				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("HAL recovery successfully completed for %s battery.", currentState))
-			}
-
-			time.Sleep(timeCmd) // Brief pause after HAL recovery attempt
-			r.logCallback(hal.LogLevelInfo, "Proceeding with original ON command attempt.")
-		}
-	}
 
 	// Ensure minimum time between commands (this applies to the pre-sequence commands too due to recursive calls)
 	if time.Since(r.lastCmd) < timeCmd {

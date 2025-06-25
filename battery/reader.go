@@ -178,8 +178,7 @@ func (r *BatteryReader) handleTagPresent() {
 		r.Unlock()
 
 		r.logCallback(hal.LogLevelInfo, "Battery inserted")
-		// Send battery insertion event to state machine
-		r.stateMachine.SendEvent(EventBatteryInserted)
+		// No need to send event here - monitorTags already sent EventTagArrived
 		return
 	}
 
@@ -209,23 +208,12 @@ func (r *BatteryReader) handleTagAbsent() {
 		return
 	}
 
-	// Check if battery was previously present
+	// Only send the departure event if the battery was previously considered present.
+	// This prevents spamming the event queue.
 	if r.data.Present {
-		r.logCallback(hal.LogLevelInfo, "Tag departed - marking battery as absent immediately")
-		
-		// Mark battery as absent immediately to prevent getting stuck
-		r.data.Present = false
-		r.justInserted = false
-		r.readyToScoot = false
-		
-		// Update Redis immediately to reflect battery absence
-		go func() {
-			if err := r.updateRedisStatus(); err != nil {
-				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after tag departure: %v", err))
-			}
-		}()
-		
-		// Send tag departed event for state machine transitions
+		r.logCallback(hal.LogLevelInfo, "Tag departure detected, signaling state machine.")
+		// The ONLY responsibility of this function is to send the event.
+		// The state machine will handle the logic of confirming the departure and updating state.
 		r.stateMachine.SendEvent(EventTagDeparted)
 	}
 }
@@ -247,6 +235,14 @@ func (r *BatteryReader) readBatteryStatus() error {
 		r.nfcMutex.Unlock()
 
 		if halState != hal.StatePresent {
+			// If the HAL is in discovery, it's a definitive sign the tag is gone.
+			// Send the departure event and return an error that indicates this.
+			if halState == hal.StateDiscovering {
+				r.logCallback(hal.LogLevelInfo, "HAL is in Discovering state; treating as tag departure.")
+				r.stateMachine.SendEvent(EventTagDeparted)
+				return fmt.Errorf("tag departed, HAL is in discovering state")
+			}
+			
 			lastMainError = fmt.Errorf("attempt %d: invalid HAL state for reading: %s", attempt, halState)
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("%s. HAL state: %s", lastMainError.Error(), halState))
 			if attempt < maxAttemptsAfterHALRecreation {

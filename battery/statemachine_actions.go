@@ -11,6 +11,33 @@ import (
 
 // Action methods for state transitions
 
+// handleCmdError interprets a command error. If it's a departure-like error,
+// it sends the EventTagDeparted and returns true. Otherwise, it returns false.
+func (sm *BatteryStateMachine) handleCmdError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// This list checks for various I/O errors that all indicate the tag is no longer reachable.
+	if strings.Contains(errStr, "tag departed") ||
+		strings.Contains(errStr, "discovering state") ||
+		strings.Contains(errStr, "invalid state for writing") ||
+		strings.Contains(errStr, "invalid state for reading") ||
+		strings.Contains(errStr, "lost connection") ||
+		strings.Contains(errStr, "no such device or address") ||
+		strings.Contains(errStr, "No response after credit notification") ||
+		strings.Contains(errStr, "context cancel") {
+
+		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Command failed, assuming tag departure. Error: %v", err))
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			sm.SendEvent(EventTagDeparted)
+		}()
+		return true // Error was handled as a departure.
+	}
+	return false // Error is not a departure.
+}
+
 func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMachine, event BatteryEvent) error {
 	sm.logger(hal.LogLevelInfo, "Starting battery initialization sequence")
 
@@ -443,6 +470,19 @@ func (sm *BatteryStateMachine) actionHeartbeatInError(machine *BatteryStateMachi
 	// Read current battery status to check actual state
 	if err := sm.reader.readBatteryStatus(); err != nil {
 		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to read status in error recovery: %v", err))
+
+		// Check if the failure is because the tag has definitively departed.
+		if strings.Contains(err.Error(), "tag departed") || strings.Contains(err.Error(), "discovering state") {
+			sm.logger(hal.LogLevelInfo, "Recovery failed because tag is gone. Transitioning to NotPresent.")
+			// Send the final event to correctly mark the battery as removed.
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				sm.SendEvent(EventBatteryRemoved)
+			}()
+			// Return nil here because we have successfully handled the error by confirming departure.
+			return nil
+		}
+		
 		return err
 	}
 
@@ -496,7 +536,11 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 	// If seatbox is open, just send heartbeat
 	if seatboxOpen {
 		sm.logger(hal.LogLevelDebug, "Sending ScooterHeartbeat (Seatbox Open)")
-		return sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandScooterHeartbeat)
+		err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandScooterHeartbeat)
+		if sm.handleCmdError(err) {
+			return nil // Departure detected and handled, do not transition to Error state.
+		}
+		return err // Propagate other, unexpected errors.
 	}
 
 	// Seatbox is closed - send heartbeat and ensure battery stays on
@@ -504,20 +548,31 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 
 	// Send UserClosedSeatbox command
 	if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandUserClosedSeatbox); err != nil {
+		if sm.handleCmdError(err) {
+			return nil
+		}
 		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to send SEATBOX_CLOSED: %v", err))
+		// Don't return, as this is not critical. The main ON/Heartbeat is more important.
 	}
 	time.Sleep(timeCmd)
 
 	// Always ensure battery is ON
 	if currentState != BatteryStateActive {
 		sm.logger(hal.LogLevelInfo, "Battery not active, sending ON command")
-		if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandOn); err != nil {
-			return err
+		err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandOn)
+		if sm.handleCmdError(err) {
+			return nil
 		}
+		return err
 	} else {
 		// Battery is already active, just send heartbeat
 		sm.logger(hal.LogLevelDebug, "Battery already active, sending heartbeat")
-		if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandScooterHeartbeat); err != nil {
+		err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandScooterHeartbeat)
+		if sm.handleCmdError(err) {
+			return nil
+		}
+		if err != nil {
+			// Log the error but don't propagate it, as it's a non-critical heartbeat failure.
 			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to send heartbeat: %v", err))
 		}
 	}
@@ -817,12 +872,12 @@ func (sm *BatteryStateMachine) actionBatteryInsertedWhileDisabled(machine *Batte
 		sm.reader.enabled = true
 		sm.reader.Unlock()
 
-		// Schedule a battery insertion event to trigger initialization
+		// Schedule a tag arrival event to trigger initialization
 		go func() {
 			// Small delay to ensure state transition completes first
 			time.Sleep(10 * time.Millisecond)
-			sm.logger(hal.LogLevelDebug, "Sending EventBatteryInserted after enabling")
-			sm.SendEvent(EventBatteryInserted)
+			sm.logger(hal.LogLevelDebug, "Sending EventTagArrived after enabling")
+			sm.SendEvent(EventTagArrived)
 		}()
 
 		sm.logger(hal.LogLevelInfo, "Battery reader enabled")
@@ -849,21 +904,22 @@ func (sm *BatteryStateMachine) actionLowSOCWhileActive(machine *BatteryStateMach
 }
 
 func (sm *BatteryStateMachine) actionStartDiscovery(machine *BatteryStateMachine, event BatteryEvent) error {
-	sm.logger(hal.LogLevelInfo, "Tag departed - cancelling pending operations and starting discovery")
+	sm.logger(hal.LogLevelInfo, "Tag may have departed. Starting discovery confirmation timeout...")
 	
-	// Cancel any pending operations immediately since tag is gone
+	// Cancel any pending operations immediately since tag might be gone
 	sm.reader.Lock()
 	if sm.reader.operationCancel != nil {
-		sm.logger(hal.LogLevelDebug, "Cancelling pending operations due to tag departure")
+		sm.logger(hal.LogLevelDebug, "Cancelling pending operations due to potential tag departure")
 		sm.reader.operationCancel()
 	}
 	// Create new operation context for future operations
 	sm.reader.operationCtx, sm.reader.operationCancel = context.WithCancel(sm.reader.service.ctx)
 	sm.reader.Unlock()
 	
-	// Start a timer for discovery timeout (250ms initial discovery attempt)
+	// Start a single timer. If a tag arrives, the FSM will transition away from
+	// StateDiscovering. If not, this timeout will fire.
 	go func() {
-		time.Sleep(timeDeparture) // 250ms initial discovery attempt
+		time.Sleep(500 * time.Millisecond) // 500ms confirmation timeout matching C's BMS_TIME_DEPARTURE
 		sm.SendEvent(EventDiscoveryTimeout)
 	}()
 	
@@ -882,27 +938,21 @@ func (sm *BatteryStateMachine) actionStartWaitingForArrival(machine *BatteryStat
 }
 
 func (sm *BatteryStateMachine) actionHandleDeparture(machine *BatteryStateMachine, event BatteryEvent) error {
-	sm.logger(hal.LogLevelInfo, "Tag not found after timeout - handling departure")
+	sm.logger(hal.LogLevelInfo, "Discovery timed out. Confirming battery is not present.")
 	
 	sm.reader.Lock()
-	sm.reader.data.Present = false
-	sm.reader.justInserted = false
-	sm.reader.readyToScoot = false
-	sm.reader.Unlock()
-	
-	// Update Redis
-	if err := sm.reader.updateRedisStatus(); err != nil {
-		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after departure: %v", err))
-	}
-	
-	// Send battery removed command asynchronously to prevent blocking the state machine
-	go func() {
-		ctx := sm.reader.getOperationContext()
-		if err := sm.reader.sendCommand(ctx, BatteryCommandBatteryRemoved); err != nil {
-			// Log but don't block - battery is already gone
-			sm.logger(hal.LogLevelDebug, fmt.Sprintf("Failed to send BatteryRemoved command (expected for departed battery): %v", err))
+	// Only update if the state was previously present
+	if sm.reader.data.Present {
+		sm.reader.data.Present = false
+		sm.reader.justInserted = false
+		sm.reader.readyToScoot = false
+
+		// Update Redis with the definitive "not present" state
+		if err := sm.reader.updateRedisStatus(); err != nil {
+			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after confirmed departure: %v", err))
 		}
-	}()
+	}
+	sm.reader.Unlock()
 	
 	return nil
 }
