@@ -87,12 +87,26 @@ func (r *BatteryReader) startHeartbeat() {
 					}
 				}
 
+				// Presence verification for all batteries - verify presence periodically
+				if present && time.Since(lastStatusPoll) >= timeHeartbeatIntervalScooter*6 {
+					shouldPoll = true
+					pollReason = "presence verification poll"
+				}
+
 				if shouldPoll {
 					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery %d: %s", r.index, pollReason))
 					
 					// Consolidated status read for all polling needs
 					if err := r.readBatteryStatus(); err != nil {
 						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Battery %d: Error during %s: %v", r.index, pollReason, err))
+						
+						// If this was a presence verification and failed, battery might be gone
+						if pollReason == "presence verification poll" {
+							r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery %d: Presence verification failed - battery may have been removed", r.index))
+							// Trigger explicit tag departure handling
+							r.handleTagAbsent()
+							r.stateMachine.SendEvent(EventTagDeparted)
+						}
 					} else {
 						lastSuccessfulOperation = time.Now()
 						consecutiveFailures = 0

@@ -111,14 +111,24 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 
 	sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery initialization complete - state: %s", batteryState))
 
-	// Send the ready event
-	sm.logger(hal.LogLevelDebug, "Sending EventReadyToScoot after initialization")
-	sm.SendEvent(EventReadyToScoot)
+	// Send the ready event only for active battery (slot 0)
+	if sm.reader.role == BatteryRoleActive {
+		sm.logger(hal.LogLevelDebug, "Sending EventReadyToScoot after initialization")
+		sm.SendEvent(EventReadyToScoot)
+	} else {
+		sm.logger(hal.LogLevelInfo, "Battery 1 initialization complete - staying in Initializing state (inactive role)")
+		// For inactive battery, just update Redis but don't transition to ready state
+		if err := sm.reader.updateRedisStatus(); err != nil {
+			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis for inactive battery: %v", err))
+		}
+	}
 
 	return nil
 }
 
 func (sm *BatteryStateMachine) actionBatteryReady(machine *BatteryStateMachine, event BatteryEvent) error {
+	sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery %d ready for operation", sm.reader.index))
+	
 	sm.reader.Lock()
 	sm.reader.readyToScoot = true
 	sm.reader.justInserted = false
@@ -825,6 +835,17 @@ func (sm *BatteryStateMachine) actionHandleDeparture(machine *BatteryStateMachin
 	
 	// Send battery removed command (ignore errors since tag is gone)
 	sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandBatteryRemoved)
+	
+	return nil
+}
+
+func (sm *BatteryStateMachine) actionInactiveBatteryReady(machine *BatteryStateMachine, event BatteryEvent) error {
+	sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery %d (inactive role) ready for monitoring", sm.reader.index))
+	
+	// Update Redis with current state
+	if err := sm.reader.updateRedisStatus(); err != nil {
+		return fmt.Errorf("failed to update Redis: %w", err)
+	}
 	
 	return nil
 }

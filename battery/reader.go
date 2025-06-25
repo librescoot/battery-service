@@ -156,16 +156,20 @@ func (r *BatteryReader) monitorTags() {
 				}
 
 			case hal.TagDeparture:
-				r.logCallback(hal.LogLevelDebug, "Tag departed")
+				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery %d: Tag departed - processing battery removal", r.index))
 				// Cancel any ongoing operations immediately
 				r.Lock()
 				if r.operationCancel != nil {
+					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery %d: Cancelling pending operations due to tag departure", r.index))
 					r.operationCancel()
 					// Create new context for future operations
 					r.operationCtx, r.operationCancel = context.WithCancel(r.service.ctx)
 				}
 				r.Unlock()
 				r.handleTagAbsent() // Handles state change and Redis update
+				// Send explicit tag departed event to state machine
+				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery %d: Sending EventTagDeparted to state machine", r.index))
+				r.stateMachine.SendEvent(EventTagDeparted)
 			}
 
 		}
@@ -205,20 +209,27 @@ func (r *BatteryReader) handleTagPresent() {
 // handleTagAbsent handles an absent tag
 func (r *BatteryReader) handleTagAbsent() {
 	r.Lock()
-	defer r.Unlock()
-
+	wasPresent := r.data.Present
+	
 	// Don't process tag absence if HAL is intentionally powered down
 	if r.isPoweredDown {
+		r.Unlock()
 		r.logCallback(hal.LogLevelDebug, "Ignoring tag absence - HAL is powered down")
 		return
 	}
 
-	// Check if battery was previously present
-	if r.data.Present {
-		r.logCallback(hal.LogLevelInfo, "Tag departed - sending immediate departure event")
-		
-		// Send tag departed event immediately for reactive behavior
-		r.stateMachine.SendEvent(EventTagDeparted)
+	// Mark battery as not present immediately
+	if wasPresent {
+		r.data.Present = false
+		r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery %d removed - updating status", r.index))
+	}
+	r.Unlock()
+
+	// Update Redis immediately if battery was present
+	if wasPresent {
+		if err := r.updateRedisStatus(); err != nil {
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after removal: %v", err))
+		}
 	}
 }
 

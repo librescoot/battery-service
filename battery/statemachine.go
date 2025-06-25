@@ -194,6 +194,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateInitializing, EventHALError, StateError, sm.actionHALError},
 		{StateInitializing, EventDisabled, StateDisabled, sm.actionDisable},
 		{StateInitializing, EventVehicleActive, StateInitializing, nil}, // Stay in Initializing, wait for ReadyToScoot
+		{StateInitializing, EventSeatboxOpened, StateIdleStandby, sm.actionInactiveBatteryReady}, // For inactive batteries, transition to standby when seatbox opens
 
 		// From IdleStandby
 		{StateIdleStandby, EventSeatboxClosed, StateActiveRequested, sm.actionRequestActivation},
@@ -313,12 +314,12 @@ func (sm *BatteryStateMachine) SendEvent(event BatteryEvent) {
 	
 	select {
 	case sm.eventQueue <- event:
-		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Event %s queued (queue depth: %d)", event, len(sm.eventQueue)))
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery %d: Event %s queued (queue depth: %d, current state: %s)", sm.reader.index, event, len(sm.eventQueue), sm.currentState))
 	case <-sm.stopChan:
 		return
 	default:
 		// Event queue is full, log error and track metrics
-		sm.logger(hal.LogLevelError, fmt.Sprintf("Event queue full, dropping event: %s (queue size: %d)", event, len(sm.eventQueue)))
+		sm.logger(hal.LogLevelError, fmt.Sprintf("Battery %d: Event queue full, dropping event: %s (queue size: %d)", sm.reader.index, event, len(sm.eventQueue)))
 	}
 }
 
@@ -355,7 +356,7 @@ func (sm *BatteryStateMachine) processEvent(event BatteryEvent) {
 		return
 	}
 
-	sm.logger(hal.LogLevelInfo, fmt.Sprintf("State transition: %s + %s -> %s", currentState, event, transition.ToState))
+	sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery %d: State transition: %s + %s -> %s", sm.reader.index, currentState, event, transition.ToState))
 
 	var err error
 	if transition.Action != nil {
@@ -387,7 +388,7 @@ func (sm *BatteryStateMachine) processEvent(event BatteryEvent) {
 		// Successful transition
 		sm.currentState = transition.ToState
 		sm.lastStateChange = time.Now()
-		sm.logger(hal.LogLevelInfo, fmt.Sprintf("State changed to %s", transition.ToState))
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery %d: State changed to %s", sm.reader.index, transition.ToState))
 	}
 }
 
