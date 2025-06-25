@@ -30,8 +30,6 @@ const (
 	EventHALRecovered
 	EventBatteryAlreadyActive
 	EventTagDeparted        // Tag departed during operation
-	EventTagArrived         // Tag detected by discovery
-	EventDiscoveryTimeout   // Discovery timeout expired
 )
 
 // String returns a string representation of the battery event
@@ -73,10 +71,6 @@ func (e BatteryEvent) String() string {
 		return "BatteryAlreadyActive"
 	case EventTagDeparted:
 		return "TagDeparted"
-	case EventTagArrived:
-		return "TagArrived"
-	case EventDiscoveryTimeout:
-		return "DiscoveryTimeout"
 	default:
 		return "Unknown"
 	}
@@ -87,8 +81,6 @@ type BatteryMachineState int
 
 const (
 	StateNotPresent BatteryMachineState = iota
-	StateDiscovering         // Actively trying to discover tag
-	StateWaitingForArrival   // Waiting for tag to arrive with timeout
 	StateInitializing
 	StateIdleStandby
 	StateIdleReady
@@ -105,10 +97,6 @@ func (s BatteryMachineState) String() string {
 	switch s {
 	case StateNotPresent:
 		return "NotPresent"
-	case StateDiscovering:
-		return "Discovering"
-	case StateWaitingForArrival:
-		return "WaitingForArrival"
 	case StateInitializing:
 		return "Initializing"
 	case StateIdleStandby:
@@ -191,25 +179,14 @@ func NewBatteryStateMachine(reader *BatteryReader) *BatteryStateMachine {
 // setupTransitions defines all valid state transitions
 func (sm *BatteryStateMachine) setupTransitions() {
 	transitions := []StateTransition{
-		// From NotPresent
+		// From NotPresent - direct transitions to Initializing
 		{StateNotPresent, EventBatteryInserted, StateInitializing, sm.actionInitializeBattery},
 		{StateNotPresent, EventDisabled, StateDisabled, sm.actionDisable},
-		{StateNotPresent, EventTagArrived, StateInitializing, sm.actionInitializeBattery},
-
-		// From Discovering
-		{StateDiscovering, EventTagArrived, StateInitializing, sm.actionInitializeBattery},
-		{StateDiscovering, EventDiscoveryTimeout, StateWaitingForArrival, sm.actionStartWaitingForArrival},
-		{StateDiscovering, EventDisabled, StateDisabled, sm.actionDisable},
-
-		// From WaitingForArrival
-		{StateWaitingForArrival, EventTagArrived, StateInitializing, sm.actionInitializeBattery},
-		{StateWaitingForArrival, EventDiscoveryTimeout, StateNotPresent, sm.actionHandleDeparture},
-		{StateWaitingForArrival, EventDisabled, StateDisabled, sm.actionDisable},
 
 		// From Initializing
 		{StateInitializing, EventReadyToScoot, StateIdleReady, sm.actionBatteryReady},
 		{StateInitializing, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
-		{StateInitializing, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
+		{StateInitializing, EventTagDeparted, StateNotPresent, sm.actionHandleDeparture},
 		{StateInitializing, EventHALError, StateError, sm.actionHALError},
 		{StateInitializing, EventDisabled, StateDisabled, sm.actionDisable},
 		{StateInitializing, EventVehicleActive, StateInitializing, nil}, // Stay in Initializing, wait for ReadyToScoot
@@ -218,7 +195,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateIdleStandby, EventSeatboxClosed, StateActiveRequested, sm.actionRequestActivation},
 		{StateIdleStandby, EventVehicleActive, StateActiveRequested, sm.actionRequestActivation},
 		{StateIdleStandby, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
-		{StateIdleStandby, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
+		{StateIdleStandby, EventTagDeparted, StateNotPresent, sm.actionHandleDeparture},
 		{StateIdleStandby, EventLowSOC, StateIdleStandby, sm.actionLowSOC},
 		{StateIdleStandby, EventMaintenanceTick, StateMaintenance, sm.actionStartMaintenance},
 		{StateIdleStandby, EventHeartbeatTick, StateIdleStandby, sm.actionHeartbeat},
@@ -230,7 +207,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateIdleReady, EventSeatboxClosed, StateActiveRequested, sm.actionRequestActivation},
 		{StateIdleReady, EventVehicleActive, StateActiveRequested, sm.actionRequestActivation},
 		{StateIdleReady, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
-		{StateIdleReady, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
+		{StateIdleReady, EventTagDeparted, StateNotPresent, sm.actionHandleDeparture},
 		{StateIdleReady, EventLowSOC, StateIdleStandby, sm.actionLowSOC},
 		{StateIdleReady, EventHeartbeatTick, StateIdleReady, sm.actionHeartbeat},
 		{StateIdleReady, EventDisabled, StateDisabled, sm.actionDisable},
@@ -241,7 +218,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateActiveRequested, EventStateVerificationFailed, StateError, sm.actionActivationFailed},
 		{StateActiveRequested, EventCommandFailed, StateError, sm.actionCommandFailed},
 		{StateActiveRequested, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
-		{StateActiveRequested, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
+		{StateActiveRequested, EventTagDeparted, StateNotPresent, sm.actionHandleDeparture},
 		{StateActiveRequested, EventSeatboxOpened, StateDeactivating, sm.actionRequestDeactivation},
 		{StateActiveRequested, EventLowSOC, StateActiveRequested, sm.actionLowSOCWhileActive},
 		{StateActiveRequested, EventDisabled, StateDisabled, sm.actionDisable},
@@ -250,7 +227,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateActive, EventSeatboxOpened, StateDeactivating, sm.actionRequestDeactivation},
 		{StateActive, EventLowSOC, StateActive, sm.actionLowSOCWhileActive},
 		{StateActive, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
-		{StateActive, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
+		{StateActive, EventTagDeparted, StateNotPresent, sm.actionHandleDeparture},
 		{StateActive, EventHeartbeatTick, StateActive, sm.actionHeartbeat},
 		{StateActive, EventMaintenanceTick, StateActive, sm.actionActiveStatusPoll},
 		{StateActive, EventHALError, StateError, sm.actionHALError},
@@ -261,8 +238,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateDeactivating, EventStateVerificationFailed, StateError, sm.actionDeactivationFailed},
 		{StateDeactivating, EventCommandFailed, StateError, sm.actionCommandFailed},
 		{StateDeactivating, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
-		{StateDeactivating, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
-		{StateDeactivating, EventTagArrived, StateInitializing, sm.actionInitializeBattery}, // Handle tag re-arrival during deactivation
+		{StateDeactivating, EventTagDeparted, StateNotPresent, sm.actionHandleDeparture},
 		{StateDeactivating, EventDisabled, StateDisabled, sm.actionDisable},
 
 		// From Error
@@ -281,7 +257,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		// From Maintenance
 		{StateMaintenance, EventMaintenanceTick, StateIdleStandby, sm.actionMaintenanceComplete},
 		{StateMaintenance, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
-		{StateMaintenance, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
+		{StateMaintenance, EventTagDeparted, StateNotPresent, sm.actionHandleDeparture},
 		{StateMaintenance, EventHALError, StateError, sm.actionHALError},
 		{StateMaintenance, EventDisabled, StateDisabled, sm.actionDisable},
 		{StateMaintenance, EventBatteryAlreadyActive, StateMaintenance, nil}, // Queue for later processing

@@ -126,27 +126,38 @@ func (sm *BatteryStateMachine) actionBatteryReady(machine *BatteryStateMachine, 
 		return fmt.Errorf("failed to update Redis: %w", err)
 	}
 
-	// For active role battery, always activate regardless of conditions
+	// For active role battery (slot 0), activate based on conditions
 	if sm.reader.role == BatteryRoleActive {
-		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery %d (active role) initialization: triggering activation", sm.reader.index))
-		// Trigger activation immediately
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery %d (active role) initialization: checking activation conditions", sm.reader.index))
+		
+		// Check seatbox state and vehicle state for activation
+		sm.reader.service.Lock()
+		seatboxOpen := sm.reader.service.seatboxOpen
+		vehicleState := sm.reader.service.vehicleState
+		sm.reader.service.Unlock()
+		
 		if currentBatteryState == BatteryStateActive {
 			// Battery is already active, send event to align state machine
 			sm.SendEvent(EventBatteryAlreadyActive)
-		} else {
-			// Trigger activation
+		} else if !seatboxOpen && vehicleState == "active" {
+			// Trigger activation for closed seatbox + active vehicle
 			sm.SendEvent(EventVehicleActive)
+		} else if seatboxOpen {
+			// Seatbox is open, go to standby
+			sm.SendEvent(EventSeatboxOpened)
 		}
 	} else {
-		// Inactive battery - check seatbox state
+		// Inactive battery (slot 1) - check seatbox state but less aggressive activation
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery %d (inactive role): presence detected", sm.reader.index))
+		
 		sm.reader.service.Lock()
 		seatboxOpen := sm.reader.service.seatboxOpen
 		sm.reader.service.Unlock()
 		
 		if seatboxOpen {
-			// Send event immediately
 			sm.SendEvent(EventSeatboxOpened) // This will transition to IdleStandby
 		}
+		// For slot 1, don't automatically trigger activation even if seatbox is closed
 	}
 
 	return nil
@@ -784,8 +795,8 @@ func (sm *BatteryStateMachine) actionLowSOCWhileActive(machine *BatteryStateMach
 	return nil
 }
 
-func (sm *BatteryStateMachine) actionStartDiscovery(machine *BatteryStateMachine, event BatteryEvent) error {
-	sm.logger(hal.LogLevelInfo, "Tag departed - cancelling pending operations and starting discovery")
+func (sm *BatteryStateMachine) actionHandleDeparture(machine *BatteryStateMachine, event BatteryEvent) error {
+	sm.logger(hal.LogLevelInfo, "Tag departed - handling battery removal")
 	
 	// Cancel any pending operations immediately since tag is gone
 	sm.reader.Lock()
@@ -795,32 +806,8 @@ func (sm *BatteryStateMachine) actionStartDiscovery(machine *BatteryStateMachine
 	}
 	// Create new operation context for future operations
 	sm.reader.operationCtx, sm.reader.operationCancel = context.WithCancel(sm.reader.service.ctx)
-	sm.reader.Unlock()
 	
-	// Start a timer for discovery timeout (250ms initial discovery attempt)
-	go func() {
-		time.Sleep(timeDeparture) // 250ms initial discovery attempt
-		sm.SendEvent(EventDiscoveryTimeout)
-	}()
-	
-	return nil
-}
-
-func (sm *BatteryStateMachine) actionStartWaitingForArrival(machine *BatteryStateMachine, event BatteryEvent) error {
-	sm.logger(hal.LogLevelDebug, "Discovery timed out - waiting for arrival")
-	
-	go func() {
-		time.Sleep(timeDeparture) // Another 250ms wait
-		sm.SendEvent(EventDiscoveryTimeout)
-	}()
-	
-	return nil
-}
-
-func (sm *BatteryStateMachine) actionHandleDeparture(machine *BatteryStateMachine, event BatteryEvent) error {
-	sm.logger(hal.LogLevelInfo, "Tag not found after timeout - handling departure")
-	
-	sm.reader.Lock()
+	// Update battery data to reflect absence
 	sm.reader.data.Present = false
 	sm.reader.justInserted = false
 	sm.reader.readyToScoot = false
@@ -831,7 +818,7 @@ func (sm *BatteryStateMachine) actionHandleDeparture(machine *BatteryStateMachin
 		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after departure: %v", err))
 	}
 	
-	// Send battery removed command
+	// Send battery removed command (ignore errors since tag is gone)
 	sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandBatteryRemoved)
 	
 	return nil
