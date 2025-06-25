@@ -38,7 +38,6 @@ func (r *BatteryReader) startHeartbeat() {
 				}
 				lastSuccessfulOperation = time.Now()
 				consecutiveFailures = 0
-				r.logCallback(hal.LogLevelDebug, "Success signal received, heartbeat timer reset")
 				
 			case <-ticker.C:
 				r.Lock()
