@@ -17,9 +17,9 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 	var successfulReads int
 
 	// Check if the reader is temporarily powered down
-	r.Lock()
+	r.RLock()
 	isPoweredDown := r.isPoweredDown
-	r.Unlock()
+	r.RUnlock()
 
 	// If powered down, power up the HAL first
 	if isPoweredDown {
@@ -36,7 +36,9 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 	}
 
 	// Reset communication error flag at the start of the attempt sequence
+	r.Lock()
 	r.data.Faults.CommunicationError = false
+	r.Unlock()
 
 	for retry := 0; retry < maxReadRetries; retry++ {
 		// Check overall context cancellation at the start of each retry
@@ -48,9 +50,9 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 		}
 
 		// First read attempt
-		r.nfcMutex.Lock()
+		r.Lock()
 		data, lastErr = r.hal.ReadBinary(addr)
-		r.nfcMutex.Unlock()
+		r.Unlock()
 
 		// Immediately check for context cancellation after HAL operation
 		select {
@@ -185,11 +187,15 @@ endReadRetryLoop: // Label to jump to for final error handling
 	}
 
 	// Clear communication error flag on success
+	r.Lock()
 	if r.data.Faults.CommunicationError {
 		r.data.Faults.CommunicationError = false
+		r.Unlock()
 		if updateErr := r.updateRedisStatus(); updateErr != nil {
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after clearing read communication error: %v", updateErr))
 		}
+	} else {
+		r.Unlock()
 	}
 
 	return data, nil
@@ -198,9 +204,9 @@ endReadRetryLoop: // Label to jump to for final error handling
 // sendCommand sends a command to the battery with retries
 func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) error {
 	// Check if the reader is temporarily powered down
-	r.Lock()
+	r.RLock()
 	isPoweredDown := r.isPoweredDown
-	r.Unlock()
+	r.RUnlock()
 
 	// If powered down, power up the HAL first (unless we're being called directly from the polling code)
 	if isPoweredDown {
@@ -242,8 +248,14 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 	}
 
 	// Ensure minimum time between commands (this applies to the pre-sequence commands too due to recursive calls)
-	if time.Since(r.lastCmd) < timeCmd {
-		sleepCtx, cancelSleep := context.WithTimeout(ctx, timeCmd-time.Since(r.lastCmd))
+	r.RLock()
+	lastCmdTime := r.lastCmd
+	r.RUnlock()
+	
+	timeSinceLastCmd := time.Since(lastCmdTime)
+	if timeSinceLastCmd < timeCmd {
+		sleepDuration := timeCmd - timeSinceLastCmd
+		sleepCtx, cancelSleep := context.WithTimeout(ctx, sleepDuration)
 		select {
 		case <-sleepCtx.Done():
 			cancelSleep()
@@ -251,7 +263,7 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 				return fmt.Errorf("context cancelled during command delay: %w", sleepCtx.Err())
 			}
 			// If timeout expired, just continue, minimum time passed
-		case <-time.After(timeCmd - time.Since(r.lastCmd)):
+		case <-time.After(sleepDuration):
 			// Normal sleep completion
 		}
 		cancelSleep()
@@ -266,7 +278,9 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 	var lastErr error
 
 	// Reset communication error flag at the start of the attempt sequence
+	r.Lock()
 	r.data.Faults.CommunicationError = false
+	r.Unlock()
 
 	for retry := 0; retry < maxWriteRetries; retry++ {
 		// Check overall context cancellation
@@ -293,9 +307,9 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 
 		// Create context with timeout for HAL write call
 		halWriteCtx, cancelWrite := context.WithTimeout(ctx, timeHALTimeout)
-		r.nfcMutex.Lock()
+		r.Lock()
 		lastErr = r.hal.WriteBinary(addrCommand, data) // Pass halWriteCtx if HAL supports it
-		r.nfcMutex.Unlock()
+		r.Unlock()
 		cancelWrite()
 
 		// Immediately check for context cancellation after HAL operation
@@ -308,14 +322,21 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 
 		if lastErr == nil {
 			// WriteBinary succeeded - ACK was received by the HAL layer
-			r.lastCmd = time.Now()
+			now := time.Now()
+			r.Lock()
+			r.lastCmd = now
+			r.Unlock()
 			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Sent command: %v", cmd))
 			// Clear communication error on success
+			r.Lock()
 			if r.data.Faults.CommunicationError {
 				r.data.Faults.CommunicationError = false
+				r.Unlock()
 				if updateErr := r.updateRedisStatus(); updateErr != nil {
 					r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after clearing write communication error: %v", updateErr))
 				}
+			} else {
+				r.Unlock()
 			}
 			return nil // Command succeeded
 		} else { // lastErr != nil

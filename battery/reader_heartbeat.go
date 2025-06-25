@@ -7,14 +7,13 @@ import (
 	"battery-service/nfc/hal"
 )
 
-// startHeartbeat starts the heartbeat goroutine that sends periodic events to the state machine
+// startHeartbeat starts the unified smart polling goroutine
 func (r *BatteryReader) startHeartbeat() {
 	go func() {
 		ticker := time.NewTicker(timeHeartbeatIntervalScooter)
 		defer ticker.Stop()
 		
-		var lastActiveStatusPoll time.Time
-		var lastMaintenancePoll time.Time
+		var lastStatusPoll time.Time
 		var lastSuccessfulOperation time.Time = time.Now()
 		var consecutiveFailures int
 
@@ -23,87 +22,90 @@ func (r *BatteryReader) startHeartbeat() {
 			case <-r.stopChan:
 				return
 			case <-ticker.C:
-				r.Lock()
+				// Smart polling - adaptive based on battery state and role
+				r.RLock()
 				present := r.data.Present
 				state := r.data.State
-				r.Unlock()
+				isActive := r.role == BatteryRoleActive
+				enabled := r.enabled
+				r.RUnlock()
 
-				if !present {
+				if !present || !enabled {
 					continue
 				}
 
-				// Send heartbeat event to state machine
-				r.stateMachine.SendEvent(EventHeartbeatTick)
-				
-				// Monitor queue depth every heartbeat
+				// Monitor queue depth every cycle
 				queueDepth := r.stateMachine.GetEventQueueDepth()
 				if queueDepth > 20 {
 					r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Event queue depth high: %d", queueDepth))
 				}
 
-				// Check for stuck reader - if we haven't had successful operations for too long
+				// Check for stuck reader
 				if time.Since(lastSuccessfulOperation) > 30*time.Second {
 					consecutiveFailures++
 					if consecutiveFailures >= 3 {
 						r.logCallback(hal.LogLevelError, fmt.Sprintf("Reader appears stuck - no successful operations for %v, triggering full recovery", time.Since(lastSuccessfulOperation)))
-						// Increment HAL reinit counter
 						r.Lock()
 						r.halReinitCount++
 						reinitCount := r.halReinitCount
 						r.Unlock()
 						r.logCallback(hal.LogLevelInfo, fmt.Sprintf("HAL reinit count: %d", reinitCount))
 						
-						// Trigger full HAL recovery
-						r.nfcMutex.Lock()
+						r.Lock()
 						if err := r.hal.FullReinitialize(); err != nil {
 							r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to recover stuck reader: %v", err))
-							r.nfcMutex.Unlock()
-							// Trigger HAL error event for state machine to handle
+							r.Unlock()
 							r.stateMachine.SendEvent(EventHALError)
 							consecutiveFailures = 0
-							lastSuccessfulOperation = time.Now() // Reset to avoid immediate re-trigger
+							lastSuccessfulOperation = time.Now()
 							continue
 						}
-						r.nfcMutex.Unlock()
+						r.Unlock()
 						consecutiveFailures = 0
-						lastSuccessfulOperation = time.Now() // Reset to avoid immediate re-trigger
+						lastSuccessfulOperation = time.Now()
 					}
 				}
 
-				// Check if we need to do periodic status polling
-				if r.IsActive() && state == BatteryStateActive && 
-					time.Since(lastActiveStatusPoll) >= timeActiveStatusPoll {
-					r.logCallback(hal.LogLevelDebug, "Time for active status poll")
-					r.stateMachine.SendEvent(EventMaintenanceTick)
-					lastActiveStatusPoll = time.Now()
+				// Adaptive polling based on state and role
+				shouldPoll := false
+				pollReason := ""
+				
+				if isActive {
+					// Active battery (slot 0) - more frequent polling
+					if state == BatteryStateActive && time.Since(lastStatusPoll) >= timeActiveStatusPoll {
+						shouldPoll = true
+						pollReason = "active battery status poll"
+					} else if state != BatteryStateActive && time.Since(lastStatusPoll) >= timeHeartbeatIntervalScooter*2 {
+						shouldPoll = true
+						pollReason = "active battery state monitoring"
+					}
+				} else {
+					// Inactive battery (slot 1) - less frequent polling
+					if time.Since(lastStatusPoll) >= timeBattery1MaintPollInterval {
+						shouldPoll = true
+						pollReason = "inactive battery maintenance poll"
+					}
 				}
 
-
-				// Inactive battery maintenance polling
-				if r.IsInactive() && time.Since(lastMaintenancePoll) >= timeBattery1MaintPollInterval {
-					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Inactive battery %d: Time for maintenance poll", r.index))
+				if shouldPoll {
+					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery %d: %s", r.index, pollReason))
 					
-					// Just read status
+					// Consolidated status read for all polling needs
 					if err := r.readBatteryStatus(); err != nil {
-						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Inactive battery %d: Error during maintenance poll: %v", r.index, err))
+						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Battery %d: Error during %s: %v", r.index, pollReason, err))
 					} else {
 						lastSuccessfulOperation = time.Now()
 						consecutiveFailures = 0
+						
+						// For active battery, ensure heartbeat commands are sent
+						if isActive && r.index == 0 {
+							r.stateMachine.SendEvent(EventHeartbeatTick)
+						}
 					}
-					
-					lastMaintenancePoll = time.Now()
-				}
-
-				// General active battery polling every timeActiveStatusPoll seconds
-				if r.IsActive() && time.Since(lastActiveStatusPoll) >= timeActiveStatusPoll {
-					// Skip if already handled above
-					if state != BatteryStateActive {
-						// For non-active states, send maintenance tick to state machine
-						// The state machine will decide what to do based on current state
-						r.logCallback(hal.LogLevelDebug, "Time for maintenance poll (non-active state)")
-						r.stateMachine.SendEvent(EventMaintenanceTick)
-					}
-					lastActiveStatusPoll = time.Now()
+					lastStatusPoll = time.Now()
+				} else if isActive && r.index == 0 {
+					// Send heartbeat event even without polling for active battery
+					r.stateMachine.SendEvent(EventHeartbeatTick)
 				}
 			}
 		}

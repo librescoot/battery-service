@@ -57,11 +57,8 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 		sm.reader.Unlock()
 
 		// Send the ready event immediately
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			sm.logger(hal.LogLevelDebug, "Sending EventReadyToScoot after fast initialization")
-			sm.SendEvent(EventReadyToScoot)
-		}()
+		sm.logger(hal.LogLevelDebug, "Sending EventReadyToScoot after fast initialization")
+		sm.SendEvent(EventReadyToScoot)
 
 		// Start background status read after initialization completes
 		go func() {
@@ -109,12 +106,9 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 
 	sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery initialization complete - state: %s", batteryState))
 
-	// Send the ready event asynchronously to avoid deadlock
-	go func() {
-		time.Sleep(10 * time.Millisecond) // Small delay to ensure action completes
-		sm.logger(hal.LogLevelDebug, "Sending EventReadyToScoot after initialization")
-		sm.SendEvent(EventReadyToScoot)
-	}()
+	// Send the ready event
+	sm.logger(hal.LogLevelDebug, "Sending EventReadyToScoot after initialization")
+	sm.SendEvent(EventReadyToScoot)
 
 	return nil
 }
@@ -135,17 +129,14 @@ func (sm *BatteryStateMachine) actionBatteryReady(machine *BatteryStateMachine, 
 	// For active role battery, always activate regardless of conditions
 	if sm.reader.role == BatteryRoleActive {
 		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery %d (active role) initialization: triggering activation", sm.reader.index))
-		// Schedule activation
-		go func() {
-			time.Sleep(timeCmd) // Use standard command delay
-			if currentBatteryState == BatteryStateActive {
-				// Battery is already active, send event to align state machine
-				sm.SendEvent(EventBatteryAlreadyActive)
-			} else {
-				// Trigger activation
-				sm.SendEvent(EventVehicleActive)
-			}
-		}()
+		// Trigger activation immediately
+		if currentBatteryState == BatteryStateActive {
+			// Battery is already active, send event to align state machine
+			sm.SendEvent(EventBatteryAlreadyActive)
+		} else {
+			// Trigger activation
+			sm.SendEvent(EventVehicleActive)
+		}
 	} else {
 		// Inactive battery - check seatbox state
 		sm.reader.service.Lock()
@@ -153,11 +144,8 @@ func (sm *BatteryStateMachine) actionBatteryReady(machine *BatteryStateMachine, 
 		sm.reader.service.Unlock()
 		
 		if seatboxOpen {
-			// Send event asynchronously
-			go func() {
-				time.Sleep(10 * time.Millisecond)
-				sm.SendEvent(EventSeatboxOpened) // This will transition to IdleStandby
-			}()
+			// Send event immediately
+			sm.SendEvent(EventSeatboxOpened) // This will transition to IdleStandby
 		}
 	}
 
@@ -222,11 +210,8 @@ func (sm *BatteryStateMachine) actionRequestActivation(machine *BatteryStateMach
 	}
 
 	if state == BatteryStateActive {
-		// Send event asynchronously to avoid deadlock
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			sm.SendEvent(EventStateVerified)
-		}()
+		// Send event immediately
+		sm.SendEvent(EventStateVerified)
 		return nil
 	}
 
@@ -240,11 +225,8 @@ func (sm *BatteryStateMachine) actionRequestActivation(machine *BatteryStateMach
 	// Send ON command immediately
 	if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandOn); err != nil {
 		sm.logger(hal.LogLevelError, fmt.Sprintf("Failed to send ON command: %v", err))
-		// Schedule failure event
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			sm.SendEvent(EventCommandFailed)
-		}()
+		// Send failure event immediately
+		sm.SendEvent(EventCommandFailed)
 		return fmt.Errorf("failed to send ON command: %w", err)
 	}
 
@@ -307,11 +289,8 @@ func (sm *BatteryStateMachine) actionRequestDeactivation(machine *BatteryStateMa
 	sm.reader.Unlock()
 
 	if state == BatteryStateIdle || state == BatteryStateAsleep {
-		// Send event asynchronously to avoid deadlock
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			sm.SendEvent(EventStateVerified)
-		}()
+		// Send event immediately
+		sm.SendEvent(EventStateVerified)
 		return nil
 	}
 
@@ -323,11 +302,8 @@ func (sm *BatteryStateMachine) actionRequestDeactivation(machine *BatteryStateMa
 			// Don't send failure event - let tag departure handling take over
 			return nil
 		}
-		// Schedule failure event for other errors
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			sm.SendEvent(EventCommandFailed)
-		}()
+		// Send failure event for other errors
+		sm.SendEvent(EventCommandFailed)
 		return fmt.Errorf("failed to send OFF command: %w", err)
 	}
 
@@ -413,10 +389,7 @@ func (sm *BatteryStateMachine) actionHeartbeatInError(machine *BatteryStateMachi
 		sm.reader.Unlock()
 		
 		// Send battery removed event to handle departure
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			sm.SendEvent(EventBatteryRemoved)
-		}()
+		sm.SendEvent(EventBatteryRemoved)
 		return nil
 	}
 
@@ -435,18 +408,12 @@ func (sm *BatteryStateMachine) actionHeartbeatInError(machine *BatteryStateMachi
 	if present && (batteryState == BatteryStateIdle || batteryState == BatteryStateAsleep) {
 		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery recovered to %s state, transitioning out of error", batteryState))
 		// Send recovery event
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			sm.SendEvent(EventHALRecovered)
-		}()
+		sm.SendEvent(EventHALRecovered)
 	} else if present && batteryState == BatteryStateActive {
 		sm.logger(hal.LogLevelInfo, "Battery is active, need to align state machine")
 		// Battery is active but state machine is in error state
 		// Send event to transition directly to Active
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			sm.SendEvent(EventBatteryAlreadyActive) // This will transition directly to Active
-		}()
+		sm.SendEvent(EventBatteryAlreadyActive) // This will transition directly to Active
 	}
 
 	return nil
@@ -554,11 +521,8 @@ func (sm *BatteryStateMachine) actionMaintenanceComplete(machine *BatteryStateMa
 	// If battery is active after maintenance, we need to transition to Active state
 	if batteryState == BatteryStateActive {
 		sm.logger(hal.LogLevelInfo, "Battery is active after maintenance, syncing state machine")
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			// The maintenance will transition to IdleStandby, then we send the event
-			sm.SendEvent(EventBatteryAlreadyActive)
-		}()
+		// The maintenance will transition to IdleStandby, then we send the event
+		sm.SendEvent(EventBatteryAlreadyActive)
 	}
 	
 	return nil
@@ -753,12 +717,8 @@ func (sm *BatteryStateMachine) actionVehicleActiveWhileDisabled(machine *Battery
 		sm.reader.Unlock()
 
 		// Send EventEnabled to trigger proper initialization and activation sequence
-		go func() {
-			// Small delay to ensure state transition completes first
-			time.Sleep(10 * time.Millisecond)
-			sm.logger(hal.LogLevelDebug, "Sending EventEnabled after vehicle active")
-			sm.SendEvent(EventEnabled)
-		}()
+		sm.logger(hal.LogLevelDebug, "Sending EventEnabled after vehicle active")
+		sm.SendEvent(EventEnabled)
 
 		sm.logger(hal.LogLevelInfo, "Battery reader enabled")
 		return nil // Transition to StateNotPresent
@@ -798,12 +758,8 @@ func (sm *BatteryStateMachine) actionBatteryInsertedWhileDisabled(machine *Batte
 		sm.reader.Unlock()
 
 		// Schedule a battery insertion event to trigger initialization
-		go func() {
-			// Small delay to ensure state transition completes first
-			time.Sleep(10 * time.Millisecond)
-			sm.logger(hal.LogLevelDebug, "Sending EventBatteryInserted after enabling")
-			sm.SendEvent(EventBatteryInserted)
-		}()
+		sm.logger(hal.LogLevelDebug, "Sending EventBatteryInserted after enabling")
+		sm.SendEvent(EventBatteryInserted)
 
 		sm.logger(hal.LogLevelInfo, "Battery reader enabled")
 		return nil // Transition to StateNotPresent

@@ -17,7 +17,7 @@ var errHALRecreatedRetryRead = fmt.Errorf("HAL was recreated, retry read operati
 
 // BatteryReader represents a single battery reader instance
 type BatteryReader struct {
-	sync.Mutex
+	sync.RWMutex                     // Single mutex for all reader state
 	index                            int
 	role                             BatteryRole          // Role of this battery (active or inactive)
 	hal                              hal.HAL
@@ -30,10 +30,7 @@ type BatteryReader struct {
 	justInserted                     bool
 	readyToScoot                     bool                 // Flag indicating battery responded with ReadyToScoot
 	stopChan                         chan struct{}        // Channel to signal goroutine shutdown
-	nfcMutex                         sync.Mutex           // Serializes access to NFC HAL operations
 	lastPublishedData                BatteryData          // Stores the state as of the last successful Redis update with PUBLISH
-	lastBattery1MaintPollTime        time.Time            // Tracks last maintenance poll for battery 1
-	lastIdleAsleepPollTime           time.Time            // Tracks last poll time for battery 0 when idle/asleep in stand-by
 	lastReinitialization             time.Time            // Track when HAL was last reinitialized
 	isPoweredDown                    bool                 // Indicates reader is temporarily powered down during low-frequency polling
 	stateMachine                     *BatteryStateMachine // State machine for managing battery transitions
@@ -48,8 +45,8 @@ type BatteryReader struct {
 
 // getOperationContext returns the operation context if available, otherwise the service context
 func (r *BatteryReader) getOperationContext() context.Context {
-	r.Lock()
-	defer r.Unlock()
+	r.RLock()
+	defer r.RUnlock()
 	if r.operationCtx != nil {
 		return r.operationCtx
 	}

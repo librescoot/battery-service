@@ -235,10 +235,9 @@ func (r *BatteryReader) readBatteryStatus() error {
 		}
 
 		// Ensure we're in the correct state for reading at the start of each attempt
-		// Lock is needed here to safely access r.hal
-		r.nfcMutex.Lock()
+		r.RLock()
 		halState := r.hal.GetState()
-		r.nfcMutex.Unlock()
+		r.RUnlock()
 
 		if halState != hal.StatePresent {
 			lastMainError = fmt.Errorf("attempt %d: invalid HAL state for reading: %s", attempt, halState)
@@ -258,29 +257,26 @@ func (r *BatteryReader) readBatteryStatus() error {
 		var data []byte
 		var err error
 
-		// Read Status0
-		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Attempt %d: Reading Status0...", attempt))
+		// Batch read all status registers with minimal delays
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Attempt %d: Reading all status registers...", attempt))
 		
-		// Use operation context so reads can be cancelled when tag departs
+		// Read Status0
 		data, err = r.readRegisterWithRetry(r.getOperationContext(), addrStatus0)
 		if err != nil {
 			lastMainError = fmt.Errorf("attempt %d: failed to read Status0: %w", attempt, err)
-			
-			// Don't retry HAL recovery for context cancelled errors (tag departed)
 			if strings.Contains(err.Error(), "context cancel") {
 				r.logCallback(hal.LogLevelDebug, "Status0 read cancelled due to tag departure, not retrying")
 				return lastMainError
 			}
-			
 			if errors.Is(err, errHALRecreatedRetryRead) && attempt < maxAttemptsAfterHALRecreation {
 				r.logCallback(hal.LogLevelWarning, "HAL recreated during Status0 read, retrying entire status read.")
-				continue // Retry the entire readBatteryStatus sequence
+				continue
 			}
-			return lastMainError // Permanent error or max attempts for HAL recreation reached
+			return lastMainError
 		}
 
-		// Process Status0 data
-		r.data.Present = true // If Status0 read is successful, tag is present
+		// Process Status0 data immediately
+		r.data.Present = true
 		r.data.Voltage = uint16(data[1])<<8 | uint16(data[0])
 		r.data.Current = int16(uint16(data[3])<<8 | uint16(data[2]))
 		r.data.FWVersion = fmt.Sprintf("%d.%d", data[4], data[5])
@@ -297,8 +293,6 @@ func (r *BatteryReader) readBatteryStatus() error {
 
 		// Initialize faults struct
 		r.data.Faults = BatteryFaults{}
-
-		// Parse fault code bitmask
 		faultCode := r.data.FaultCode
 		r.data.Faults.ChargeTempOverHigh = (faultCode>>0)&1 != 0
 		r.data.Faults.ChargeTempOverLow = (faultCode>>1)&1 != 0
@@ -315,94 +309,47 @@ func (r *BatteryReader) readBatteryStatus() error {
 		r.data.Faults.DischargeOverCurrent = (faultCode>>12)&1 != 0
 		r.data.Faults.ShortCircuit = (faultCode>>13)&1 != 0
 
-		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Status0 decoded: voltage=%dmV current=%dmA fw_version=%s remaining_cap=%dmAh full_cap=%dmAh charge=%d%% fault=0x%04x temp1=%d°C temp2=%d°C soh=%d%% low_soc=%v",
-			r.data.Voltage, r.data.Current, r.data.FWVersion, r.data.RemainingCapacity, r.data.FullCapacity, r.data.Charge, r.data.FaultCode,
-			r.data.Temperature[0], r.data.Temperature[1], r.data.StateOfHealth, r.data.LowSOC))
-
+		// Minimal delay before next read
 		time.Sleep(timeCmd)
-		// Check HAL state again (must lock to access r.hal)
-		r.nfcMutex.Lock()
-		halState = r.hal.GetState()
-		r.nfcMutex.Unlock()
-		if halState != hal.StatePresent {
-			lastMainError = fmt.Errorf("attempt %d: lost connection after reading Status0, HAL state: %s", attempt, halState)
-			r.logCallback(hal.LogLevelWarning, lastMainError.Error())
-			if attempt < maxAttemptsAfterHALRecreation {
-				r.logCallback(hal.LogLevelWarning, "Attempting HAL recovery.")
-
-				if err := r.simpleHALRecovery(); err != nil {
-					return fmt.Errorf("%w; and HAL recovery failed: %v", lastMainError, err)
-				}
-
-				continue // Retry readBatteryStatus full sequence
-			}
-			return lastMainError
-		}
 
 		// Read Status1
-		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Attempt %d: Reading Status1...", attempt))
 		data, err = r.readRegisterWithRetry(r.getOperationContext(), addrStatus1)
 		if err != nil {
 			lastMainError = fmt.Errorf("attempt %d: failed to read Status1: %w", attempt, err)
-			
-			// Don't retry HAL recovery for context cancelled errors (tag departed)
 			if strings.Contains(err.Error(), "context cancel") {
 				r.logCallback(hal.LogLevelDebug, "Status1 read cancelled due to tag departure, not retrying")
 				return lastMainError
 			}
-			
 			if errors.Is(err, errHALRecreatedRetryRead) && attempt < maxAttemptsAfterHALRecreation {
 				r.logCallback(hal.LogLevelWarning, "HAL recreated during Status1 read, retrying entire status read.")
-				continue // Retry the entire readBatteryStatus sequence
+				continue
 			}
 			return lastMainError
 		}
-		// Process Status1 data
+
+		// Process Status1 data immediately
 		r.data.State = BatteryState(uint32(data[3])<<24 | uint32(data[2])<<16 | uint32(data[1])<<8 | uint32(data[0]))
 		copy(r.data.SerialNumber[0:12], data[4:16])
 
-		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Status1 decoded: state=%s serial_number_part1=%s",
-			r.data.State, string(r.data.SerialNumber[0:12])))
-
+		// Minimal delay before next read
 		time.Sleep(timeCmd)
-		// Check HAL state again
-		r.nfcMutex.Lock()
-		halState = r.hal.GetState()
-		r.nfcMutex.Unlock()
-		if halState != hal.StatePresent {
-			lastMainError = fmt.Errorf("attempt %d: lost connection after reading Status1, HAL state: %s", attempt, halState)
-			r.logCallback(hal.LogLevelWarning, lastMainError.Error())
-			if attempt < maxAttemptsAfterHALRecreation {
-				r.logCallback(hal.LogLevelWarning, "Attempting HAL recovery.")
-
-				if err := r.simpleHALRecovery(); err != nil {
-					return fmt.Errorf("%w; and HAL recovery failed: %v", lastMainError, err)
-				}
-
-				continue // Retry readBatteryStatus full sequence
-			}
-			return lastMainError
-		}
 
 		// Read Status2
-		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Attempt %d: Reading Status2...", attempt))
 		data, err = r.readRegisterWithRetry(r.getOperationContext(), addrStatus2)
 		if err != nil {
 			lastMainError = fmt.Errorf("attempt %d: failed to read Status2: %w", attempt, err)
-			
-			// Don't retry HAL recovery for context cancelled errors (tag departed)
 			if strings.Contains(err.Error(), "context cancel") {
 				r.logCallback(hal.LogLevelDebug, "Status2 read cancelled due to tag departure, not retrying")
 				return lastMainError
 			}
-			
 			if errors.Is(err, errHALRecreatedRetryRead) && attempt < maxAttemptsAfterHALRecreation {
 				r.logCallback(hal.LogLevelWarning, "HAL recreated during Status2 read, retrying entire status read.")
-				continue // Retry the entire readBatteryStatus sequence
+				continue
 			}
 			return lastMainError
 		}
-		// Process Status2 data
+
+		// Process Status2 data immediately
 		copy(r.data.SerialNumber[12:16], data[0:4])
 		r.data.ManufacturingDate = fmt.Sprintf("%c%c%c%c-%c%c-%c%c",
 			data[4], data[5], data[6], data[7],
@@ -412,8 +359,8 @@ func (r *BatteryReader) readBatteryStatus() error {
 		r.data.Temperature[2] = int8(data[14])
 		r.data.Temperature[3] = int8(data[15])
 
-		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Status2 decoded: serial_number_complete=%s mfg_date=%s cycle_count=%d temp3=%d°C temp4=%d°C",
-			string(r.data.SerialNumber[:]), r.data.ManufacturingDate, r.data.CycleCount, r.data.Temperature[2], r.data.Temperature[3]))
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("All status registers read: voltage=%dmV current=%dmA state=%s charge=%d%% fault=0x%04x",
+			r.data.Voltage, r.data.Current, r.data.State, r.data.Charge, r.data.FaultCode))
 
 		// Update temperature state
 		r.data.TemperatureState = r.calculateTemperatureState()
@@ -481,8 +428,8 @@ func (r *BatteryReader) safelyPowerDownHAL() error {
 	time.Sleep(100 * time.Millisecond)
 
 	// Acquire mutex to ensure exclusive access to HAL
-	r.nfcMutex.Lock()
-	defer r.nfcMutex.Unlock()
+	r.Lock()
+	defer r.Unlock()
 
 	// Deinitialize the HAL, catching any potential errors
 	defer func() {
@@ -514,9 +461,9 @@ func (r *BatteryReader) simpleHALRecovery() error {
 
 	// Always use FullReinitialize which properly handles file descriptor renewal
 	// This is critical for proper recovery from 0300 errors and connection issues
-	r.nfcMutex.Lock()
+	r.Lock()
 	errInit := r.hal.FullReinitialize()
-	r.nfcMutex.Unlock()
+	r.Unlock()
 
 	if errInit != nil {
 		r.logCallback(hal.LogLevelError, fmt.Sprintf("Failed to reinitialize HAL during recovery: %v", errInit))
