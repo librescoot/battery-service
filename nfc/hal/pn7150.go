@@ -383,10 +383,6 @@ func (p *PN7150) Initialize() error {
 		if p.logCallback != nil {
 			p.logCallback(LogLevelInfo, "RF transition table sent and verified successfully - will be skipped on future initializations")
 		}
-	} else {
-		if p.logCallback != nil {
-			p.logCallback(LogLevelInfo, "Skipping RF transition table (already sent during first initialization)")
-		}
 	}
 
 	// Set up RF discovery map

@@ -115,8 +115,6 @@ func (r *BatteryReader) monitorTags() {
 				continue
 			}
 			
-			r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Processing tag event: type=%d", event.Type))
-			
 			// Check if the reader is temporarily powered down
 			r.Lock()
 			isPoweredDown := r.isPoweredDown
@@ -138,9 +136,8 @@ func (r *BatteryReader) monitorTags() {
 
 			switch event.Type {
 			case hal.TagArrival:
-				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Processing tag arrival event, tag=%v", event.Tag))
 				if event.Tag != nil {
-					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Tag arrived: %s tag with ID: %x", event.Tag.RFProtocol, event.Tag.ID))
+					r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Tag arrived: %s tag with ID: %x", event.Tag.RFProtocol, event.Tag.ID))
 					
 					// Check if it's a valid battery tag
 					if event.Tag.RFProtocol == hal.RFProtocolT2T || event.Tag.RFProtocol == hal.RFProtocolISODEP {
@@ -156,7 +153,6 @@ func (r *BatteryReader) monitorTags() {
 				}
 
 			case hal.TagDeparture:
-				r.logCallback(hal.LogLevelDebug, "Tag departed")
 				// Cancel any ongoing operations immediately
 				r.Lock()
 				if r.operationCancel != nil {
@@ -236,8 +232,6 @@ func (r *BatteryReader) handleTagAbsent() {
 
 // readBatteryStatus reads the battery status registers
 func (r *BatteryReader) readBatteryStatus() error {
-	r.logCallback(hal.LogLevelDebug, "Attempting to read battery status...")
-
 	const maxAttemptsAfterHALRecreation = 2 // Initial attempt + 1 retry after HAL recreation
 	var lastMainError error
 
