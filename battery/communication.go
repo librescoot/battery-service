@@ -192,6 +192,9 @@ endReadRetryLoop: // Label to jump to for final error handling
 		}
 	}
 
+	// Signal successful hardware operation
+	r.signalSuccess()
+
 	return data, nil
 }
 
@@ -317,6 +320,8 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 					r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after clearing write communication error: %v", updateErr))
 				}
 			}
+			// Signal successful hardware operation
+			r.signalSuccess()
 			return nil // Command succeeded
 		} else { // lastErr != nil
 			// Check if tag departed

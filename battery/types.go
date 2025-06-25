@@ -44,6 +44,9 @@ type BatteryReader struct {
 	
 	// Track consecutive HAL reinitializations for detecting stuck states
 	halReinitCount int
+	
+	// Channel to signal successful operations to heartbeat goroutine
+	successSignal chan struct{}
 }
 
 // getOperationContext returns the operation context if available, otherwise the service context
@@ -54,6 +57,18 @@ func (r *BatteryReader) getOperationContext() context.Context {
 		return r.operationCtx
 	}
 	return r.service.ctx
+}
+
+// signalSuccess sends a non-blocking signal to the heartbeat goroutine
+// to indicate a successful hardware operation.
+func (r *BatteryReader) signalSuccess() {
+	// A non-blocking send prevents this call from ever delaying an operation.
+	// If the channel is full, the default case is taken and the signal is dropped.
+	// This is fine; we only need to prevent the heartbeat timeout.
+	select {
+	case r.successSignal <- struct{}{}:
+	default:
+	}
 }
 
 // Service represents the battery service that manages multiple readers

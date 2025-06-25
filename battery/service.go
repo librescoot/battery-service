@@ -65,6 +65,7 @@ func (s *Service) createReader(index int, role BatteryRole, deviceName string, l
 		service:                 s,
 		stopChan:                make(chan struct{}),
 		lastReinitialization:    time.Now(), // Initialize with current time
+		successSignal:           make(chan struct{}, 10), // Initialize with buffer for non-blocking sends
 	}
 
 	// Create NFC HAL

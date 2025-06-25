@@ -22,6 +22,24 @@ func (r *BatteryReader) startHeartbeat() {
 			select {
 			case <-r.stopChan:
 				return
+			
+			case <-r.successSignal:
+				// A success signal was received. Reset the timer.
+				// First, drain any other pending signals from the channel
+				// to handle activity bursts and prevent processing stale signals later.
+			drainLoop:
+				for {
+					select {
+					case <-r.successSignal:
+						// Keep draining
+					default:
+						break drainLoop
+					}
+				}
+				lastSuccessfulOperation = time.Now()
+				consecutiveFailures = 0
+				r.logCallback(hal.LogLevelDebug, "Success signal received, heartbeat timer reset")
+				
 			case <-ticker.C:
 				r.Lock()
 				present := r.data.Present
