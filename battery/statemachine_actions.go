@@ -172,15 +172,18 @@ func (sm *BatteryStateMachine) actionBatteryRemoved(machine *BatteryStateMachine
 	sm.reader.halReinitCount = 0 // Reset HAL reinit counter for clean state
 	sm.reader.Unlock()
 
-	// Send BatteryRemoved command
-	if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandBatteryRemoved); err != nil {
-		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to send BatteryRemoved command: %v", err))
-	}
-
-	// Update Redis
+	// Update Redis immediately
 	if err := sm.reader.updateRedisStatus(); err != nil {
 		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after battery removal: %v", err))
 	}
+
+	// Send BatteryRemoved command asynchronously to prevent blocking
+	go func() {
+		ctx := sm.reader.getOperationContext()
+		if err := sm.reader.sendCommand(ctx, BatteryCommandBatteryRemoved); err != nil {
+			sm.logger(hal.LogLevelDebug, fmt.Sprintf("Failed to send BatteryRemoved command (expected for removed battery): %v", err))
+		}
+	}()
 
 	return nil
 }
@@ -875,8 +878,14 @@ func (sm *BatteryStateMachine) actionHandleDeparture(machine *BatteryStateMachin
 		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after departure: %v", err))
 	}
 	
-	// Send battery removed command
-	sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandBatteryRemoved)
+	// Send battery removed command asynchronously to prevent blocking the state machine
+	go func() {
+		ctx := sm.reader.getOperationContext()
+		if err := sm.reader.sendCommand(ctx, BatteryCommandBatteryRemoved); err != nil {
+			// Log but don't block - battery is already gone
+			sm.logger(hal.LogLevelDebug, fmt.Sprintf("Failed to send BatteryRemoved command (expected for departed battery): %v", err))
+		}
+	}()
 	
 	return nil
 }

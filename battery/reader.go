@@ -215,9 +215,21 @@ func (r *BatteryReader) handleTagAbsent() {
 
 	// Check if battery was previously present
 	if r.data.Present {
-		r.logCallback(hal.LogLevelInfo, "Tag departed - sending immediate departure event")
+		r.logCallback(hal.LogLevelInfo, "Tag departed - marking battery as absent immediately")
 		
-		// Send tag departed event immediately for reactive behavior
+		// Mark battery as absent immediately to prevent getting stuck
+		r.data.Present = false
+		r.justInserted = false
+		r.readyToScoot = false
+		
+		// Update Redis immediately to reflect battery absence
+		go func() {
+			if err := r.updateRedisStatus(); err != nil {
+				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after tag departure: %v", err))
+			}
+		}()
+		
+		// Send tag departed event for state machine transitions
 		r.stateMachine.SendEvent(EventTagDeparted)
 	}
 }
