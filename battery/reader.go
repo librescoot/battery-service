@@ -144,9 +144,19 @@ func (r *BatteryReader) monitorTags() {
 					
 					// Check if it's a valid battery tag
 					if event.Tag.RFProtocol == hal.RFProtocolT2T || event.Tag.RFProtocol == hal.RFProtocolISODEP {
-						// Send tag arrived event for discovery states
-						r.stateMachine.SendEvent(EventTagArrived)
-						r.handleTagPresent() // Handles state change and Redis update
+						// Only send TagArrived for state machine if battery is not already present
+						// This prevents spurious events during HAL reinit
+						r.RLock()
+						wasPresent := r.data.Present
+						r.RUnlock()
+						
+						if !wasPresent {
+							r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery %d: Tag arrived for new battery - sending EventTagArrived", r.index))
+							r.stateMachine.SendEvent(EventTagArrived)
+						} else {
+							r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery %d: Tag arrived for existing battery - skipping EventTagArrived", r.index))
+						}
+						r.handleTagPresent() // Always update presence regardless
 					} else {
 						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Unsupported tag protocol: %s", event.Tag.RFProtocol))
 						r.handleTagAbsent() // Treat unsupported tags as absent
@@ -302,6 +312,14 @@ func (r *BatteryReader) readBatteryStatus() error {
 		r.data.StateOfHealth = data[14]
 		r.data.LowSOC = data[15] != 0
 
+		// Validate data for corruption - check for obviously invalid values
+		if r.data.Voltage < 20000 || r.data.Voltage > 65000 { // 20V-65V range (uint16 max is 65535)
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Battery %d: Suspicious voltage reading: %dmV - possible corruption", r.index, r.data.Voltage))
+		}
+		if r.data.Temperature[0] < -50 || r.data.Temperature[0] > 100 { // -50C to 100C range
+			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Battery %d: Suspicious temperature reading: %dC - possible corruption", r.index, r.data.Temperature[0]))
+		}
+
 		// Initialize faults struct
 		r.data.Faults = BatteryFaults{}
 		faultCode := r.data.FaultCode
@@ -382,11 +400,24 @@ func (r *BatteryReader) readBatteryStatus() error {
 		r.Lock()
 		previousLowSOC := r.lastPublishedData.LowSOC
 		currentLowSOC := r.data.LowSOC
+		previousBatteryState := r.lastPublishedData.State
+		currentBatteryState := r.data.State
 		r.Unlock()
 
 		if currentLowSOC && !previousLowSOC {
 			r.logCallback(hal.LogLevelInfo, "Low SOC condition detected")
 			r.stateMachine.SendEvent(EventLowSOC)
+		}
+
+		// Check for battery hardware state changes and sync state machine
+		if previousBatteryState != currentBatteryState {
+			r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery %d hardware state changed: %s -> %s", r.index, previousBatteryState, currentBatteryState))
+			
+			// Sync state machine with hardware state
+			if currentBatteryState == BatteryStateActive {
+				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Battery %d hardware is now active - syncing state machine", r.index))
+				r.stateMachine.SendEvent(EventBatteryAlreadyActive)
+			}
 		}
 
 		// Reset HAL reinit counter on successful status read

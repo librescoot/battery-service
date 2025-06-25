@@ -13,7 +13,7 @@ func (r *BatteryReader) startHeartbeat() {
 		ticker := time.NewTicker(timeHeartbeatIntervalScooter)
 		defer ticker.Stop()
 		
-		var lastStatusPoll time.Time
+		var lastStatusPoll time.Time = time.Now() // Initialize to prevent huge time calculations
 		var lastSuccessfulOperation time.Time = time.Now()
 		var consecutiveFailures int
 
