@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"battery-service/nfc/hal"
@@ -96,20 +97,61 @@ func (s *Service) Start() error {
 	return nil
 }
 
-// Stop stops the battery service
+// Stop stops the battery service with timeout to prevent deadlocks
 func (s *Service) Stop() {
-	s.cancel() // Cancel context to stop Redis subscription
+	// First cancel the context to signal all goroutines to stop
+	s.cancel()
 
+	// Create a timeout for graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
 
-	if s.redis != nil {
-		if err := s.redis.Close(); err != nil {
-			s.logger.Printf("Error closing Redis connection: %v", err)
+	// Use WaitGroup to track reader shutdowns
+	var wg sync.WaitGroup
+
+	// Stop all readers concurrently with timeout
+	for _, reader := range s.readers {
+		if reader != nil {
+			wg.Add(1)
+			go func(r *BatteryReader) {
+				defer wg.Done()
+				
+				// Create a channel to signal completion
+				done := make(chan struct{})
+				go func() {
+					r.Stop()
+					close(done)
+				}()
+				
+				// Wait for either completion or timeout
+				select {
+				case <-done:
+					s.logger.Printf("Reader %d stopped successfully", r.index)
+				case <-shutdownCtx.Done():
+					s.logger.Printf("Reader %d stop timed out after 5 seconds", r.index)
+				}
+			}(reader)
 		}
 	}
 
-	for _, reader := range s.readers {
-		if reader != nil {
-			reader.Stop()
+	// Wait for all readers to stop or timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		s.logger.Printf("All readers stopped successfully")
+	case <-shutdownCtx.Done():
+		s.logger.Printf("Service stop timed out, some readers may not have stopped cleanly")
+	}
+
+	// Close Redis connection
+	if s.redis != nil {
+		if err := s.redis.Close(); err != nil {
+			s.logger.Printf("Error closing Redis connection: %v", err)
 		}
 	}
 }

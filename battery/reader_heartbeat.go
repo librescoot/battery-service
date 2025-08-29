@@ -40,10 +40,10 @@ func (r *BatteryReader) startHeartbeat() {
 				consecutiveFailures = 0
 				
 			case <-ticker.C:
-				r.Lock()
+				r.dataMutex.RLock()
 				present := r.data.Present
 				state := r.data.State
-				r.Unlock()
+				r.dataMutex.RUnlock()
 
 				if !present {
 					continue
@@ -64,10 +64,10 @@ func (r *BatteryReader) startHeartbeat() {
 					if consecutiveFailures >= 3 {
 						r.logCallback(hal.LogLevelError, fmt.Sprintf("Reader appears stuck - no successful operations for %v, triggering full recovery", time.Since(lastSuccessfulOperation)))
 						// Increment HAL reinit counter
-						r.Lock()
+						r.dataMutex.Lock()
 						r.halReinitCount++
 						reinitCount := r.halReinitCount
-						r.Unlock()
+						r.dataMutex.Unlock()
 						r.logCallback(hal.LogLevelInfo, fmt.Sprintf("HAL reinit count: %d", reinitCount))
 						
 						// Trigger full HAL recovery

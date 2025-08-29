@@ -3,6 +3,7 @@ package battery
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"battery-service/nfc/hal"
@@ -154,6 +155,7 @@ type BatteryStateMachine struct {
 	logger          func(level hal.LogLevel, message string)
 	lastEventTime   map[BatteryEvent]time.Time // Track last time each event was sent
 	eventDebounce   time.Duration              // Minimum time between duplicate events
+	droppedEvents   uint64                     // Counter for dropped events (atomic access)
 }
 
 type stateEventKey struct {
@@ -175,13 +177,14 @@ func NewBatteryStateMachine(reader *BatteryReader) *BatteryStateMachine {
 		reader:          reader,
 		currentState:    StateNotPresent,
 		transitions:     make(map[stateEventKey]*StateTransition),
-		eventQueue:      make(chan BatteryEvent, 100), // Increased buffer to prevent overflow
+		eventQueue:      make(chan BatteryEvent, 500), // Increased buffer significantly to prevent overflow
 		stopChan:        make(chan struct{}),
 		maxHistorySize:  50,
 		lastStateChange: time.Now(),
 		logger:          reader.logCallback,
 		lastEventTime:   make(map[BatteryEvent]time.Time),
 		eventDebounce:   20 * time.Millisecond, // Reduced debounce for faster response
+		droppedEvents:   0,
 	}
 
 	sm.setupTransitions()
@@ -333,8 +336,26 @@ func (sm *BatteryStateMachine) SendEvent(event BatteryEvent) {
 	case <-sm.stopChan:
 		return
 	default:
-		// Event queue is full, log error and track metrics
-		sm.logger(hal.LogLevelError, fmt.Sprintf("Event queue full, dropping event: %s (queue size: %d)", event, len(sm.eventQueue)))
+		// Event queue is full - try to make room by draining old events
+		select {
+		case <-sm.eventQueue:
+			// Dropped oldest event to make room
+			atomic.AddUint64(&sm.droppedEvents, 1)
+			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Event queue full, dropped oldest event to queue %s (total dropped: %d)", event, atomic.LoadUint64(&sm.droppedEvents)))
+			// Now try to queue the new event
+			select {
+			case sm.eventQueue <- event:
+				// Successfully queued after making room
+			default:
+				// Still couldn't queue - this shouldn't happen but handle it
+				atomic.AddUint64(&sm.droppedEvents, 1)
+				sm.logger(hal.LogLevelError, fmt.Sprintf("Failed to queue event %s even after draining", event))
+			}
+		default:
+			// Queue is empty but still couldn't send - shouldn't happen
+			atomic.AddUint64(&sm.droppedEvents, 1)
+			sm.logger(hal.LogLevelError, fmt.Sprintf("Unexpected: failed to queue event %s with non-full queue", event))
+		}
 	}
 }
 
@@ -373,12 +394,23 @@ func (sm *BatteryStateMachine) processEvent(event BatteryEvent) {
 
 	sm.logger(hal.LogLevelInfo, fmt.Sprintf("State transition: %s + %s -> %s", currentState, event, transition.ToState))
 
+	// Phase 1: Execute action (if any) before changing state
 	var err error
 	if transition.Action != nil {
+		// Temporarily unlock during action execution to avoid deadlocks
+		// Actions may need to acquire other locks or send events
+		sm.Unlock()
 		err = transition.Action(sm, event)
+		sm.Lock()
+		
+		// Verify state hasn't changed during action execution
+		if sm.currentState != currentState {
+			sm.logger(hal.LogLevelWarning, fmt.Sprintf("State changed during action execution from %s to %s, aborting transition", currentState, sm.currentState))
+			return
+		}
 	}
 
-	// Record transition in history
+	// Phase 2: Commit state change atomically
 	historyEntry := StateHistoryEntry{
 		FromState: currentState,
 		ToState:   transition.ToState,
@@ -398,9 +430,10 @@ func (sm *BatteryStateMachine) processEvent(event BatteryEvent) {
 		if transition.ToState != StateError && currentState != StateError {
 			sm.currentState = StateError
 			sm.lastStateChange = time.Now()
+			sm.logger(hal.LogLevelInfo, "State changed to Error due to action failure")
 		}
 	} else {
-		// Successful transition
+		// Successful transition - commit the state change
 		sm.currentState = transition.ToState
 		sm.lastStateChange = time.Now()
 		sm.logger(hal.LogLevelInfo, fmt.Sprintf("State changed to %s", transition.ToState))

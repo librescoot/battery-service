@@ -17,16 +17,16 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 	var successfulReads int
 
 	// Check if the reader is temporarily powered down
-	r.Lock()
+	r.dataMutex.RLock()
 	isPoweredDown := r.isPoweredDown
-	r.Unlock()
+	r.dataMutex.RUnlock()
 
 	// If powered down, power up the HAL first
 	if isPoweredDown {
 		r.logCallback(hal.LogLevelInfo, "Powering up HAL before reading register")
-		r.Lock()
+		r.dataMutex.Lock()
 		r.isPoweredDown = false
-		r.Unlock()
+		r.dataMutex.Unlock()
 
 		// Use simple HAL recovery approach
 		if err := r.simpleHALRecovery(); err != nil {
@@ -201,16 +201,16 @@ endReadRetryLoop: // Label to jump to for final error handling
 // sendCommand sends a command to the battery with retries
 func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) error {
 	// Check if the reader is temporarily powered down
-	r.Lock()
+	r.dataMutex.RLock()
 	isPoweredDown := r.isPoweredDown
-	r.Unlock()
+	r.dataMutex.RUnlock()
 
 	// If powered down, power up the HAL first (unless we're being called directly from the polling code)
 	if isPoweredDown {
 		r.logCallback(hal.LogLevelInfo, "Powering up HAL before sending command")
-		r.Lock()
+		r.dataMutex.Lock()
 		r.isPoweredDown = false
-		r.Unlock()
+		r.dataMutex.Unlock()
 
 		// Use simple HAL recovery approach
 		if err := r.simpleHALRecovery(); err != nil {

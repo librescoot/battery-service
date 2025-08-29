@@ -17,7 +17,10 @@ var errHALRecreatedRetryRead = fmt.Errorf("HAL was recreated, retry read operati
 
 // BatteryReader represents a single battery reader instance
 type BatteryReader struct {
-	sync.Mutex
+	// Lock ordering: ALWAYS acquire nfcMutex before dataMutex to prevent deadlocks
+	nfcMutex                         sync.Mutex           // Serializes access to NFC HAL operations (acquire first)
+	dataMutex                        sync.RWMutex         // Protects battery data and state (acquire second)
+	
 	index                            int
 	role                             BatteryRole          // Role of this battery (active or inactive)
 	hal                              hal.HAL
@@ -30,7 +33,6 @@ type BatteryReader struct {
 	justInserted                     bool
 	readyToScoot                     bool                 // Flag indicating battery responded with ReadyToScoot
 	stopChan                         chan struct{}        // Channel to signal goroutine shutdown
-	nfcMutex                         sync.Mutex           // Serializes access to NFC HAL operations
 	lastPublishedData                BatteryData          // Stores the state as of the last successful Redis update with PUBLISH
 	lastBattery1MaintPollTime        time.Time            // Tracks last maintenance poll for battery 1
 	lastIdleAsleepPollTime           time.Time            // Tracks last poll time for battery 0 when idle/asleep in stand-by
@@ -39,6 +41,8 @@ type BatteryReader struct {
 	stateMachine                     *BatteryStateMachine // State machine for managing battery transitions
 	
 	// Operation cancellation context - cancelled when tag departs to abort pending operations
+	// Protected by contextMutex for atomic swapping
+	contextMutex    sync.RWMutex
 	operationCtx    context.Context
 	operationCancel context.CancelFunc
 	
@@ -50,13 +54,25 @@ type BatteryReader struct {
 }
 
 // getOperationContext returns the operation context if available, otherwise the service context
+// This is safe for concurrent use and returns a context that won't be invalidated during use
 func (r *BatteryReader) getOperationContext() context.Context {
-	r.Lock()
-	defer r.Unlock()
+	r.contextMutex.RLock()
+	defer r.contextMutex.RUnlock()
 	if r.operationCtx != nil {
 		return r.operationCtx
 	}
 	return r.service.ctx
+}
+
+// swapOperationContext atomically cancels the old context and creates a new one
+func (r *BatteryReader) swapOperationContext() {
+	r.contextMutex.Lock()
+	defer r.contextMutex.Unlock()
+	
+	if r.operationCancel != nil {
+		r.operationCancel()
+	}
+	r.operationCtx, r.operationCancel = context.WithCancel(r.service.ctx)
 }
 
 // signalSuccess sends a non-blocking signal to the heartbeat goroutine
@@ -86,7 +102,9 @@ type Service struct {
 
 	// Vehicle state tracking
 	vehicleState          string
-
+	
+	// Redis update serialization
+	redisMutex sync.Mutex // Serializes Redis update operations
 }
 
 // BatteryState represents the state of the battery
@@ -138,6 +156,64 @@ const (
 
 	BatteryCommandNone BatteryCommand = 0 // Keep for default/unknown
 )
+
+// String returns a string representation of the battery command with hex and ASCII
+func (c BatteryCommand) String() string {
+	// Convert to bytes (big-endian order for ASCII display)
+	bytes := []byte{
+		byte(c >> 24),
+		byte(c >> 16),
+		byte(c >> 8),
+		byte(c),
+	}
+	
+	// Convert to ASCII, replacing non-printable with '.'
+	ascii := make([]byte, 4)
+	for i, b := range bytes {
+		if b >= 32 && b <= 126 { // Printable ASCII range
+			ascii[i] = b
+		} else {
+			ascii[i] = '.'
+		}
+	}
+	
+	switch c {
+	case BatteryCommandOn:
+		return fmt.Sprintf("BMS_CMD_ON (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandOff:
+		return fmt.Sprintf("BMS_CMD_OFF (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandSleepNow:
+		return fmt.Sprintf("BMS_CMD_SLEEP_NOW (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandInsertedInCharger:
+		return fmt.Sprintf("BMS_CMD_INSERTED_IN_CHARGER (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandInsertedInScooter:
+		return fmt.Sprintf("BMS_CMD_INSERTED_IN_SCOOTER (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandChargerHeartbeat:
+		return fmt.Sprintf("BMS_CMD_CHARGER_HEARTBEAT (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandScooterHeartbeat:
+		return fmt.Sprintf("BMS_CMD_SCOOTER_HEARTBEAT (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandBatteryRemoved:
+		return fmt.Sprintf("BMS_CMD_BATTERY_REMOVED (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandSocUpdate:
+		return fmt.Sprintf("BMS_CMD_SOC_UPDATE (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandUserOpenedSeatbox:
+		return fmt.Sprintf("BMS_CMD_USER_OPENED_SEATBOX (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandUserClosedSeatbox:
+		return fmt.Sprintf("BMS_CMD_USER_CLOSED_SEATBOX (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandErrorDetected:
+		return fmt.Sprintf("BMS_CMD_ERROR_DETECTED (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandLedPassthrough:
+		return fmt.Sprintf("BMS_CMD_LED_PASSTHROUGH (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandReadyToCharge:
+		return fmt.Sprintf("BMS_CMD_READY_TO_CHARGE (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandReadyToScoot:
+		return fmt.Sprintf("BMS_CMD_READY_TO_SCOOT (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BatteryCommandNone:
+		return fmt.Sprintf("BMS_CMD_NONE (0x%08X) \"%s\"", uint32(c), string(ascii))
+	default:
+		return fmt.Sprintf("BMS_CMD_UNKNOWN (0x%08X) \"%s\"", uint32(c), string(ascii))
+	}
+}
 
 // BatteryTemperatureState represents the temperature state of the battery
 type BatteryTemperatureState int

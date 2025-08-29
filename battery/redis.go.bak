@@ -28,12 +28,7 @@ var faultCodeMap = map[string]int{
 }
 
 // updateRedisStatus updates the Redis hash and fault set with current battery status
-// This function is thread-safe and prevents concurrent Redis updates
 func (r *BatteryReader) updateRedisStatus() error {
-	// Serialize Redis updates to prevent race conditions
-	r.service.redisMutex.Lock()
-	defer r.service.redisMutex.Unlock()
-	
 	if r.service.redis == nil {
 		return fmt.Errorf("Redis client not initialized")
 	}
@@ -261,10 +256,10 @@ func (s *Service) updateVehicleState() {
 
 	// Send EventVehicleActive to battery readers with active role
 	for _, r := range readersToNotify {
-		r.dataMutex.Lock()
+		r.Lock()
 		present := r.data.Present
 		role := r.role
-		r.dataMutex.Unlock()
+		r.Unlock()
 		if present && role == BatteryRoleActive {
 			s.logger.Printf("[StateUpdate] Sending EventVehicleActive to Battery %d (active role) for vehicle state '%s'", r.index, newState)
 			r.stateMachine.SendEvent(EventVehicleActive)

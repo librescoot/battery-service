@@ -49,9 +49,9 @@ func (s *Service) handleSeatboxStateChange(isOpen bool) {
 
 // handleSeatboxState is called on the BatteryReader when the seatbox state changes
 func (r *BatteryReader) handleSeatboxState(isOpen bool) {
-	r.dataMutex.Lock()
+	r.Lock()
 	present := r.data.Present
-	r.dataMutex.Unlock()
+	r.Unlock()
 
 	if !present {
 		return // Ignore if battery not present

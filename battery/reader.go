@@ -1,7 +1,6 @@
 package battery
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,12 +13,10 @@ import (
 func (r *BatteryReader) Start() error {
 	// Enable the reader by default
 	r.enabled = true
-	r.isPoweredDown = false                // Ensure we start with the reader powered up
+	r.isPoweredDown = false // Ensure we start with the reader powered up (0 = not powered down)
 	
 	// Initialize operation context for cancelling operations when tag departs
-	r.Lock()
-	r.operationCtx, r.operationCancel = context.WithCancel(r.service.ctx)
-	r.Unlock()
+	r.swapOperationContext()
 
 	// Initialize NFC HAL
 	if err := r.hal.Initialize(); err != nil {
@@ -44,19 +41,19 @@ func (r *BatteryReader) Stop() {
 	r.stateMachine.Stop()
 
 	// Cancel any pending operations
-	r.Lock()
+	r.contextMutex.Lock()
 	if r.operationCancel != nil {
 		r.operationCancel()
 	}
-	r.Unlock()
+	r.contextMutex.Unlock()
 
 	close(r.stopChan)
 
 	// Reset powered down state to ensure final deinitialization works
-	r.Lock()
+	r.dataMutex.Lock()
 	wasPoweredDown := r.isPoweredDown
 	r.isPoweredDown = false
-	r.Unlock()
+	r.dataMutex.Unlock()
 
 	// If it was powered down, we need to initialize it first before deinitializing
 	if wasPoweredDown {
@@ -70,9 +67,9 @@ func (r *BatteryReader) Stop() {
 
 // setEnabled enables or disables the battery reader
 func (r *BatteryReader) setEnabled(enabled bool) {
-	r.Lock()
+	r.dataMutex.Lock()
 	r.enabled = enabled
-	r.Unlock()
+	r.dataMutex.Unlock()
 
 	// Send appropriate event to state machine
 	if enabled {
@@ -85,7 +82,7 @@ func (r *BatteryReader) setEnabled(enabled bool) {
 // monitorTags continuously monitors for tag presence using channel-based detection
 func (r *BatteryReader) monitorTags() {
 	// Initialize battery state as not present
-	r.Lock()
+	r.dataMutex.Lock()
 	if !r.data.Present {
 		r.data = BatteryData{}       // Ensure clean state
 		r.lastPublishedData = r.data // Initialize lastPublishedData to prevent false-positive changes on first update
@@ -93,7 +90,7 @@ func (r *BatteryReader) monitorTags() {
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to initialize Redis status: %v", err))
 		}
 	}
-	r.Unlock()
+	r.dataMutex.Unlock()
 
 	for {
 		// Get the tag event channel from HAL
@@ -116,9 +113,9 @@ func (r *BatteryReader) monitorTags() {
 			}
 			
 			// Check if the reader is temporarily powered down
-			r.Lock()
+			r.dataMutex.RLock()
 			isPoweredDown := r.isPoweredDown
-			r.Unlock()
+			r.dataMutex.RUnlock()
 
 			if isPoweredDown {
 				// Ignore events when powered down
@@ -153,14 +150,8 @@ func (r *BatteryReader) monitorTags() {
 				}
 
 			case hal.TagDeparture:
-				// Cancel any ongoing operations immediately
-				r.Lock()
-				if r.operationCancel != nil {
-					r.operationCancel()
-					// Create new context for future operations
-					r.operationCtx, r.operationCancel = context.WithCancel(r.service.ctx)
-				}
-				r.Unlock()
+				// Cancel any ongoing operations immediately and create new context
+				r.swapOperationContext()
 				r.handleTagAbsent() // Handles state change and Redis update
 			}
 
@@ -170,12 +161,12 @@ func (r *BatteryReader) monitorTags() {
 
 // handleTagPresent handles a present tag
 func (r *BatteryReader) handleTagPresent() {
-	r.Lock()
+	r.dataMutex.Lock()
 
 	if !r.data.Present {
 		r.data.Present = true // Mark as present immediately
 		r.halReinitCount = 0 // Reset HAL reinit counter for fresh battery
-		r.Unlock()
+		r.dataMutex.Unlock()
 
 		r.logCallback(hal.LogLevelInfo, "Battery inserted")
 		// No need to send event here - monitorTags already sent EventTagArrived
@@ -194,13 +185,13 @@ func (r *BatteryReader) handleTagPresent() {
 		}
 	}
 
-	r.Unlock() // Unlock as we are done with reader data for now
+	r.dataMutex.Unlock() // Unlock as we are done with reader data for now
 }
 
 // handleTagAbsent handles an absent tag
 func (r *BatteryReader) handleTagAbsent() {
-	r.Lock()
-	defer r.Unlock()
+	r.dataMutex.Lock()
+	defer r.dataMutex.Unlock()
 
 	// Don't process tag absence if HAL is intentionally powered down
 	if r.isPoweredDown {
@@ -423,10 +414,10 @@ func (r *BatteryReader) readBatteryStatus() error {
 		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Battery status read complete (attempt %d).", attempt))
 
 		// Check for low SOC state change and send event if needed
-		r.Lock()
+		r.dataMutex.RLock()
 		previousLowSOC := r.lastPublishedData.LowSOC
 		currentLowSOC := r.data.LowSOC
-		r.Unlock()
+		r.dataMutex.RUnlock()
 
 		if currentLowSOC && !previousLowSOC {
 			r.logCallback(hal.LogLevelInfo, "Low SOC condition detected")
@@ -434,9 +425,9 @@ func (r *BatteryReader) readBatteryStatus() error {
 		}
 
 		// Reset HAL reinit counter on successful status read
-		r.Lock()
+		r.dataMutex.Lock()
 		r.halReinitCount = 0
-		r.Unlock()
+		r.dataMutex.Unlock()
 		
 		// Update Redis with the new status
 		if errUpdate := r.updateRedisStatus(); errUpdate != nil {
@@ -468,10 +459,10 @@ func (r *BatteryReader) safelyPowerDownHAL() error {
 	r.logCallback(hal.LogLevelInfo, "Preparing to power down HAL")
 
 	// Set powered down flag first to prevent new operations
-	r.Lock()
+	r.dataMutex.Lock()
 	wasAlreadyPoweredDown := r.isPoweredDown
 	r.isPoweredDown = true
-	r.Unlock()
+	r.dataMutex.Unlock()
 
 	// If already powered down, no need to do it again
 	if wasAlreadyPoweredDown {
@@ -507,10 +498,10 @@ func (r *BatteryReader) simpleHALRecovery() error {
 	r.logCallback(hal.LogLevelInfo, "Performing full HAL recovery with file descriptor renewal")
 
 	// Increment HAL reinit counter
-	r.Lock()
+	r.dataMutex.Lock()
 	r.halReinitCount++
 	reinitCount := r.halReinitCount
-	r.Unlock()
+	r.dataMutex.Unlock()
 	
 	r.logCallback(hal.LogLevelInfo, fmt.Sprintf("HAL reinit count: %d", reinitCount))
 
