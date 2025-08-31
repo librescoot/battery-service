@@ -26,7 +26,6 @@ const (
 	EventDisabled
 	EventEnabled
 	EventHeartbeatTick
-	EventMaintenanceTick
 	EventHALError
 	EventHALRecovered
 	EventBatteryAlreadyActive
@@ -64,8 +63,6 @@ func (e BatteryEvent) String() string {
 		return "Enabled"
 	case EventHeartbeatTick:
 		return "HeartbeatTick"
-	case EventMaintenanceTick:
-		return "MaintenanceTick"
 	case EventHALError:
 		return "HALError"
 	case EventHALRecovered:
@@ -98,7 +95,6 @@ const (
 	StateDeactivating
 	StateError
 	StateDisabled
-	StateMaintenance
 )
 
 // String returns a string representation of the machine state
@@ -126,8 +122,6 @@ func (s BatteryMachineState) String() string {
 		return "Error"
 	case StateDisabled:
 		return "Disabled"
-	case StateMaintenance:
-		return "Maintenance"
 	default:
 		return "Unknown"
 	}
@@ -218,7 +212,6 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateIdleStandby, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
 		{StateIdleStandby, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
 		{StateIdleStandby, EventLowSOC, StateIdleStandby, sm.actionLowSOC},
-		{StateIdleStandby, EventMaintenanceTick, StateMaintenance, sm.actionStartMaintenance},
 		{StateIdleStandby, EventHeartbeatTick, StateIdleStandby, sm.actionHeartbeat},
 		{StateIdleStandby, EventDisabled, StateDisabled, sm.actionDisable},
 		{StateIdleStandby, EventBatteryAlreadyActive, StateActive, sm.actionBatteryAlreadyActive},
@@ -250,7 +243,6 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateActive, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
 		{StateActive, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
 		{StateActive, EventHeartbeatTick, StateActive, sm.actionHeartbeat},
-		{StateActive, EventMaintenanceTick, StateActive, sm.actionActiveStatusPoll},
 		{StateActive, EventHALError, StateError, sm.actionHALError},
 		{StateActive, EventDisabled, StateDisabled, sm.actionDisable},
 
@@ -277,15 +269,6 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateDisabled, EventTagArrived, StateDisabled, sm.actionBatteryInsertedWhileDisabled}, // Use EventTagArrived
 		{StateDisabled, EventBatteryRemoved, StateDisabled, sm.actionBatteryRemoved},
 
-		// From Maintenance
-		{StateMaintenance, EventMaintenanceTick, StateIdleStandby, sm.actionMaintenanceComplete},
-		{StateMaintenance, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
-		{StateMaintenance, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
-		{StateMaintenance, EventHALError, StateError, sm.actionHALError},
-		{StateMaintenance, EventDisabled, StateDisabled, sm.actionDisable},
-		{StateMaintenance, EventBatteryAlreadyActive, StateMaintenance, nil}, // Queue for later processing
-		{StateMaintenance, EventVehicleActive, StateIdleStandby, sm.actionMaintenanceCompleteWithActivation}, // Handle vehicle becoming active during maintenance
-		{StateMaintenance, EventHeartbeatTick, StateMaintenance, sm.actionHeartbeat}, // Stay in maintenance during heartbeat
 	}
 
 	// Build transition map

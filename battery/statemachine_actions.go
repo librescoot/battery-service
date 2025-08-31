@@ -575,7 +575,7 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 		
 		return err
 	} else {
-		// Battery is already active, just send heartbeat
+		// Battery is already active, send heartbeat and check if we need status polling
 		sm.logger(hal.LogLevelDebug, "Battery already active, sending heartbeat")
 		err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandScooterHeartbeat)
 		if sm.handleCmdError(err) {
@@ -585,118 +585,33 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 			// Log the error but don't propagate it, as it's a non-critical heartbeat failure.
 			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to send heartbeat: %v", err))
 		}
-	}
-
-	return nil
-}
-
-func (sm *BatteryStateMachine) actionActiveStatusPoll(machine *BatteryStateMachine, event BatteryEvent) error {
-	// Poll status for active battery
-	if err := sm.reader.readBatteryStatus(); err != nil {
-		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to read battery status during active poll: %v", err))
-		// Don't fail the transition - we'll retry on the next poll cycle
-		// This prevents getting stuck after 0300 errors
-		return nil
-	}
-	
-	// Check if battery is still actually active after polling
-	sm.reader.dataMutex.Lock()
-	batteryState := sm.reader.data.State
-	sm.reader.dataMutex.Unlock()
-	
-	if batteryState != BatteryStateActive && sm.reader.IsActive() {
-		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Active battery %d is not active after status poll (state: %s), reactivating", sm.reader.index, batteryState))
-		// For active batteries, always reactivate
-		if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandOn); err != nil {
-			sm.logger(hal.LogLevelError, fmt.Sprintf("Failed to reactivate battery: %v", err))
-		}
-	}
-	
-	return nil
-}
-
-func (sm *BatteryStateMachine) actionStartMaintenance(machine *BatteryStateMachine, event BatteryEvent) error {
-	// Start maintenance cycle for idle batteries
-	sm.logger(hal.LogLevelDebug, "Starting maintenance cycle")
-	return nil
-}
-
-func (sm *BatteryStateMachine) actionMaintenanceComplete(machine *BatteryStateMachine, event BatteryEvent) error {
-	// Complete maintenance cycle
-	sm.logger(hal.LogLevelDebug, "Maintenance cycle complete")
-	if err := sm.reader.readBatteryStatus(); err != nil {
-		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to read battery status during maintenance: %v", err))
-		// Don't fail the transition - we'll retry on the next maintenance cycle
-		// The important thing is to exit Maintenance state so we don't get stuck
-		return nil
-	}
-	
-	// After reading status, check if battery state has changed and we need to sync state machine
-	sm.reader.dataMutex.Lock()
-	batteryState := sm.reader.data.State
-	sm.reader.dataMutex.Unlock()
-	
-	// If battery is active after maintenance, we need to transition to Active state
-	if batteryState == BatteryStateActive {
-		sm.logger(hal.LogLevelInfo, "Battery is active after maintenance, syncing state machine")
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			// The maintenance will transition to IdleStandby, then we send the event
-			sm.SendEvent(EventBatteryAlreadyActive)
-		}()
-	}
-	
-	return nil
-}
-
-func (sm *BatteryStateMachine) actionMaintenanceCompleteWithActivation(machine *BatteryStateMachine, event BatteryEvent) error {
-	// Complete maintenance cycle and check if activation is needed
-	sm.logger(hal.LogLevelInfo, "Vehicle became active during maintenance, completing maintenance and checking activation")
-	
-	// First complete the maintenance read if possible
-	if err := sm.reader.readBatteryStatus(); err != nil {
-		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to read battery status during maintenance: %v", err))
-		// Continue anyway - we need to handle the vehicle state change
-	}
-	
-	// Update Redis status
-	if err := sm.reader.updateRedisStatus(); err != nil {
-		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after maintenance: %v", err))
-	}
-	
-	// After transitioning to IdleStandby, immediately check if we should activate
-	go func() {
-		time.Sleep(50 * time.Millisecond) // Small delay to ensure state transition completes
 		
-		// Check current conditions
-		sm.reader.service.Lock()
-		seatboxOpen := sm.reader.service.seatboxOpen
-		sm.reader.service.Unlock()
-		
-		sm.reader.dataMutex.Lock()
-		ready := sm.reader.readyToScoot
-		enabled := sm.reader.enabled
-		batteryState := sm.reader.data.State
-		index := sm.reader.index
-		sm.reader.dataMutex.Unlock()
-		
-		// Only battery 0 can be activated
-		if index == 0 && enabled && ready && !seatboxOpen {
+		// Also handle periodic status polling that was previously done in Maintenance state
+		// This replaces the actionActiveStatusPoll functionality
+		if err := sm.reader.readBatteryStatus(); err != nil {
+			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to read battery status during heartbeat: %v", err))
+		} else {
+			// Check if battery is still actually active after polling
+			sm.reader.dataMutex.Lock()
+			batteryState := sm.reader.data.State
+			sm.reader.dataMutex.Unlock()
 			
-			sm.logger(hal.LogLevelInfo, fmt.Sprintf("Vehicle active after maintenance, triggering activation (batteryState=%s)", batteryState))
-			
-			// If battery is already active, sync state machine
-			if batteryState == BatteryStateActive {
-				sm.SendEvent(EventBatteryAlreadyActive)
-			} else {
-				// Trigger activation through proper state transitions
-				sm.SendEvent(EventVehicleActive)
+			if batteryState != BatteryStateActive && sm.reader.IsActive() {
+				sm.logger(hal.LogLevelWarning, fmt.Sprintf("Active battery %d is not active after status poll (state: %s), reactivating", sm.reader.index, batteryState))
+				// For active batteries, always reactivate
+				if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandOn); err != nil {
+					sm.logger(hal.LogLevelError, fmt.Sprintf("Failed to reactivate battery: %v", err))
+				}
 			}
 		}
-	}()
-	
+	}
+
 	return nil
 }
+
+
+
+
 
 func (sm *BatteryStateMachine) actionLowSOC(machine *BatteryStateMachine, event BatteryEvent) error {
 	sm.logger(hal.LogLevelWarning, "Battery SOC is low")

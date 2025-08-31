@@ -87,11 +87,11 @@ func (r *BatteryReader) startHeartbeat() {
 					}
 				}
 
-				// Check if we need to do periodic status polling
+				// Check if we need to do periodic status polling for active batteries
 				if r.IsActive() && state == BatteryStateActive && 
 					time.Since(lastActiveStatusPoll) >= timeActiveStatusPoll {
 					r.logCallback(hal.LogLevelDebug, "Time for active status poll")
-					r.stateMachine.SendEvent(EventMaintenanceTick)
+					r.stateMachine.SendEvent(EventHeartbeatTick)
 					lastActiveStatusPoll = time.Now()
 				}
 
@@ -115,10 +115,9 @@ func (r *BatteryReader) startHeartbeat() {
 				if r.IsActive() && time.Since(lastActiveStatusPoll) >= timeActiveStatusPoll {
 					// Skip if already handled above
 					if state != BatteryStateActive {
-						// For non-active states, send maintenance tick to state machine
-						// The state machine will decide what to do based on current state
+						// For non-active states, send heartbeat tick for periodic status check
 						r.logCallback(hal.LogLevelDebug, "Time for maintenance poll (non-active state)")
-						r.stateMachine.SendEvent(EventMaintenanceTick)
+						r.stateMachine.SendEvent(EventHeartbeatTick)
 					}
 					lastActiveStatusPoll = time.Now()
 				}
