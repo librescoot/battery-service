@@ -564,18 +564,34 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 			return nil
 		}
 		
-		// If seatbox is closed, trigger activation through state machine
-		if !seatboxOpen {
-			sm.logger(hal.LogLevelInfo, "Seatbox closed after ON command, triggering activation")
-			go func() {
-				time.Sleep(50 * time.Millisecond) // Small delay to let ON command settle
-				sm.SendEvent(EventSeatboxClosed)
-			}()
+		// Wait for command to complete, then read status to verify
+		time.Sleep(timeCmd)
+		if err := sm.reader.readBatteryStatus(); err != nil {
+			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to verify status after ON command: %v", err))
+		} else {
+			// Check if battery became active after ON command
+			sm.reader.dataMutex.Lock()
+			batteryState := sm.reader.data.State
+			sm.reader.dataMutex.Unlock()
+			
+			if batteryState == BatteryStateActive {
+				sm.logger(hal.LogLevelInfo, "Battery activated successfully")
+				go func() {
+					time.Sleep(10 * time.Millisecond)
+					sm.SendEvent(EventBatteryAlreadyActive)
+				}()
+			} else if !seatboxOpen {
+				sm.logger(hal.LogLevelInfo, "Battery not active after ON command, triggering activation sequence")
+				go func() {
+					time.Sleep(10 * time.Millisecond)
+					sm.SendEvent(EventSeatboxClosed)
+				}()
+			}
 		}
 		
 		return err
 	} else {
-		// Battery is already active, send heartbeat and check if we need status polling
+		// Battery is already active, just send heartbeat
 		sm.logger(hal.LogLevelDebug, "Battery already active, sending heartbeat")
 		err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandScooterHeartbeat)
 		if sm.handleCmdError(err) {
@@ -584,25 +600,6 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 		if err != nil {
 			// Log the error but don't propagate it, as it's a non-critical heartbeat failure.
 			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to send heartbeat: %v", err))
-		}
-		
-		// Also handle periodic status polling that was previously done in Maintenance state
-		// This replaces the actionActiveStatusPoll functionality
-		if err := sm.reader.readBatteryStatus(); err != nil {
-			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to read battery status during heartbeat: %v", err))
-		} else {
-			// Check if battery is still actually active after polling
-			sm.reader.dataMutex.Lock()
-			batteryState := sm.reader.data.State
-			sm.reader.dataMutex.Unlock()
-			
-			if batteryState != BatteryStateActive && sm.reader.IsActive() {
-				sm.logger(hal.LogLevelWarning, fmt.Sprintf("Active battery %d is not active after status poll (state: %s), reactivating", sm.reader.index, batteryState))
-				// For active batteries, always reactivate
-				if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandOn); err != nil {
-					sm.logger(hal.LogLevelError, fmt.Sprintf("Failed to reactivate battery: %v", err))
-				}
-			}
 		}
 	}
 

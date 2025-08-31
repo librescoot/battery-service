@@ -13,8 +13,6 @@ func (r *BatteryReader) startHeartbeat() {
 		ticker := time.NewTicker(timeHeartbeatIntervalScooter)
 		defer ticker.Stop()
 		
-		var lastActiveStatusPoll time.Time
-		var lastMaintenancePoll time.Time
 		var lastSuccessfulOperation time.Time = time.Now()
 		var consecutiveFailures int
 
@@ -42,7 +40,6 @@ func (r *BatteryReader) startHeartbeat() {
 			case <-ticker.C:
 				r.dataMutex.RLock()
 				present := r.data.Present
-				state := r.data.State
 				r.dataMutex.RUnlock()
 
 				if !present {
@@ -87,40 +84,6 @@ func (r *BatteryReader) startHeartbeat() {
 					}
 				}
 
-				// Check if we need to do periodic status polling for active batteries
-				if r.IsActive() && state == BatteryStateActive && 
-					time.Since(lastActiveStatusPoll) >= timeActiveStatusPoll {
-					r.logCallback(hal.LogLevelDebug, "Time for active status poll")
-					r.stateMachine.SendEvent(EventHeartbeatTick)
-					lastActiveStatusPoll = time.Now()
-				}
-
-
-				// Inactive battery maintenance polling
-				if r.IsInactive() && time.Since(lastMaintenancePoll) >= timeBattery1MaintPollInterval {
-					r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Inactive battery %d: Time for maintenance poll", r.index))
-					
-					// Just read status
-					if err := r.readBatteryStatus(); err != nil {
-						r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Inactive battery %d: Error during maintenance poll: %v", r.index, err))
-					} else {
-						lastSuccessfulOperation = time.Now()
-						consecutiveFailures = 0
-					}
-					
-					lastMaintenancePoll = time.Now()
-				}
-
-				// General active battery polling every timeActiveStatusPoll seconds
-				if r.IsActive() && time.Since(lastActiveStatusPoll) >= timeActiveStatusPoll {
-					// Skip if already handled above
-					if state != BatteryStateActive {
-						// For non-active states, send heartbeat tick for periodic status check
-						r.logCallback(hal.LogLevelDebug, "Time for maintenance poll (non-active state)")
-						r.stateMachine.SendEvent(EventHeartbeatTick)
-					}
-					lastActiveStatusPoll = time.Now()
-				}
 			}
 		}
 	}()

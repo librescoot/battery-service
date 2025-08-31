@@ -14,7 +14,7 @@ const (
 	addrSession = 0x03B0
 
 	// Timing constants
-	timeHeartbeatIntervalScooter    = 10 * time.Second        // Interval for ScooterHeartbeat when present
+	timeHeartbeatIntervalScooter    = 30 * time.Second        // Interval for ScooterHeartbeat when present
 	timeCmd                         = 400 * time.Millisecond  // Aligned with C version (BMS_TIME_CMD)
 	timeDeparture                   = 500 * time.Millisecond  // Aligned with C version
 	timeStateVerify                 = 200 * time.Millisecond  // Reduced from 400ms
