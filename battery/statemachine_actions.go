@@ -563,6 +563,16 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 		if sm.handleCmdError(err) {
 			return nil
 		}
+		
+		// If seatbox is closed, trigger activation through state machine
+		if !seatboxOpen {
+			sm.logger(hal.LogLevelInfo, "Seatbox closed after ON command, triggering activation")
+			go func() {
+				time.Sleep(50 * time.Millisecond) // Small delay to let ON command settle
+				sm.SendEvent(EventSeatboxClosed)
+			}()
+		}
+		
 		return err
 	} else {
 		// Battery is already active, just send heartbeat

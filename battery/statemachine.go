@@ -285,6 +285,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateMaintenance, EventDisabled, StateDisabled, sm.actionDisable},
 		{StateMaintenance, EventBatteryAlreadyActive, StateMaintenance, nil}, // Queue for later processing
 		{StateMaintenance, EventVehicleActive, StateIdleStandby, sm.actionMaintenanceCompleteWithActivation}, // Handle vehicle becoming active during maintenance
+		{StateMaintenance, EventHeartbeatTick, StateMaintenance, sm.actionHeartbeat}, // Stay in maintenance during heartbeat
 	}
 
 	// Build transition map
