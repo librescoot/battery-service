@@ -30,7 +30,7 @@ func (sm *BatteryStateMachine) handleCmdError(err error) bool {
 
 		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Command failed, assuming tag departure. Error: %v", err))
 		go func() {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(timeCmd)
 			sm.SendEvent(EventTagDeparted)
 		}()
 		return true // Error was handled as a departure.
@@ -58,7 +58,7 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 		if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandInsertedInScooter); err != nil {
 			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Attempt %d: Failed to send InsertedInScooter during init: %v", attempt+1, err))
 			// If we get a 0300 error, the HAL will recover, wait a bit and retry
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(timeReinit)
 			continue
 		}
 		sm.logger(hal.LogLevelDebug, "InsertedInScooter command sent successfully")
@@ -85,27 +85,17 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 
 		// Send the ready event immediately
 		go func() {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(timeCmd)
 			sm.logger(hal.LogLevelDebug, "Sending EventReadyToScoot after fast initialization")
 			sm.SendEvent(EventReadyToScoot)
 		}()
 
-		// Start background status read after initialization completes
-		go func() {
-			time.Sleep(500 * time.Millisecond) // Give state machine time to transition
-			sm.logger(hal.LogLevelDebug, "Performing background status read after fast initialization")
-			if err := sm.reader.readBatteryStatus(); err != nil {
-				sm.logger(hal.LogLevelWarning, fmt.Sprintf("Background status read failed: %v", err))
-			} else {
-				sm.logger(hal.LogLevelInfo, "Background status read completed successfully")
-			}
-		}()
 
 		return nil
 	}
 
 	// For inactive battery, do the full status read as before
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(timeStateVerify)
 
 	sm.logger(hal.LogLevelDebug, "Reading initial battery status")
 	statusReadSuccess := false
@@ -138,7 +128,7 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 
 	// Send the ready event asynchronously to avoid deadlock
 	go func() {
-		time.Sleep(10 * time.Millisecond) // Small delay to ensure action completes
+		time.Sleep(timeCmd) // Small delay to ensure action completes
 		sm.logger(hal.LogLevelDebug, "Sending EventReadyToScoot after initialization")
 		sm.SendEvent(EventReadyToScoot)
 	}()
@@ -182,7 +172,7 @@ func (sm *BatteryStateMachine) actionBatteryReady(machine *BatteryStateMachine, 
 		if seatboxOpen {
 			// Send event asynchronously
 			go func() {
-				time.Sleep(10 * time.Millisecond)
+				time.Sleep(timeCmd)
 				sm.SendEvent(EventSeatboxOpened) // This will transition to IdleStandby
 			}()
 		}
@@ -263,7 +253,7 @@ func (sm *BatteryStateMachine) actionRequestActivation(machine *BatteryStateMach
 	if state == BatteryStateActive {
 		// Send event asynchronously to avoid deadlock
 		go func() {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(timeCmd)
 			sm.SendEvent(EventStateVerified)
 		}()
 		return nil
@@ -281,7 +271,7 @@ func (sm *BatteryStateMachine) actionRequestActivation(machine *BatteryStateMach
 		sm.logger(hal.LogLevelError, fmt.Sprintf("Failed to send ON command: %v", err))
 		// Schedule failure event
 		go func() {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(timeCmd)
 			sm.SendEvent(EventCommandFailed)
 		}()
 		return fmt.Errorf("failed to send ON command: %w", err)
@@ -356,7 +346,7 @@ func (sm *BatteryStateMachine) actionRequestDeactivation(machine *BatteryStateMa
 	if state == BatteryStateIdle || state == BatteryStateAsleep {
 		// Send event asynchronously to avoid deadlock
 		go func() {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(timeCmd)
 			sm.SendEvent(EventStateVerified)
 		}()
 		return nil
@@ -372,7 +362,7 @@ func (sm *BatteryStateMachine) actionRequestDeactivation(machine *BatteryStateMa
 		}
 		// Schedule failure event for other errors
 		go func() {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(timeCmd)
 			sm.SendEvent(EventCommandFailed)
 		}()
 		return fmt.Errorf("failed to send OFF command: %w", err)
@@ -461,7 +451,7 @@ func (sm *BatteryStateMachine) actionHeartbeatInError(machine *BatteryStateMachi
 		
 		// Send battery removed event to handle departure
 		go func() {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(timeCmd)
 			sm.SendEvent(EventBatteryRemoved)
 		}()
 		return nil
@@ -476,7 +466,7 @@ func (sm *BatteryStateMachine) actionHeartbeatInError(machine *BatteryStateMachi
 			sm.logger(hal.LogLevelInfo, "Recovery failed because tag is gone. Transitioning to NotPresent.")
 			// Send the final event to correctly mark the battery as removed.
 			go func() {
-				time.Sleep(10 * time.Millisecond)
+				time.Sleep(timeCmd)
 				sm.SendEvent(EventBatteryRemoved)
 			}()
 			// Return nil here because we have successfully handled the error by confirming departure.
@@ -496,7 +486,7 @@ func (sm *BatteryStateMachine) actionHeartbeatInError(machine *BatteryStateMachi
 		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery recovered to %s state, transitioning out of error", batteryState))
 		// Send recovery event
 		go func() {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(timeCmd)
 			sm.SendEvent(EventHALRecovered)
 		}()
 	} else if present && batteryState == BatteryStateActive {
@@ -504,7 +494,7 @@ func (sm *BatteryStateMachine) actionHeartbeatInError(machine *BatteryStateMachi
 		// Battery is active but state machine is in error state
 		// Send event to transition directly to Active
 		go func() {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(timeCmd)
 			sm.SendEvent(EventBatteryAlreadyActive) // This will transition directly to Active
 		}()
 	}
@@ -577,13 +567,13 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 			if batteryState == BatteryStateActive {
 				sm.logger(hal.LogLevelInfo, "Battery activated successfully")
 				go func() {
-					time.Sleep(10 * time.Millisecond)
+					time.Sleep(timeCmd)
 					sm.SendEvent(EventBatteryAlreadyActive)
 				}()
 			} else if !seatboxOpen {
 				sm.logger(hal.LogLevelInfo, "Battery not active after ON command, triggering activation sequence")
 				go func() {
-					time.Sleep(10 * time.Millisecond)
+					time.Sleep(timeCmd)
 					sm.SendEvent(EventSeatboxClosed)
 				}()
 			}
@@ -591,7 +581,7 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 		
 		return err
 	} else {
-		// Battery is already active, just send heartbeat
+		// Battery is already active, send heartbeat and verify
 		sm.logger(hal.LogLevelDebug, "Battery already active, sending heartbeat")
 		err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandScooterHeartbeat)
 		if sm.handleCmdError(err) {
@@ -600,6 +590,25 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 		if err != nil {
 			// Log the error but don't propagate it, as it's a non-critical heartbeat failure.
 			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to send heartbeat: %v", err))
+		} else {
+			// Wait for command to complete, then read status to verify and update metrics
+			time.Sleep(timeCmd)
+			if err := sm.reader.readBatteryStatus(); err != nil {
+				sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to verify status after heartbeat: %v", err))
+			} else {
+				// Check if battery state changed unexpectedly
+				sm.reader.dataMutex.Lock()
+				batteryState := sm.reader.data.State
+				charge := sm.reader.data.Charge
+				voltage := sm.reader.data.Voltage
+				sm.reader.dataMutex.Unlock()
+				
+				if batteryState != BatteryStateActive {
+					sm.logger(hal.LogLevelWarning, fmt.Sprintf("Battery state changed unexpectedly to %s during heartbeat", batteryState))
+				} else {
+					sm.logger(hal.LogLevelDebug, fmt.Sprintf("Heartbeat verified: SOC=%d%%, Voltage=%dmV", charge, voltage))
+				}
+			}
 		}
 	}
 
@@ -752,7 +761,7 @@ func (sm *BatteryStateMachine) actionVehicleActiveWhileDisabled(machine *Battery
 		// Send EventEnabled to trigger proper initialization and activation sequence
 		go func() {
 			// Small delay to ensure state transition completes first
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(timeCmd)
 			sm.logger(hal.LogLevelDebug, "Sending EventEnabled after vehicle active")
 			sm.SendEvent(EventEnabled)
 		}()
@@ -797,7 +806,7 @@ func (sm *BatteryStateMachine) actionBatteryInsertedWhileDisabled(machine *Batte
 		// Schedule a tag arrival event to trigger initialization
 		go func() {
 			// Small delay to ensure state transition completes first
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(timeCmd)
 			sm.logger(hal.LogLevelDebug, "Sending EventTagArrived after enabling")
 			sm.SendEvent(EventTagArrived)
 		}()
@@ -841,7 +850,7 @@ func (sm *BatteryStateMachine) actionStartDiscovery(machine *BatteryStateMachine
 	// Start a single timer. If a tag arrives, the FSM will transition away from
 	// StateDiscovering. If not, this timeout will fire.
 	go func() {
-		time.Sleep(500 * time.Millisecond) // 500ms confirmation timeout matching C's BMS_TIME_DEPARTURE
+		time.Sleep(timeDeparture) // 500ms confirmation timeout matching C's BMS_TIME_DEPARTURE
 		sm.SendEvent(EventDiscoveryTimeout)
 	}()
 	
