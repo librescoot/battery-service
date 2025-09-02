@@ -29,9 +29,10 @@ const (
 	EventHALError
 	EventHALRecovered
 	EventBatteryAlreadyActive
-	EventTagDeparted        // Tag departed during operation
-	EventTagArrived         // Tag detected by discovery
-	EventDiscoveryTimeout   // Discovery timeout expired
+	EventTagDeparted      // Tag departed during operation
+	EventTagArrived       // Tag detected by discovery
+	EventDiscoveryTimeout // Discovery timeout expired
+	EventStateTimeout     // State has exceeded its maximum duration
 )
 
 // String returns a string representation of the battery event
@@ -75,6 +76,8 @@ func (e BatteryEvent) String() string {
 		return "TagArrived"
 	case EventDiscoveryTimeout:
 		return "DiscoveryTimeout"
+	case EventStateTimeout:
+		return "StateTimeout"
 	default:
 		return "Unknown"
 	}
@@ -84,9 +87,9 @@ func (e BatteryEvent) String() string {
 type BatteryMachineState int
 
 const (
-	StateNotPresent BatteryMachineState = iota
-	StateDiscovering         // Actively trying to discover tag
-	StateWaitingForArrival   // Waiting for tag to arrive with timeout
+	StateNotPresent        BatteryMachineState = iota
+	StateDiscovering                           // Actively trying to discover tag
+	StateWaitingForArrival                     // Waiting for tag to arrive with timeout
 	StateInitializing
 	StateIdleStandby
 	StateIdleReady
@@ -150,6 +153,10 @@ type BatteryStateMachine struct {
 	lastEventTime   map[BatteryEvent]time.Time // Track last time each event was sent
 	eventDebounce   time.Duration              // Minimum time between duplicate events
 	droppedEvents   uint64                     // Counter for dropped events (atomic access)
+
+	// State timeout mechanism
+	stateTimeouts map[BatteryMachineState]time.Duration // Timeout for each state
+	timeoutChan   chan struct{}                         // Channel to stop timeout checker
 }
 
 type stateEventKey struct {
@@ -179,7 +186,14 @@ func NewBatteryStateMachine(reader *BatteryReader) *BatteryStateMachine {
 		lastEventTime:   make(map[BatteryEvent]time.Time),
 		eventDebounce:   20 * time.Millisecond, // Reduced debounce for faster response
 		droppedEvents:   0,
+
+		// Initialize state timeouts
+		stateTimeouts: make(map[BatteryMachineState]time.Duration),
+		timeoutChan:   make(chan struct{}),
 	}
+
+	// Configure state timeouts (only for problematic states)
+	sm.stateTimeouts[StateActiveRequested] = 3 * time.Minute // Prevent getting stuck in activation
 
 	sm.setupTransitions()
 	return sm
@@ -236,6 +250,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateActiveRequested, EventSeatboxOpened, StateDeactivating, sm.actionRequestDeactivation},
 		{StateActiveRequested, EventLowSOC, StateActiveRequested, sm.actionLowSOCWhileActive},
 		{StateActiveRequested, EventDisabled, StateDisabled, sm.actionDisable},
+		{StateActiveRequested, EventStateTimeout, StateDiscovering, sm.actionStateTimeout},
 
 		// From Active
 		{StateActive, EventSeatboxOpened, StateDeactivating, sm.actionRequestDeactivation},
@@ -268,7 +283,6 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateDisabled, EventVehicleActive, StateNotPresent, sm.actionVehicleActiveWhileDisabled},
 		{StateDisabled, EventTagArrived, StateDisabled, sm.actionBatteryInsertedWhileDisabled}, // Use EventTagArrived
 		{StateDisabled, EventBatteryRemoved, StateDisabled, sm.actionBatteryRemoved},
-
 	}
 
 	// Build transition map
@@ -282,11 +296,13 @@ func (sm *BatteryStateMachine) setupTransitions() {
 // Start starts the state machine event processing loop
 func (sm *BatteryStateMachine) Start() {
 	go sm.eventProcessingLoop()
+	go sm.stateTimeoutChecker()
 }
 
 // Stop stops the state machine
 func (sm *BatteryStateMachine) Stop() {
 	close(sm.stopChan)
+	close(sm.timeoutChan)
 }
 
 // SendEvent sends an event to the state machine with debouncing
@@ -295,13 +311,13 @@ func (sm *BatteryStateMachine) SendEvent(event BatteryEvent) {
 	sm.Lock()
 	lastTime, exists := sm.lastEventTime[event]
 	now := time.Now()
-	
+
 	// Skip if this event was sent too recently (except for critical events)
 	if exists && now.Sub(lastTime) < sm.eventDebounce {
 		// Allow certain critical events to bypass debouncing
 		switch event {
-		case EventBatteryInserted, EventBatteryRemoved, 
-		     EventCommandFailed, EventStateVerified, EventStateVerificationFailed:
+		case EventBatteryInserted, EventBatteryRemoved,
+			EventCommandFailed, EventStateVerified, EventStateVerificationFailed:
 			// Allow these critical events through
 		default:
 			// Debounce non-critical events
@@ -310,10 +326,10 @@ func (sm *BatteryStateMachine) SendEvent(event BatteryEvent) {
 			return
 		}
 	}
-	
+
 	sm.lastEventTime[event] = now
 	sm.Unlock()
-	
+
 	select {
 	case sm.eventQueue <- event:
 		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Event %s queued (queue depth: %d)", event, len(sm.eventQueue)))
@@ -386,7 +402,7 @@ func (sm *BatteryStateMachine) processEvent(event BatteryEvent) {
 		sm.Unlock()
 		err = transition.Action(sm, event)
 		sm.Lock()
-		
+
 		// Verify state hasn't changed during action execution
 		if sm.currentState != currentState {
 			sm.logger(hal.LogLevelWarning, fmt.Sprintf("State changed during action execution from %s to %s, aborting transition", currentState, sm.currentState))
@@ -447,4 +463,31 @@ func (sm *BatteryStateMachine) CanTransition(event BatteryEvent) bool {
 // GetEventQueueDepth returns the current number of events in the queue
 func (sm *BatteryStateMachine) GetEventQueueDepth() int {
 	return len(sm.eventQueue)
+}
+
+// stateTimeoutChecker monitors state durations and sends timeout events
+func (sm *BatteryStateMachine) stateTimeoutChecker() {
+	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-sm.timeoutChan:
+			return
+		case <-ticker.C:
+			sm.RLock()
+			currentState := sm.currentState
+			lastChange := sm.lastStateChange
+			sm.RUnlock()
+
+			// Check if current state has a timeout configured
+			if timeout, exists := sm.stateTimeouts[currentState]; exists {
+				elapsed := time.Since(lastChange)
+				if elapsed > timeout {
+					sm.logger(hal.LogLevelWarning, fmt.Sprintf("State %s timeout exceeded (%v > %v), sending timeout event", currentState, elapsed, timeout))
+					sm.SendEvent(EventStateTimeout)
+				}
+			}
+		}
+	}
 }

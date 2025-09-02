@@ -33,7 +33,7 @@ func (r *BatteryReader) updateRedisStatus() error {
 	// Serialize Redis updates to prevent race conditions
 	r.service.redisMutex.Lock()
 	defer r.service.redisMutex.Unlock()
-	
+
 	if r.service.redis == nil {
 		return fmt.Errorf("Redis client not initialized")
 	}
@@ -271,4 +271,3 @@ func (s *Service) updateVehicleState() {
 		}
 	}
 }
-

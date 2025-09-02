@@ -17,15 +17,15 @@ const (
 	maxRetries    = 3
 	readTimeout   = 250 * time.Millisecond
 	maxUIDSize    = 10 // Maximum size of NFC tag UID
-	
-	i2cMaxRetries    = 10
-	i2cRetryTimeUs   = 1000 // microseconds
+
+	i2cMaxRetries     = 10
+	i2cRetryTimeUs    = 1000 // microseconds
 	paramCheckRetries = 3
-	maxTotalDuration = 2750 // ms
-	
+	maxTotalDuration  = 2750 // ms
+
 	// Error recovery parameters
 	maxConsecutive0300Errors = 3 // Only reinitialize after multiple 0300 errors
-	errorRecoveryDelay = 10 * time.Millisecond
+	errorRecoveryDelay       = 10 * time.Millisecond
 )
 
 // State represents the state of the PN7150 HAL
@@ -60,25 +60,25 @@ func (s state) String() string {
 // PN7150 implements the HAL interface for the NXP PN7150 NFC controller
 type PN7150 struct {
 	sync.Mutex
-	state               state
-	fd                  int
-	devicePath          string // Store the actual device path
-	logCallback         LogCallback
-	txBuf               [256]byte
-	txSize              int
-	rxBuf               []byte
-	tagSelected         bool
-	numTags             int
-	tags                []Tag
-	debug               bool
-	transitionTableSent bool      // Track whether RF transition table has been sent
-	consecutive0300Errors int     // Track consecutive 0300 errors
-	
+	state                 state
+	fd                    int
+	devicePath            string // Store the actual device path
+	logCallback           LogCallback
+	txBuf                 [256]byte
+	txSize                int
+	rxBuf                 []byte
+	tagSelected           bool
+	numTags               int
+	tags                  []Tag
+	debug                 bool
+	transitionTableSent   bool // Track whether RF transition table has been sent
+	consecutive0300Errors int  // Track consecutive 0300 errors
+
 	// Channel-based tag detection
-	tagEventChan        chan TagEvent
-	tagEventReaderStop  chan struct{}
+	tagEventChan          chan TagEvent
+	tagEventReaderStop    chan struct{}
 	tagEventReaderRunning bool
-	detectionFailures   int // Track consecutive detection failures for departure detection
+	detectionFailures     int // Track consecutive detection failures for departure detection
 }
 
 func NewPN7150(devName string, logCallback LogCallback, app interface{}, standbyEnabled, lpcdEnabled bool, debugMode bool) (*PN7150, error) {
@@ -88,13 +88,13 @@ func NewPN7150(devName string, logCallback LogCallback, app interface{}, standby
 	}
 
 	hal := &PN7150{
-		fd:              fd,
-		devicePath:      devName, // Store the device path
-		logCallback:     logCallback,
-		rxBuf:           make([]byte, nciBufferSize),
-		tags:            make([]Tag, maxTags),
-		debug:           debugMode,
-		tagEventChan:    make(chan TagEvent, 10), // Buffered channel for tag events
+		fd:                 fd,
+		devicePath:         devName, // Store the device path
+		logCallback:        logCallback,
+		rxBuf:              make([]byte, nciBufferSize),
+		tags:               make([]Tag, maxTags),
+		debug:              debugMode,
+		tagEventChan:       make(chan TagEvent, 10), // Buffered channel for tag events
 		tagEventReaderStop: make(chan struct{}),
 	}
 
@@ -141,7 +141,7 @@ func (p *PN7150) Initialize() error {
 	var lastErr error
 	var resp []byte
 	var err error
-	
+
 	for initRetry := 0; initRetry < maxInitRetries; initRetry++ {
 		if initRetry > 0 {
 			if p.logCallback != nil {
@@ -169,10 +169,10 @@ func (p *PN7150) Initialize() error {
 			lastErr = fmt.Errorf("core init failed: %v", err)
 			continue
 		}
-		
+
 		// If we got here, initialization succeeded
 		lastErr = nil
-		
+
 		// Extract firmware version from the Core Init response
 		if len(resp) >= 20 {
 			hwVer := resp[17]
@@ -191,7 +191,6 @@ func (p *PN7150) Initialize() error {
 		p.Unlock()
 		return lastErr
 	}
-
 
 	// Send NCI Proprietary Activation command
 	propActCmd := []byte{
@@ -248,7 +247,7 @@ func (p *PN7150) Initialize() error {
 		if p.logCallback != nil {
 			p.logCallback(LogLevelWarning, "Writing NFC parameters")
 		}
-		
+
 		// Set each parameter
 		for _, param := range params {
 			configCmd := []byte{
@@ -280,7 +279,7 @@ func (p *PN7150) Initialize() error {
 				return fmt.Errorf("parameter configuration failed with status: %02x", nciResp.Status)
 			}
 		}
-		
+
 		// Verify the parameters were written correctly
 		for _, param := range params {
 			err := p.checkParam(param.id, param.value)
@@ -962,7 +961,7 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 		if lastErr == nil {
 			continue
 		}
-		
+
 		// Otherwise we have an error, add delay and retry
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1111,7 +1110,7 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 		if lastErr == nil {
 			continue
 		}
-		
+
 		// Otherwise we have an error, add delay and retry
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1157,7 +1156,7 @@ func (p *PN7150) SelectTag(tagIdx uint) error {
 		if err != nil {
 			return fmt.Errorf("deactivate tag failed: %v", err)
 		}
-		
+
 		// Wait for deactivation notification
 		err = p.awaitNotification(0x0106, 250) // RF_DEACTIVATE notification
 		if err != nil {
@@ -1168,35 +1167,35 @@ func (p *PN7150) SelectTag(tagIdx uint) error {
 
 	// Select the given tag
 	cmd := []byte{
-		0x21, // MT=CMD (1 << 5), GID=RF
-		0x04, // OID=DISCOVER_SELECT
-		0x03, // Length
+		0x21,             // MT=CMD (1 << 5), GID=RF
+		0x04,             // OID=DISCOVER_SELECT
+		0x03,             // Length
 		byte(tagIdx + 1), // RF Discovery ID (1-based)
 		byte(p.tags[tagIdx].RFProtocol),
 		0x00, // RF Interface - will be set below
 	}
-	
+
 	// Set appropriate interface based on protocol
 	if p.tags[tagIdx].RFProtocol == RFProtocolISODEP {
 		cmd[5] = nciRFInterfaceISODEP
 	} else {
 		cmd[5] = nciRFInterfaceFrame
 	}
-	
+
 	resp, err := p.transfer(cmd)
 	if err != nil {
 		return fmt.Errorf("select tag command failed: %v", err)
 	}
-	
+
 	nciResp, err := parseNCIResponse(resp)
 	if err != nil {
 		return fmt.Errorf("failed to parse select response: %v", err)
 	}
-	
+
 	if !isSuccessResponse(nciResp) {
 		return fmt.Errorf("select tag failed with status: %02x", nciResp.Status)
 	}
-	
+
 	// Wait for tag activation
 	err = p.awaitNotification(0x0105, 250) // RF_INTF_ACTIVATED notification
 	if err != nil {
@@ -1205,7 +1204,7 @@ func (p *PN7150) SelectTag(tagIdx uint) error {
 		}
 		return err
 	}
-	
+
 	p.tagSelected = true
 	return nil
 }
@@ -1219,7 +1218,7 @@ func (p *PN7150) GetTagEventChannel() <-chan TagEvent {
 func (p *PN7150) SetTagEventReaderEnabled(enabled bool) {
 	p.Lock()
 	defer p.Unlock()
-	
+
 	if enabled && !p.tagEventReaderRunning {
 		p.tagEventReaderRunning = true
 		go p.tagEventReader()
@@ -1247,20 +1246,20 @@ func (p *PN7150) handleSeriousErrorWithReinit(err error, operation string) error
 	if err == unix.EINTR || err == unix.EAGAIN || err == unix.ETIMEDOUT {
 		return err
 	}
-	
+
 	if p.logCallback != nil {
 		p.logCallback(LogLevelError, fmt.Sprintf("%s failed with serious error: %v - performing full HAL reinitialization", operation, err))
 	}
-	
+
 	// Release lock before reinitialization
 	p.Unlock()
 	reinitErr := p.FullReinitialize()
 	p.Lock()
-	
+
 	if reinitErr != nil {
 		return fmt.Errorf("%s failed and reinitialization failed: %v (original: %v)", operation, reinitErr, err)
 	}
-	
+
 	return fmt.Errorf("%s failed: %v", operation, err)
 }
 
@@ -1268,11 +1267,11 @@ func (p *PN7150) handleSeriousErrorWithReinit(err error, operation string) error
 // Returns true if the operation should continue retrying, false if it should abort
 func (p *PN7150) handle0300Error(operation string) (bool, error) {
 	p.consecutive0300Errors++
-	
+
 	if p.logCallback != nil {
 		p.logCallback(LogLevelWarning, fmt.Sprintf("0300 error in %s (occurrence %d/%d)", operation, p.consecutive0300Errors, maxConsecutive0300Errors))
 	}
-	
+
 	// Only do full reinitialization after multiple consecutive 0300 errors
 	if p.consecutive0300Errors >= maxConsecutive0300Errors {
 		if p.logCallback != nil {
@@ -1293,7 +1292,7 @@ func (p *PN7150) handle0300Error(operation string) (bool, error) {
 		p.consecutive0300Errors = 0
 		return false, fmt.Errorf("aborted %s after HAL reinitialization", operation)
 	}
-	
+
 	// For non-consecutive errors, just retry
 	time.Sleep(errorRecoveryDelay)
 	return true, fmt.Errorf("0300 communication error")
@@ -1324,7 +1323,7 @@ func (p *PN7150) handleCreditNotification() ([]byte, error) {
 		}
 		return nil, fmt.Errorf("performed full HAL reinitialization after credit timeout")
 	}
-	
+
 	return resp, nil
 }
 
@@ -1332,7 +1331,7 @@ func (p *PN7150) handleCreditNotification() ([]byte, error) {
 func (p *PN7150) awaitNotification(msgID uint16, timeoutMs uint) error {
 	startTime := time.Now()
 	remainingTimeout := time.Duration(timeoutMs) * time.Millisecond
-	
+
 	for {
 		// Check if we've exceeded the timeout
 		elapsed := time.Since(startTime)
@@ -1342,16 +1341,16 @@ func (p *PN7150) awaitNotification(msgID uint16, timeoutMs uint) error {
 			}
 			return fmt.Errorf("timeout waiting for notification 0x%04X", msgID)
 		}
-		
+
 		// Calculate remaining timeout
 		remainingTimeout = time.Duration(timeoutMs)*time.Millisecond - elapsed
-		
+
 		// Try to read a packet with the remaining timeout
 		resp, err := p.transferWithTimeout(nil, remainingTimeout)
 		if err != nil {
 			return err
 		}
-		
+
 		// Check if this is the notification we're waiting for
 		if len(resp) >= 3 {
 			mt := (resp[0] >> nciMsgTypeBit) & 0x03
@@ -1364,7 +1363,7 @@ func (p *PN7150) awaitNotification(msgID uint16, timeoutMs uint) error {
 				}
 			}
 		}
-		
+
 		// Update elapsed time for next iteration
 		startTime = time.Now()
 	}
@@ -1388,34 +1387,34 @@ func (p *PN7150) checkRFTransition(id, offset byte, expectedValue []byte) error 
 			id,
 			offset,
 		}
-		
+
 		resp, err := p.transfer(cmd)
 		if err != nil {
 			return err
 		}
-		
+
 		// Parse response
 		if len(resp) < 5+len(expectedValue) {
 			return fmt.Errorf("invalid RF_GET_TRANSITION_RSP length")
 		}
-		
+
 		// Check response format
 		if resp[4] != byte(len(expectedValue)) {
 			return fmt.Errorf("invalid RF_GET_TRANSITION_RSP format")
 		}
-		
+
 		// Check if value matches
 		if bytes.Equal(resp[5:5+len(expectedValue)], expectedValue) {
 			return nil // Success
 		}
-		
+
 		if check < paramCheckRetries-1 {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelWarning, fmt.Sprintf("RF transition id=0x%02X offset=0x%02X mismatch, retry %d/%d", id, offset, check+1, paramCheckRetries))
 			}
 		}
 	}
-	
+
 	return fmt.Errorf("RF transition id=0x%02X offset=0x%02X incorrect after %d checks", id, offset, paramCheckRetries)
 }
 
@@ -1431,17 +1430,17 @@ func (p *PN7150) checkParam(paramID uint16, expectedValue []byte) error {
 			byte(paramID >> 8),
 			byte(paramID & 0xFF),
 		}
-		
+
 		resp, err := p.transfer(cmd)
 		if err != nil {
 			return err
 		}
-		
+
 		// Parse response
 		if len(resp) < 8+len(expectedValue) {
 			return fmt.Errorf("invalid CORE_GET_CONFIG_RSP length")
 		}
-		
+
 		// Check response format
 		if resp[4] != 1 || // Number of parameters
 			resp[5] != byte(paramID>>8) ||
@@ -1449,19 +1448,19 @@ func (p *PN7150) checkParam(paramID uint16, expectedValue []byte) error {
 			resp[7] != byte(len(expectedValue)) {
 			return fmt.Errorf("invalid CORE_GET_CONFIG_RSP format")
 		}
-		
+
 		// Check if value matches
 		if bytes.Equal(resp[8:8+len(expectedValue)], expectedValue) {
 			return nil // Success
 		}
-		
+
 		if check < paramCheckRetries-1 {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelWarning, fmt.Sprintf("Parameter 0x%04X mismatch, retry %d/%d", paramID, check+1, paramCheckRetries))
 			}
 		}
 	}
-	
+
 	return fmt.Errorf("parameter 0x%04X incorrect after %d checks", paramID, paramCheckRetries)
 }
 
@@ -1481,7 +1480,7 @@ func (p *PN7150) flushReadBuffer() error {
 			// No data available or error
 			return nil
 		}
-		
+
 		// Read and discard the data
 		r, err := unix.Read(p.fd, buf)
 		if err != nil {
@@ -1517,7 +1516,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 				// Success
 				break
 			}
-			
+
 			if err != nil {
 				writeErr = err
 				// Retry on NACK or arbitration lost
@@ -1530,7 +1529,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 				}
 				return nil, fmt.Errorf("write error: %v", err)
 			}
-			
+
 			if n != len(tx) {
 				writeErr = fmt.Errorf("incomplete write: %d != %d", n, len(tx))
 				if i < i2cMaxRetries {
@@ -1539,7 +1538,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 				}
 			}
 		}
-		
+
 		if writeErr != nil {
 			return nil, writeErr
 		}
@@ -1589,7 +1588,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 				// Success
 				break
 			}
-			
+
 			if err != nil {
 				if err == unix.EINTR {
 					continue
@@ -1612,7 +1611,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 				break
 			}
 		}
-		
+
 		if readErr != nil {
 			return nil, readErr
 		}
@@ -1632,7 +1631,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 		// Basic validation
 		mt := (p.rxBuf[0] >> nciMsgTypeBit) & 0x03
 		pbf := p.rxBuf[0] & 0x10
-		
+
 		if mt == nciMsgTypeCommand || pbf != 0 {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelWarning, fmt.Sprintf("Invalid header: MT=%d, PBF=%d", mt, pbf))
@@ -1640,7 +1639,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 			p.flushReadBuffer()
 			return nil, fmt.Errorf("invalid NCI header")
 		}
-		
+
 		// Additional validation based on message type
 		if mt == nciMsgTypeData {
 			// For data messages, check connection ID is valid
@@ -1677,7 +1676,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 				}
 				return nil, fmt.Errorf("incomplete message: no payload available")
 			}
-			
+
 			// Read payload with retry logic
 			for retry := 0; retry <= i2cMaxRetries; retry++ {
 				payloadN, err := unix.Read(p.fd, p.rxBuf[3:3+payloadLen])
@@ -1685,7 +1684,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 					// Success
 					break
 				}
-				
+
 				if err != nil {
 					if err == unix.ENXIO && retry < i2cMaxRetries {
 						// Address NACK, retry
@@ -1694,7 +1693,7 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 					}
 					return nil, fmt.Errorf("read payload error: %v", err)
 				}
-				
+
 				if payloadN != payloadLen {
 					if retry < i2cMaxRetries {
 						time.Sleep(time.Duration(i2cRetryTimeUs) * time.Microsecond)
@@ -1802,19 +1801,19 @@ func (p *PN7150) tagEventReader() {
 					}
 					return
 				}
-				
+
 				// Increment detection failures for robust departure detection
 				p.Lock()
 				p.detectionFailures++
 				failures := p.detectionFailures
 				p.Unlock()
-				
+
 				// If we have consecutive failures and previously had tags, treat as departure
 				if failures >= 3 && len(previousTags) > 0 {
 					if p.logCallback != nil {
 						p.logCallback(LogLevelWarning, fmt.Sprintf("Tag detection failed %d times, treating as departure", failures))
 					}
-					
+
 					// Generate departure event for each previously detected tag
 					for _, prevTag := range previousTags {
 						tagCopy := prevTag
@@ -1833,7 +1832,7 @@ func (p *PN7150) tagEventReader() {
 							}
 						}
 					}
-					
+
 					// Clear previous tags and reset failure counter
 					previousTags = nil
 					p.Lock()
@@ -1842,7 +1841,7 @@ func (p *PN7150) tagEventReader() {
 				}
 				continue
 			}
-			
+
 			// Reset detection failures on successful detection
 			p.Lock()
 			p.detectionFailures = 0

@@ -74,7 +74,7 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 	// For active battery (slot 0), skip initial status read to speed up activation
 	if isActiveBattery {
 		sm.logger(hal.LogLevelInfo, "Fast initialization for active battery - assuming idle state")
-		
+
 		// Set up battery data with assumed idle state
 		sm.reader.dataMutex.Lock()
 		sm.reader.readyToScoot = true
@@ -89,7 +89,6 @@ func (sm *BatteryStateMachine) actionInitializeBattery(machine *BatteryStateMach
 			sm.logger(hal.LogLevelDebug, "Sending EventReadyToScoot after fast initialization")
 			sm.SendEvent(EventReadyToScoot)
 		}()
-
 
 		return nil
 	}
@@ -168,7 +167,7 @@ func (sm *BatteryStateMachine) actionBatteryReady(machine *BatteryStateMachine, 
 		sm.reader.service.Lock()
 		seatboxOpen := sm.reader.service.seatboxOpen
 		sm.reader.service.Unlock()
-		
+
 		if seatboxOpen {
 			// Send event asynchronously
 			go func() {
@@ -230,12 +229,20 @@ func (sm *BatteryStateMachine) actionSeatboxClosed(machine *BatteryStateMachine,
 	return nil
 }
 
-
-
 func (sm *BatteryStateMachine) actionRequestActivation(machine *BatteryStateMachine, event BatteryEvent) error {
 	// Only active role battery can be activated
 	if sm.reader.role != BatteryRoleActive {
 		return nil
+	}
+
+	// Check seatbox state first - CRITICAL: never activate while seatbox is open
+	sm.reader.service.Lock()
+	seatboxOpen := sm.reader.service.seatboxOpen
+	sm.reader.service.Unlock()
+
+	if seatboxOpen {
+		sm.logger(hal.LogLevelWarning, "SAFETY: Cannot activate battery while seatbox is open")
+		return fmt.Errorf("activation blocked: seatbox is open")
 	}
 
 	// Check pre-conditions
@@ -247,7 +254,7 @@ func (sm *BatteryStateMachine) actionRequestActivation(machine *BatteryStateMach
 	sm.reader.dataMutex.Unlock()
 
 	if !enabled || !ready || lowSOC {
-		return fmt.Errorf("activation preconditions not met: enabled=%v, ready=%v, lowSOC=%v", enabled, ready, lowSOC)
+		return fmt.Errorf("activation preconditions not met: enabled=%v, ready=%v, lowSOC=%v, seatboxOpen=%v", enabled, ready, lowSOC, seatboxOpen)
 	}
 
 	if state == BatteryStateActive {
@@ -297,7 +304,7 @@ func (sm *BatteryStateMachine) actionRequestActivation(machine *BatteryStateMach
 			sm.SendEvent(EventStateVerified)
 		} else {
 			sm.logger(hal.LogLevelInfo, fmt.Sprintf("Battery state verification failed (%s), attempting recovery", newState))
-			
+
 			// Try recovery once
 			if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandInsertedInScooter); err != nil {
 				sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to send recovery command: %v", err))
@@ -448,7 +455,7 @@ func (sm *BatteryStateMachine) actionHeartbeatInError(machine *BatteryStateMachi
 		sm.reader.dataMutex.Lock()
 		sm.reader.halReinitCount = 0
 		sm.reader.dataMutex.Unlock()
-		
+
 		// Send battery removed event to handle departure
 		go func() {
 			time.Sleep(timeCmd)
@@ -472,7 +479,7 @@ func (sm *BatteryStateMachine) actionHeartbeatInError(machine *BatteryStateMachi
 			// Return nil here because we have successfully handled the error by confirming departure.
 			return nil
 		}
-		
+
 		return err
 	}
 
@@ -509,9 +516,9 @@ func (sm *BatteryStateMachine) actionBatteryAlreadyActive(machine *BatteryStateM
 }
 
 func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, event BatteryEvent) error {
-	// Only battery 0 handles heartbeat logic
-	if sm.reader.index != 0 {
-		return nil
+	// Handle different logic for active vs inactive batteries
+	if sm.reader.IsInactive() {
+		return sm.actionMaintenanceHeartbeat(machine, event)
 	}
 
 	// Get current state information
@@ -553,7 +560,7 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 		if sm.handleCmdError(err) {
 			return nil
 		}
-		
+
 		// Wait for command to complete, then read status to verify
 		time.Sleep(timeCmd)
 		if err := sm.reader.readBatteryStatus(); err != nil {
@@ -563,7 +570,7 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 			sm.reader.dataMutex.Lock()
 			batteryState := sm.reader.data.State
 			sm.reader.dataMutex.Unlock()
-			
+
 			if batteryState == BatteryStateActive {
 				sm.logger(hal.LogLevelInfo, "Battery activated successfully")
 				go func() {
@@ -578,7 +585,7 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 				}()
 			}
 		}
-		
+
 		return err
 	} else {
 		// Battery is already active, send heartbeat and verify
@@ -602,7 +609,7 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 				charge := sm.reader.data.Charge
 				voltage := sm.reader.data.Voltage
 				sm.reader.dataMutex.Unlock()
-				
+
 				if batteryState != BatteryStateActive {
 					sm.logger(hal.LogLevelWarning, fmt.Sprintf("Battery state changed unexpectedly to %s during heartbeat", batteryState))
 				} else {
@@ -615,15 +622,70 @@ func (sm *BatteryStateMachine) actionHeartbeat(machine *BatteryStateMachine, eve
 	return nil
 }
 
+func (sm *BatteryStateMachine) actionMaintenanceHeartbeat(machine *BatteryStateMachine, event BatteryEvent) error {
+	sm.logger(hal.LogLevelDebug, fmt.Sprintf("Maintenance heartbeat for inactive battery %d", sm.reader.index))
 
+	// For inactive batteries, we only need to read status to detect changes
+	// No commands are sent to avoid interfering with battery operation
+	prevPresent := false
+	sm.reader.dataMutex.RLock()
+	prevPresent = sm.reader.data.Present
+	prevState := sm.reader.data.State
+	sm.reader.dataMutex.RUnlock()
 
+	// Attempt to read battery status
+	err := sm.reader.readBatteryStatus()
+	if err != nil {
+		// Check if this is a tag departure error
+		if sm.handleCmdError(err) {
+			// Tag departure was handled, check if we need to update state
+			if prevPresent {
+				sm.logger(hal.LogLevelInfo, fmt.Sprintf("Inactive battery %d departed during maintenance poll", sm.reader.index))
+			}
+			return nil
+		}
 
+		// For other errors, if battery was previously present, it might have departed
+		if prevPresent {
+			sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to read inactive battery %d status, treating as departure: %v", sm.reader.index, err))
+			sm.reader.handleTagAbsent()
+		}
+
+		return err
+	}
+
+	// Read was successful - check for state changes
+	sm.reader.dataMutex.RLock()
+	currentPresent := sm.reader.data.Present
+	currentState := sm.reader.data.State
+	charge := sm.reader.data.Charge
+	voltage := sm.reader.data.Voltage
+	sm.reader.dataMutex.RUnlock()
+
+	// Detect new insertions
+	if !prevPresent && currentPresent {
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Inactive battery %d insertion detected during maintenance poll", sm.reader.index))
+		// The readBatteryStatus already updated the data and Redis, so we just need to log
+	}
+
+	// Detect state changes
+	if prevPresent && currentPresent && prevState != currentState {
+		sm.logger(hal.LogLevelInfo, fmt.Sprintf("Inactive battery %d state changed: %s -> %s", sm.reader.index, prevState, currentState))
+	}
+
+	// Log periodic status for monitoring
+	if currentPresent {
+		sm.logger(hal.LogLevelDebug, fmt.Sprintf("Inactive battery %d maintenance poll: SOC=%d%%, Voltage=%dmV, State=%s",
+			sm.reader.index, charge, voltage, currentState))
+	}
+
+	return nil
+}
 
 func (sm *BatteryStateMachine) actionLowSOC(machine *BatteryStateMachine, event BatteryEvent) error {
 	sm.logger(hal.LogLevelWarning, "Battery SOC is low")
 	return sm.reader.updateRedisStatus()
 }
-
 
 func (sm *BatteryStateMachine) actionVehicleActive(machine *BatteryStateMachine, event BatteryEvent) error {
 	sm.logger(hal.LogLevelDebug, "Vehicle became active - ensuring battery is on")
@@ -669,20 +731,20 @@ func (sm *BatteryStateMachine) actionHALError(machine *BatteryStateMachine, even
 	sm.reader.dataMutex.Unlock()
 
 	sm.logger(hal.LogLevelError, "HAL error occurred - triggering full recovery sequence")
-	
+
 	// Update Redis first
 	if err := sm.reader.updateRedisStatus(); err != nil {
 		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis during HAL error: %v", err))
 	}
 
 	sm.logger(hal.LogLevelInfo, "Deinitializing HAL for recovery...")
-	
+
 	// Deinitialize the HAL
 	sm.reader.hal.Deinitialize()
-	
+
 	sm.logger(hal.LogLevelInfo, fmt.Sprintf("Waiting %v before reinitializing...", timeReinit))
 	time.Sleep(timeReinit)
-	
+
 	// Reinitialize the HAL
 	sm.logger(hal.LogLevelInfo, "Reinitializing HAL after recovery wait...")
 	if err := sm.reader.hal.Initialize(); err != nil {
@@ -690,15 +752,15 @@ func (sm *BatteryStateMachine) actionHALError(machine *BatteryStateMachine, even
 		// Schedule another recovery attempt via heartbeat
 		return err
 	}
-	
+
 	sm.logger(hal.LogLevelInfo, "HAL recovery sequence completed successfully")
-	
+
 	// Trigger a recovery event to transition out of error state
 	go func() {
 		time.Sleep(100 * time.Millisecond) // Small delay to let state settle
 		sm.SendEvent(EventHALRecovered)
 	}()
-	
+
 	return nil
 }
 
@@ -836,7 +898,7 @@ func (sm *BatteryStateMachine) actionLowSOCWhileActive(machine *BatteryStateMach
 
 func (sm *BatteryStateMachine) actionStartDiscovery(machine *BatteryStateMachine, event BatteryEvent) error {
 	sm.logger(hal.LogLevelInfo, "Tag may have departed. Starting discovery confirmation timeout...")
-	
+
 	// Cancel any pending operations immediately since tag might be gone
 	sm.reader.dataMutex.Lock()
 	if sm.reader.operationCancel != nil {
@@ -846,31 +908,31 @@ func (sm *BatteryStateMachine) actionStartDiscovery(machine *BatteryStateMachine
 	// Create new operation context for future operations
 	sm.reader.operationCtx, sm.reader.operationCancel = context.WithCancel(sm.reader.service.ctx)
 	sm.reader.dataMutex.Unlock()
-	
+
 	// Start a single timer. If a tag arrives, the FSM will transition away from
 	// StateDiscovering. If not, this timeout will fire.
 	go func() {
 		time.Sleep(timeDeparture) // 500ms confirmation timeout matching C's BMS_TIME_DEPARTURE
 		sm.SendEvent(EventDiscoveryTimeout)
 	}()
-	
+
 	return nil
 }
 
 func (sm *BatteryStateMachine) actionStartWaitingForArrival(machine *BatteryStateMachine, event BatteryEvent) error {
 	sm.logger(hal.LogLevelDebug, "Discovery timed out - waiting for arrival")
-	
+
 	go func() {
 		time.Sleep(timeDeparture) // Another 250ms wait
 		sm.SendEvent(EventDiscoveryTimeout)
 	}()
-	
+
 	return nil
 }
 
 func (sm *BatteryStateMachine) actionHandleDeparture(machine *BatteryStateMachine, event BatteryEvent) error {
 	sm.logger(hal.LogLevelInfo, "Discovery timed out. Confirming battery is not present.")
-	
+
 	sm.reader.dataMutex.Lock()
 	// Only update if the state was previously present
 	if sm.reader.data.Present {
@@ -884,8 +946,25 @@ func (sm *BatteryStateMachine) actionHandleDeparture(machine *BatteryStateMachin
 		}
 	}
 	sm.reader.dataMutex.Unlock()
-	
+
 	return nil
 }
 
+func (sm *BatteryStateMachine) actionStateTimeout(machine *BatteryStateMachine, event BatteryEvent) error {
+	sm.logger(hal.LogLevelWarning, "State timeout reached - assuming battery has been removed")
 
+	// Mark battery as not present to force cleanup
+	sm.reader.dataMutex.Lock()
+	sm.reader.data.Present = false
+	sm.reader.justInserted = false
+	sm.reader.readyToScoot = false
+
+	// Update Redis to reflect battery removal
+	if err := sm.reader.updateRedisStatus(); err != nil {
+		sm.logger(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after state timeout: %v", err))
+	}
+	sm.reader.dataMutex.Unlock()
+
+	// Start discovery to detect if battery is actually still present
+	return nil
+}

@@ -24,8 +24,8 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 		cancel:        cancel,
 		debug:         debugMode, // Store debugMode
 		// Initialize new fields
-		vehicleState:  "", // Will be fetched
-		readers:       make([]*BatteryReader, len(batteryConfig.Readers)),
+		vehicleState: "", // Will be fetched
+		readers:      make([]*BatteryReader, len(batteryConfig.Readers)),
 	}
 
 	// Initialize Redis client
@@ -44,7 +44,7 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 			s.logger.Printf("Reader %d is disabled in configuration", readerConfig.Index)
 			continue
 		}
-		
+
 		reader, err := s.createReader(readerConfig.Index, readerConfig.Role, readerConfig.DeviceName, readerConfig.LogLevel)
 		if err != nil {
 			s.logger.Printf("Failed to create reader %d: %v", readerConfig.Index, err)
@@ -59,14 +59,14 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 // createReader creates a new battery reader instance
 func (s *Service) createReader(index int, role BatteryRole, deviceName string, logLevel int) (*BatteryReader, error) {
 	reader := &BatteryReader{
-		index:                   index,
-		role:                    role,
-		deviceName:              deviceName,
-		logLevel:                logLevel,
-		service:                 s,
-		stopChan:                make(chan struct{}),
-		lastReinitialization:    time.Now(), // Initialize with current time
-		successSignal:           make(chan struct{}, 10), // Initialize with buffer for non-blocking sends
+		index:                index,
+		role:                 role,
+		deviceName:           deviceName,
+		logLevel:             logLevel,
+		service:              s,
+		stopChan:             make(chan struct{}),
+		lastReinitialization: time.Now(),              // Initialize with current time
+		successSignal:        make(chan struct{}, 10), // Initialize with buffer for non-blocking sends
 	}
 
 	// Create NFC HAL
@@ -115,14 +115,14 @@ func (s *Service) Stop() {
 			wg.Add(1)
 			go func(r *BatteryReader) {
 				defer wg.Done()
-				
+
 				// Create a channel to signal completion
 				done := make(chan struct{})
 				go func() {
 					r.Stop()
 					close(done)
 				}()
-				
+
 				// Wait for either completion or timeout
 				select {
 				case <-done:

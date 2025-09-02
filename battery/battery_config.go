@@ -7,7 +7,7 @@ const (
 	// BatteryRoleActive is for batteries that need to be activated and monitored frequently
 	// Multiple batteries can have this role and will all be activated
 	BatteryRoleActive BatteryRole = "active"
-	
+
 	// BatteryRoleInactive is for batteries that only need periodic maintenance polling
 	BatteryRoleInactive BatteryRole = "inactive"
 )
@@ -16,16 +16,16 @@ const (
 type BatteryReaderConfig struct {
 	// Index is the reader index (0 or 1)
 	Index int
-	
+
 	// Role defines whether this is an active or inactive battery
 	Role BatteryRole
-	
+
 	// Enabled determines if this reader should be started
 	Enabled bool
-	
+
 	// DeviceName is the NFC device path
 	DeviceName string
-	
+
 	// LogLevel for this specific reader
 	LogLevel int
 }
@@ -34,7 +34,6 @@ type BatteryReaderConfig struct {
 type BatteryConfiguration struct {
 	Readers []BatteryReaderConfig
 }
-
 
 // IsActive returns true if the battery reader has an active role
 func (r *BatteryReader) IsActive() bool {

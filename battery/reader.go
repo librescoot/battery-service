@@ -14,7 +14,7 @@ func (r *BatteryReader) Start() error {
 	// Enable the reader by default
 	r.enabled = true
 	r.isPoweredDown = false // Ensure we start with the reader powered up (0 = not powered down)
-	
+
 	// Initialize operation context for cancelling operations when tag departs
 	r.swapOperationContext()
 
@@ -95,11 +95,11 @@ func (r *BatteryReader) monitorTags() {
 	for {
 		// Get the tag event channel from HAL
 		tagEventChan := r.hal.GetTagEventChannel()
-		
+
 		select {
 		case <-r.stopChan:
 			return
-			
+
 		case <-time.After(1 * time.Second):
 			// Timeout to refresh channel periodically (handles channel recreation after HAL reinit)
 			continue
@@ -111,7 +111,7 @@ func (r *BatteryReader) monitorTags() {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-			
+
 			// Check if the reader is temporarily powered down
 			r.dataMutex.RLock()
 			isPoweredDown := r.isPoweredDown
@@ -123,7 +123,7 @@ func (r *BatteryReader) monitorTags() {
 			}
 
 			// Check if the event contains a serious error
-			if event.Error != nil && (strings.Contains(event.Error.Error(), "unexpected reset") || 
+			if event.Error != nil && (strings.Contains(event.Error.Error(), "unexpected reset") ||
 				strings.Contains(event.Error.Error(), "serious error")) {
 				r.logCallback(hal.LogLevelError, fmt.Sprintf("HAL reported serious error: %v", event.Error))
 				// Trigger HAL error event in state machine
@@ -135,7 +135,7 @@ func (r *BatteryReader) monitorTags() {
 			case hal.TagArrival:
 				if event.Tag != nil {
 					r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Tag arrived: %s tag with ID: %x", event.Tag.RFProtocol, event.Tag.ID))
-					
+
 					// Check if it's a valid battery tag
 					if event.Tag.RFProtocol == hal.RFProtocolT2T || event.Tag.RFProtocol == hal.RFProtocolISODEP {
 						// Send tag arrived event for discovery states
@@ -165,7 +165,7 @@ func (r *BatteryReader) handleTagPresent() {
 
 	if !r.data.Present {
 		r.data.Present = true // Mark as present immediately
-		r.halReinitCount = 0 // Reset HAL reinit counter for fresh battery
+		r.halReinitCount = 0  // Reset HAL reinit counter for fresh battery
 		r.dataMutex.Unlock()
 
 		r.logCallback(hal.LogLevelInfo, "Battery inserted")
@@ -233,7 +233,7 @@ func (r *BatteryReader) readBatteryStatus() error {
 				r.stateMachine.SendEvent(EventTagDeparted)
 				return fmt.Errorf("tag departed, HAL is in discovering state")
 			}
-			
+
 			lastMainError = fmt.Errorf("attempt %d: invalid HAL state for reading: %s", attempt, halState)
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("%s. HAL state: %s", lastMainError.Error(), halState))
 			if attempt < maxAttemptsAfterHALRecreation {
@@ -253,18 +253,18 @@ func (r *BatteryReader) readBatteryStatus() error {
 
 		// Read Status0
 		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Attempt %d: Reading Status0...", attempt))
-		
+
 		// Use operation context so reads can be cancelled when tag departs
 		data, err = r.readRegisterWithRetry(r.getOperationContext(), addrStatus0)
 		if err != nil {
 			lastMainError = fmt.Errorf("attempt %d: failed to read Status0: %w", attempt, err)
-			
+
 			// Don't retry HAL recovery for context cancelled errors (tag departed)
 			if strings.Contains(err.Error(), "context cancel") {
 				r.logCallback(hal.LogLevelDebug, "Status0 read cancelled due to tag departure, not retrying")
 				return lastMainError
 			}
-			
+
 			if errors.Is(err, errHALRecreatedRetryRead) && attempt < maxAttemptsAfterHALRecreation {
 				r.logCallback(hal.LogLevelWarning, "HAL recreated during Status0 read, retrying entire status read.")
 				continue // Retry the entire readBatteryStatus sequence
@@ -337,13 +337,13 @@ func (r *BatteryReader) readBatteryStatus() error {
 		data, err = r.readRegisterWithRetry(r.getOperationContext(), addrStatus1)
 		if err != nil {
 			lastMainError = fmt.Errorf("attempt %d: failed to read Status1: %w", attempt, err)
-			
+
 			// Don't retry HAL recovery for context cancelled errors (tag departed)
 			if strings.Contains(err.Error(), "context cancel") {
 				r.logCallback(hal.LogLevelDebug, "Status1 read cancelled due to tag departure, not retrying")
 				return lastMainError
 			}
-			
+
 			if errors.Is(err, errHALRecreatedRetryRead) && attempt < maxAttemptsAfterHALRecreation {
 				r.logCallback(hal.LogLevelWarning, "HAL recreated during Status1 read, retrying entire status read.")
 				continue // Retry the entire readBatteryStatus sequence
@@ -382,13 +382,13 @@ func (r *BatteryReader) readBatteryStatus() error {
 		data, err = r.readRegisterWithRetry(r.getOperationContext(), addrStatus2)
 		if err != nil {
 			lastMainError = fmt.Errorf("attempt %d: failed to read Status2: %w", attempt, err)
-			
+
 			// Don't retry HAL recovery for context cancelled errors (tag departed)
 			if strings.Contains(err.Error(), "context cancel") {
 				r.logCallback(hal.LogLevelDebug, "Status2 read cancelled due to tag departure, not retrying")
 				return lastMainError
 			}
-			
+
 			if errors.Is(err, errHALRecreatedRetryRead) && attempt < maxAttemptsAfterHALRecreation {
 				r.logCallback(hal.LogLevelWarning, "HAL recreated during Status2 read, retrying entire status read.")
 				continue // Retry the entire readBatteryStatus sequence
@@ -428,7 +428,7 @@ func (r *BatteryReader) readBatteryStatus() error {
 		r.dataMutex.Lock()
 		r.halReinitCount = 0
 		r.dataMutex.Unlock()
-		
+
 		// Update Redis with the new status
 		if errUpdate := r.updateRedisStatus(); errUpdate != nil {
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after status read: %v", errUpdate))
@@ -502,7 +502,7 @@ func (r *BatteryReader) simpleHALRecovery() error {
 	r.halReinitCount++
 	reinitCount := r.halReinitCount
 	r.dataMutex.Unlock()
-	
+
 	r.logCallback(hal.LogLevelInfo, fmt.Sprintf("HAL reinit count: %d", reinitCount))
 
 	// Always use FullReinitialize which properly handles file descriptor renewal
@@ -517,9 +517,9 @@ func (r *BatteryReader) simpleHALRecovery() error {
 	}
 
 	r.logCallback(hal.LogLevelInfo, "Full HAL recovery completed successfully with file descriptor renewal")
-	
+
 	// Give the NFC hardware time to stabilize after reinitialization
 	time.Sleep(100 * time.Millisecond)
-	
+
 	return nil
 }

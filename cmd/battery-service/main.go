@@ -13,12 +13,12 @@ import (
 func main() {
 	// Parse command line flags
 	config := &battery.ServiceConfig{}
-	
+
 	// Redis configuration
 	flag.StringVar(&config.RedisServerAddress, "redis-server", "127.0.0.1", "Redis server address")
 	var redisPort uint
 	flag.UintVar(&redisPort, "redis-port", 6379, "Redis server port")
-	
+
 	// Battery service configuration
 	flag.BoolVar(&config.TestMainPower, "test-main-power", false, "Enable main power test mode")
 	var debugMode bool
@@ -85,4 +85,4 @@ func main() {
 
 	// Stop the service
 	service.Stop()
-} 
+}

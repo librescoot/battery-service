@@ -10,9 +10,15 @@ import (
 // startHeartbeat starts the heartbeat goroutine that sends periodic events to the state machine
 func (r *BatteryReader) startHeartbeat() {
 	go func() {
-		ticker := time.NewTicker(timeHeartbeatIntervalScooter)
+		// Use different intervals based on battery role
+		interval := timeHeartbeatIntervalScooter // Default for active batteries
+		if r.IsInactive() {
+			interval = timeBattery1MaintPollInterval // 5 minutes for inactive batteries
+		}
+
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		
+
 		var lastSuccessfulOperation time.Time = time.Now()
 		var consecutiveFailures int
 
@@ -20,7 +26,7 @@ func (r *BatteryReader) startHeartbeat() {
 			select {
 			case <-r.stopChan:
 				return
-			
+
 			case <-r.successSignal:
 				// A success signal was received. Reset the timer.
 				// First, drain any other pending signals from the channel
@@ -36,7 +42,7 @@ func (r *BatteryReader) startHeartbeat() {
 				}
 				lastSuccessfulOperation = time.Now()
 				consecutiveFailures = 0
-				
+
 			case <-ticker.C:
 				r.dataMutex.RLock()
 				present := r.data.Present
@@ -48,7 +54,7 @@ func (r *BatteryReader) startHeartbeat() {
 
 				// Send heartbeat event to state machine
 				r.stateMachine.SendEvent(EventHeartbeatTick)
-				
+
 				// Monitor queue depth every heartbeat
 				queueDepth := r.stateMachine.GetEventQueueDepth()
 				if queueDepth > 20 {
@@ -66,7 +72,16 @@ func (r *BatteryReader) startHeartbeat() {
 						reinitCount := r.halReinitCount
 						r.dataMutex.Unlock()
 						r.logCallback(hal.LogLevelInfo, fmt.Sprintf("HAL reinit count: %d", reinitCount))
-						
+
+						// If we've tried HAL recovery multiple times without success, assume tag departure
+						if reinitCount >= 5 {
+							r.logCallback(hal.LogLevelWarning, "Multiple HAL recoveries failed - assuming battery has been removed")
+							r.stateMachine.SendEvent(EventTagDeparted)
+							consecutiveFailures = 0
+							lastSuccessfulOperation = time.Now()
+							continue
+						}
+
 						// Trigger full HAL recovery
 						r.nfcMutex.Lock()
 						if err := r.hal.FullReinitialize(); err != nil {

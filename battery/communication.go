@@ -67,7 +67,7 @@ func (r *BatteryReader) readRegisterWithRetry(ctx context.Context, addr uint16) 
 				r.stateMachine.SendEvent(EventTagDeparted)
 				return nil, lastErr
 			}
-			
+
 			// Check if this is a 0300 recovery error - HAL recovered but needs retry
 			if strings.Contains(lastErr.Error(), "recovered from 0300 error") {
 				r.logCallback(hal.LogLevelInfo, "HAL recovered from 0300 error, retrying read immediately")
@@ -160,7 +160,7 @@ endReadRetryLoop: // Label to jump to for final error handling
 	if !verified {
 		err := fmt.Errorf("failed to read register 0x%04x after %d retries: %w", addr, maxReadRetries, lastErr)
 		r.logCallback(hal.LogLevelError, err.Error()) // Log the final error
-		
+
 		// Don't set communication error fault for context cancelled errors (tag departed)
 		if lastErr != nil && !strings.Contains(lastErr.Error(), "context cancel") {
 			r.data.Faults.CommunicationError = true
@@ -218,7 +218,6 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 			return fmt.Errorf("failed HAL recovery: %w", err)
 		}
 	}
-
 
 	// Ensure minimum time between commands (this applies to the pre-sequence commands too due to recursive calls)
 	if time.Since(r.lastCmd) < timeCmd {
@@ -306,7 +305,7 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 				r.stateMachine.SendEvent(EventTagDeparted)
 				return lastErr
 			}
-			
+
 			// Check if this is a 0300 recovery error - HAL recovered but needs retry
 			if strings.Contains(lastErr.Error(), "recovered from 0300 error") {
 				r.logCallback(hal.LogLevelInfo, "HAL recovered from 0300 error, retrying write immediately")
@@ -357,7 +356,7 @@ endWriteRetryLoop: // Label to jump to for final error handling
 
 	finalErr := fmt.Errorf("failed to send command %v after %d retries: %w", cmd, maxWriteRetries, lastErr)
 	r.logCallback(hal.LogLevelError, finalErr.Error())
-	
+
 	// Don't set communication error fault for context cancelled errors (tag departed)
 	if lastErr != nil && !strings.Contains(lastErr.Error(), "context cancel") {
 		r.data.Faults.CommunicationError = true

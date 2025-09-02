@@ -18,37 +18,37 @@ var errHALRecreatedRetryRead = fmt.Errorf("HAL was recreated, retry read operati
 // BatteryReader represents a single battery reader instance
 type BatteryReader struct {
 	// Lock ordering: ALWAYS acquire nfcMutex before dataMutex to prevent deadlocks
-	nfcMutex                         sync.Mutex           // Serializes access to NFC HAL operations (acquire first)
-	dataMutex                        sync.RWMutex         // Protects battery data and state (acquire second)
-	
-	index                            int
-	role                             BatteryRole          // Role of this battery (active or inactive)
-	hal                              hal.HAL
-	data                             BatteryData
-	enabled                          bool
-	deviceName                       string               // NFC device path
-	logLevel                         int                  // Log level for this reader
-	service                          *Service
-	lastCmd                          time.Time
-	justInserted                     bool
-	readyToScoot                     bool                 // Flag indicating battery responded with ReadyToScoot
-	stopChan                         chan struct{}        // Channel to signal goroutine shutdown
-	lastPublishedData                BatteryData          // Stores the state as of the last successful Redis update with PUBLISH
-	lastBattery1MaintPollTime        time.Time            // Tracks last maintenance poll for battery 1
-	lastIdleAsleepPollTime           time.Time            // Tracks last poll time for battery 0 when idle/asleep in stand-by
-	lastReinitialization             time.Time            // Track when HAL was last reinitialized
-	isPoweredDown                    bool                 // Indicates reader is temporarily powered down during low-frequency polling
-	stateMachine                     *BatteryStateMachine // State machine for managing battery transitions
-	
+	nfcMutex  sync.Mutex   // Serializes access to NFC HAL operations (acquire first)
+	dataMutex sync.RWMutex // Protects battery data and state (acquire second)
+
+	index                     int
+	role                      BatteryRole // Role of this battery (active or inactive)
+	hal                       hal.HAL
+	data                      BatteryData
+	enabled                   bool
+	deviceName                string // NFC device path
+	logLevel                  int    // Log level for this reader
+	service                   *Service
+	lastCmd                   time.Time
+	justInserted              bool
+	readyToScoot              bool                 // Flag indicating battery responded with ReadyToScoot
+	stopChan                  chan struct{}        // Channel to signal goroutine shutdown
+	lastPublishedData         BatteryData          // Stores the state as of the last successful Redis update with PUBLISH
+	lastBattery1MaintPollTime time.Time            // Tracks last maintenance poll for battery 1
+	lastIdleAsleepPollTime    time.Time            // Tracks last poll time for battery 0 when idle/asleep in stand-by
+	lastReinitialization      time.Time            // Track when HAL was last reinitialized
+	isPoweredDown             bool                 // Indicates reader is temporarily powered down during low-frequency polling
+	stateMachine              *BatteryStateMachine // State machine for managing battery transitions
+
 	// Operation cancellation context - cancelled when tag departs to abort pending operations
 	// Protected by contextMutex for atomic swapping
 	contextMutex    sync.RWMutex
 	operationCtx    context.Context
 	operationCancel context.CancelFunc
-	
+
 	// Track consecutive HAL reinitializations for detecting stuck states
 	halReinitCount int
-	
+
 	// Channel to signal successful operations to heartbeat goroutine
 	successSignal chan struct{}
 }
@@ -68,7 +68,7 @@ func (r *BatteryReader) getOperationContext() context.Context {
 func (r *BatteryReader) swapOperationContext() {
 	r.contextMutex.Lock()
 	defer r.contextMutex.Unlock()
-	
+
 	if r.operationCancel != nil {
 		r.operationCancel()
 	}
@@ -90,19 +90,19 @@ func (r *BatteryReader) signalSuccess() {
 // Service represents the battery service that manages multiple readers
 type Service struct {
 	sync.Mutex
-	config           *ServiceConfig
-	batteryConfig    *BatteryConfiguration
-	readers          []*BatteryReader
-	logger           *log.Logger
-	redis            *redis.Client
-	ctx              context.Context
-	cancel           context.CancelFunc
-	debug            bool // Add debug flag here
-	seatboxOpen      bool // Track current seatbox state
+	config        *ServiceConfig
+	batteryConfig *BatteryConfiguration
+	readers       []*BatteryReader
+	logger        *log.Logger
+	redis         *redis.Client
+	ctx           context.Context
+	cancel        context.CancelFunc
+	debug         bool // Add debug flag here
+	seatboxOpen   bool // Track current seatbox state
 
 	// Vehicle state tracking
-	vehicleState          string
-	
+	vehicleState string
+
 	// Redis update serialization
 	redisMutex sync.Mutex // Serializes Redis update operations
 }
@@ -166,7 +166,7 @@ func (c BatteryCommand) String() string {
 		byte(c >> 8),
 		byte(c),
 	}
-	
+
 	// Convert to ASCII, replacing non-printable with '.'
 	ascii := make([]byte, 4)
 	for i, b := range bytes {
@@ -176,7 +176,7 @@ func (c BatteryCommand) String() string {
 			ascii[i] = '.'
 		}
 	}
-	
+
 	switch c {
 	case BatteryCommandOn:
 		return fmt.Sprintf("BMS_CMD_ON (0x%08X) \"%s\"", uint32(c), string(ascii))

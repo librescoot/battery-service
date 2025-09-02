@@ -53,11 +53,57 @@ func (r *BatteryReader) handleSeatboxState(isOpen bool) {
 	present := r.data.Present
 	r.dataMutex.Unlock()
 
-	if !present {
-		return // Ignore if battery not present
+	// For inactive batteries, refresh status when seatbox closes
+	// This helps detect battery insertions that might have happened while seatbox was open
+	if r.IsInactive() && !isOpen {
+		r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Seatbox closed, triggering status refresh for inactive battery %d", r.index))
+
+		// Try to read battery status to detect changes
+		if err := r.readBatteryStatus(); err != nil {
+			if present {
+				// If battery was present but read failed, it might have been removed
+				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Inactive battery %d may have been removed during seatbox close", r.index))
+				r.handleTagAbsent()
+			}
+			// For other cases, we just log the attempt - no need to spam errors
+			r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Status refresh failed for inactive battery %d: %v", r.index, err))
+		} else {
+			// Status read was successful - check if battery was newly detected
+			r.dataMutex.RLock()
+			nowPresent := r.data.Present
+			r.dataMutex.RUnlock()
+
+			if !present && nowPresent {
+				r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Inactive battery %d detected during seatbox close", r.index))
+			}
+		}
 	}
 
-	// Send the appropriate event to the state machine
+	// For inactive batteries, send seatbox commands even if battery not detected as present
+	// This ensures the battery gets the seatbox notification if it was recently inserted
+	if r.IsInactive() {
+		if isOpen {
+			r.logCallback(hal.LogLevelInfo, "Seatbox opened - sending command to inactive battery")
+			// Try to send the command directly for inactive batteries
+			if err := r.sendCommand(r.getOperationContext(), BatteryCommandUserOpenedSeatbox); err != nil {
+				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Failed to send UserOpenedSeatbox to inactive battery %d: %v", r.index, err))
+				// This is expected if no battery is present, so we don't treat it as an error
+			}
+		} else {
+			r.logCallback(hal.LogLevelInfo, "Seatbox closed - sending command to inactive battery")
+			// Try to send the command directly for inactive batteries
+			if err := r.sendCommand(r.getOperationContext(), BatteryCommandUserClosedSeatbox); err != nil {
+				r.logCallback(hal.LogLevelDebug, fmt.Sprintf("Failed to send UserClosedSeatbox to inactive battery %d: %v", r.index, err))
+				// This is expected if no battery is present, so we don't treat it as an error
+			}
+		}
+	}
+
+	if !present {
+		return // Ignore state machine events if battery not present
+	}
+
+	// Send the appropriate event to the state machine for present batteries
 	if isOpen {
 		r.logCallback(hal.LogLevelInfo, "Seatbox opened")
 		r.stateMachine.SendEvent(EventSeatboxOpened)
