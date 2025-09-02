@@ -39,8 +39,13 @@ func main() {
 	// Convert uint to uint16 where needed
 	config.RedisServerPort = uint16(redisPort)
 
-	// Create logger
-	logger := log.New(os.Stdout, "", log.LstdFlags)
+	// Create logger with systemd/journald awareness
+	var logger *log.Logger
+	if os.Getenv("INVOCATION_ID") != "" {
+		logger = log.New(os.Stdout, "", 0)
+	} else {
+		logger = log.New(os.Stdout, "librescoot-battery: ", log.LstdFlags|log.Lmsgprefix)
+	}
 
 	// Create battery configuration
 	batteryConfig := &battery.BatteryConfiguration{
