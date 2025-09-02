@@ -207,6 +207,8 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		// From Discovering
 		{StateDiscovering, EventTagArrived, StateInitializing, sm.actionInitializeBattery},
 		{StateDiscovering, EventDiscoveryTimeout, StateNotPresent, sm.actionHandleDeparture},
+		{StateDiscovering, EventHALError, StateError, sm.actionHALError},
+		{StateDiscovering, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
 		{StateDiscovering, EventDisabled, StateDisabled, sm.actionDisable},
 
 		// From Initializing
