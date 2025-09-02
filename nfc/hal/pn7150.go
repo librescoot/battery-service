@@ -24,8 +24,7 @@ const (
 	maxTotalDuration  = 2750 // ms
 
 	// Error recovery parameters
-	maxConsecutive0300Errors = 3 // Only reinitialize after multiple 0300 errors
-	errorRecoveryDelay       = 10 * time.Millisecond
+	maxConsecutive0300Errors = 4 // Retry attempts before full reinitialization
 )
 
 // State represents the state of the PN7150 HAL
@@ -923,9 +922,12 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 				continue
 			}
 
-			// Check for special response codes - critical error 0300
-			if len(resp) >= 5 && resp[3] == 0x03 && resp[4] == 0x00 {
-				shouldContinue, err := p.handle0300Error("read")
+			// Check for special response codes - NTAG arbiter busy
+			if len(resp) >= 5 && resp[3] == 0x03 {
+				// 0x03 = NTAG arbiter busy (locked to I2C interface)
+				// Always treat as arbiter busy since there are no other 0x03 errors
+				
+				shouldContinue, err := p.handle0300Error("read", true)
 				if !shouldContinue {
 					lastErr = err
 					break
@@ -1062,9 +1064,12 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 
 		// We may receive multiple responses - keep reading until we get the actual ACK
 		for {
-			// Check for special response codes
-			if len(resp) >= 5 && resp[3] == 0x03 && resp[4] == 0x00 {
-				shouldContinue, err := p.handle0300Error("write")
+			// Check for special response codes - NTAG arbiter busy
+			if len(resp) >= 5 && resp[3] == 0x03 {
+				// 0x03 = NTAG arbiter busy (locked to I2C interface)
+				// Always treat as arbiter busy since there are no other 0x03 errors
+				
+				shouldContinue, err := p.handle0300Error("write", true)
 				if !shouldContinue {
 					lastErr = err
 					break
@@ -1209,6 +1214,88 @@ func (p *PN7150) SelectTag(tagIdx uint) error {
 	return nil
 }
 
+// reselectCurrentTag reselects the current tag to resolve NTAG I2C arbiter conflicts
+// Uses RF_DEACTIVATE → RF_DISCOVER_SELECT sequence to reset tag state
+// Note: This function assumes the caller already holds the PN7150 lock
+func (p *PN7150) reselectCurrentTag() error {
+	if p.logCallback != nil {
+		p.logCallback(LogLevelInfo, "Reselecting tag to resolve arbiter busy conflict")
+	}
+
+	tagIdx := uint(0) // Always reselect tag 0
+	
+	if tagIdx >= uint(p.numTags) {
+		return fmt.Errorf("invalid tag index for reselection: %d", tagIdx)
+	}
+
+	// Step 1: Deactivate current tag to sleep mode (if selected)
+	if p.tagSelected {
+		deactivateCmd := []byte{
+			0x21, // MT=CMD (1 << 5), GID=RF  
+			0x06, // OID=DEACTIVATE
+			0x01, // Length
+			0x01, // Deactivation type = Sleep
+		}
+		
+		resp, err := p.transfer(deactivateCmd)
+		if err != nil {
+			return fmt.Errorf("RF deactivate failed during reselection: %v", err)
+		}
+
+		// Check deactivate response
+		if len(resp) < 4 || resp[0] != 0x41 || resp[1] != 0x06 || resp[3] != 0x00 {
+			return fmt.Errorf("RF deactivate response invalid during reselection: %x", resp)
+		}
+
+		// Wait for deactivate notification
+		time.Sleep(10 * time.Millisecond)
+		p.tagSelected = false
+	}
+
+	// Step 2: RF_DISCOVER_SELECT to reselect the tag
+	discoverSelectCmd := []byte{
+		0x21, // MT=CMD (1 << 5), GID=RF
+		0x04, // OID=DISCOVER_SELECT  
+		0x03, // Length
+		0x01, // Discovery ID (1-based, so tag 0 = discovery ID 1)
+		0x02, // RF Protocol = T2T
+		0x01, // RF Interface = FRAME interface
+	}
+
+	resp, err := p.transfer(discoverSelectCmd)
+	if err != nil {
+		return fmt.Errorf("RF discover select failed during reselection: %v", err)
+	}
+
+	// Check discover select response  
+	if len(resp) < 4 || resp[0] != 0x41 || resp[1] != 0x04 || resp[3] != 0x00 {
+		return fmt.Errorf("RF discover select response invalid during reselection: %x", resp)
+	}
+
+	// Step 3: Wait for RF_INTF_ACTIVATED notification (0x0105)
+	// Give it some time to activate
+	time.Sleep(50 * time.Millisecond)
+	
+	// Try to read the activation notification
+	activationResp, err := p.transfer(nil)
+	if err != nil {
+		return fmt.Errorf("failed to receive activation notification during reselection: %v", err)
+	}
+
+	// Check for RF_INTF_ACTIVATED notification
+	if len(activationResp) < 4 || activationResp[0] != 0x61 || activationResp[1] != 0x05 {
+		return fmt.Errorf("expected RF_INTF_ACTIVATED notification, got: %x", activationResp)
+	}
+
+	p.tagSelected = true
+	
+	if p.logCallback != nil {
+		p.logCallback(LogLevelInfo, "Tag reselection completed successfully")
+	}
+	
+	return nil
+}
+
 // GetTagEventChannel implements HAL.GetTagEventChannel
 func (p *PN7150) GetTagEventChannel() <-chan TagEvent {
 	return p.tagEventChan
@@ -1263,19 +1350,38 @@ func (p *PN7150) handleSeriousErrorWithReinit(err error, operation string) error
 	return fmt.Errorf("%s failed: %v", operation, err)
 }
 
-// handle0300Error handles 0300 communication errors with progressive reinitialization
+// handle0300Error handles NTAG arbiter busy (0x03) errors with tag reselection and progressive reinitialization
 // Returns true if the operation should continue retrying, false if it should abort
-func (p *PN7150) handle0300Error(operation string) (bool, error) {
+func (p *PN7150) handle0300Error(operation string, isArbiterBusy bool) (bool, error) {
 	p.consecutive0300Errors++
 
 	if p.logCallback != nil {
-		p.logCallback(LogLevelWarning, fmt.Sprintf("0300 error in %s (occurrence %d/%d)", operation, p.consecutive0300Errors, maxConsecutive0300Errors))
+		p.logCallback(LogLevelWarning, fmt.Sprintf("NTAG arbiter busy in %s (occurrence %d/%d)", operation, p.consecutive0300Errors, maxConsecutive0300Errors))
 	}
 
-	// Only do full reinitialization after multiple consecutive 0300 errors
+	// Always attempt tag reselection for arbiter busy conflicts (unless we've hit max errors)
+	if p.consecutive0300Errors <= maxConsecutive0300Errors {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelInfo, "Attempting tag reselection for arbiter busy conflict")
+		}
+		
+		// Try tag reselection to resolve arbiter conflict
+		err := p.reselectCurrentTag()
+		if err != nil {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelWarning, fmt.Sprintf("Tag reselection failed: %v", err))
+			}
+			// Continue to regular retry logic if reselection fails
+		} else {
+			// Tag reselection succeeded, retry the operation
+			return true, fmt.Errorf("NTAG arbiter busy resolved via tag reselection")
+		}
+	}
+
+	// Only do full reinitialization after multiple consecutive errors
 	if p.consecutive0300Errors >= maxConsecutive0300Errors {
 		if p.logCallback != nil {
-			p.logCallback(LogLevelError, "Multiple consecutive 0300 errors - performing full HAL reinitialization")
+			p.logCallback(LogLevelError, "Multiple consecutive 0x03 errors - performing full HAL reinitialization")
 		}
 
 		// Release lock before full reinitialization
@@ -1293,9 +1399,8 @@ func (p *PN7150) handle0300Error(operation string) (bool, error) {
 		return false, fmt.Errorf("aborted %s after HAL reinitialization", operation)
 	}
 
-	// For non-consecutive errors, just retry
-	time.Sleep(errorRecoveryDelay)
-	return true, fmt.Errorf("0300 communication error")
+	// For failed reselection, just retry
+	return true, fmt.Errorf("NTAG arbiter busy")
 }
 
 // handleCreditNotification handles CORE_CONN_CREDITS_NTF and reads the next response

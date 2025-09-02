@@ -19,7 +19,7 @@ const (
 	timeDeparture                   = 500 * time.Millisecond // Tag departure confirmation timeout
 	timeStateVerify                 = 200 * time.Millisecond // Time to verify battery state
 	timeReinit                      = 2 * time.Second        // Time to wait before reinit
-	timeHALTimeout                  = 250 * time.Millisecond // Reduce to match OEM implementation
+	timeHALTimeout                  = 250 * time.Millisecond // Timeout for individual HAL operations
 	timeActiveStatusPoll            = 20 * time.Second       // Interval to poll status when battery is active
 	timeBattery1MaintPollInterval   = 5 * time.Minute        // Polling interval for battery 1 during maintenance
 	timeMaintPollIdleAsleepInterval = 2 * time.Minute        // Polling interval for battery 0 when expected idle/asleep in stand-by
@@ -29,8 +29,8 @@ const (
 	temperatureStateHotLimit  = 60  // Celsius
 
 	// Retry constants
-	maxReadRetries       = 4  // Match OEM
-	maxWriteRetries      = 4  // Match OEM
+	maxReadRetries       = 4  // Binary operation retries
+	maxWriteRetries      = 4  // Binary operation retries
 	maxActivationRetries = 3  // Maximum number of times to retry activation sequence
 	maxZeroDataRetries   = 10 // Maximum consecutive zero data responses before giving up
 
