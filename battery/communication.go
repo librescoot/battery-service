@@ -180,16 +180,34 @@ endReadRetryLoop: // Label to jump to for final error handling
 		}
 	}
 	if allZero {
-		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("received zero data at register 0x%04x", addr))
+		// Increment zero data retry counter
+		r.data.ZeroDataRetryCount++
+		r.logCallback(hal.LogLevelWarning, fmt.Sprintf("received zero data at register 0x%04x (retry %d/%d)", addr, r.data.ZeroDataRetryCount, maxZeroDataRetries))
+
+		// Set zero data fault
+		r.data.Faults.ZeroData = true
+
+		// Check if we've exceeded retry limit
+		if r.data.ZeroDataRetryCount >= maxZeroDataRetries {
+			r.logCallback(hal.LogLevelError, fmt.Sprintf("exceeded maximum zero data retries (%d), marking as critical fault", maxZeroDataRetries))
+			return nil, fmt.Errorf("exceeded zero data retry limit at register 0x%04x", addr)
+		}
+
 		return nil, fmt.Errorf("received zero data at register 0x%04x", addr)
 	}
 
-	// Clear communication error flag on success
+	// Clear communication error flag and reset zero data counter on success
 	if r.data.Faults.CommunicationError {
 		r.data.Faults.CommunicationError = false
 		if updateErr := r.updateRedisStatus(); updateErr != nil {
 			r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after clearing read communication error: %v", updateErr))
 		}
+	}
+
+	// Reset zero data retry counter and clear fault on successful read
+	if r.data.ZeroDataRetryCount > 0 {
+		r.data.ZeroDataRetryCount = 0
+		r.data.Faults.ZeroData = false
 	}
 
 	// Signal successful hardware operation

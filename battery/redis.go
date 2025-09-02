@@ -25,6 +25,11 @@ var faultCodeMap = map[string]int{
 	"ChargeOverCurrent":     11,
 	"DischargeOverCurrent":  12,
 	"ShortCircuit":          13,
+	// Service-level critical faults (>= 33)
+	"NotFollowingCommand": 32,
+	"ZeroData":            33,
+	"CommunicationError":  34,
+	"ReaderError":         35,
 }
 
 // updateRedisStatus updates the Redis hash and fault set with current battery status
@@ -42,9 +47,12 @@ func (r *BatteryReader) updateRedisStatus() error {
 	faultSetKey := fmt.Sprintf("battery:%d:fault", r.index)
 	faultNotifyChannel := key + " fault" // Publish to 'battery:X fault' channel
 
+	// Determine effective presence - battery is not present if it has critical faults
+	effectivePresent := r.data.Present && !r.hasCriticalFaults()
+
 	// Create a map for the main battery status fields
 	status := map[string]interface{}{
-		"present":            fmt.Sprintf("%v", r.data.Present),
+		"present":            fmt.Sprintf("%v", effectivePresent),
 		"state":              r.data.State.String(),
 		"voltage":            fmt.Sprintf("%d", r.data.Voltage),
 		"current":            fmt.Sprintf("%d", r.data.Current),

@@ -523,3 +523,72 @@ func (r *BatteryReader) simpleHALRecovery() error {
 
 	return nil
 }
+
+// hasCriticalFaults checks if the battery has any critical faults that should cause it to be reported as not present
+func (r *BatteryReader) hasCriticalFaults() bool {
+	// Check service-level critical faults
+	if r.data.Faults.ZeroData && r.data.ZeroDataRetryCount >= maxZeroDataRetries {
+		return true
+	}
+	if r.data.Faults.CommunicationError {
+		return true
+	}
+	if r.data.Faults.ReaderError {
+		return true
+	}
+
+	return false
+}
+
+// setFaultWithDebounce sets a fault with debouncing to prevent fault flapping
+func (r *BatteryReader) setFaultWithDebounce(faultName string, faultValue bool) {
+	r.faultDebounceMutex.Lock()
+	defer r.faultDebounceMutex.Unlock()
+
+	timerKey := faultName + "_timer"
+
+	// Cancel existing timer for this fault
+	if timer, exists := r.faultDebounceTimers[timerKey]; exists {
+		timer.Stop()
+		delete(r.faultDebounceTimers, timerKey)
+	}
+
+	// Determine debounce time based on fault value
+	var debounceTime time.Duration
+	if faultValue {
+		debounceTime = faultDebounceSetTime // 5 seconds to set fault
+	} else {
+		debounceTime = faultDebounceResetTime // 10 seconds to clear fault
+	}
+
+	// Create new timer to apply the fault change after debounce time
+	timer := time.AfterFunc(debounceTime, func() {
+		r.applyDebouncedFault(faultName, faultValue)
+
+		// Clean up timer
+		r.faultDebounceMutex.Lock()
+		delete(r.faultDebounceTimers, timerKey)
+		r.faultDebounceMutex.Unlock()
+	})
+
+	r.faultDebounceTimers[timerKey] = timer
+}
+
+// applyDebouncedFault applies a fault change after debouncing
+func (r *BatteryReader) applyDebouncedFault(faultName string, faultValue bool) {
+	r.dataMutex.Lock()
+	defer r.dataMutex.Unlock()
+
+	switch faultName {
+	case "NotFollowingCommand":
+		if r.data.Faults.NotFollowingCommand != faultValue {
+			r.data.Faults.NotFollowingCommand = faultValue
+			r.logCallback(hal.LogLevelInfo, fmt.Sprintf("Debounced fault %s: %v", faultName, faultValue))
+
+			// Update Redis to reflect fault change
+			if err := r.updateRedisStatus(); err != nil {
+				r.logCallback(hal.LogLevelWarning, fmt.Sprintf("Failed to update Redis after debounced fault %s: %v", faultName, err))
+			}
+		}
+	}
+}

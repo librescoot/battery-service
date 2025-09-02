@@ -51,6 +51,10 @@ type BatteryReader struct {
 
 	// Channel to signal successful operations to heartbeat goroutine
 	successSignal chan struct{}
+
+	// Fault debouncing timers
+	faultDebounceTimers map[string]*time.Timer
+	faultDebounceMutex  sync.RWMutex
 }
 
 // getOperationContext returns the operation context if available, otherwise the service context
@@ -271,23 +275,24 @@ type BatteryFaults struct {
 
 // BatteryData represents the data read from a battery
 type BatteryData struct {
-	Present           bool
-	Voltage           uint16
-	Current           int16
-	FWVersion         string
-	Charge            uint8
-	FaultCode         uint16        // Keep raw fault code for reference
-	Faults            BatteryFaults // Detailed fault breakdown
-	Temperature       [BatteryNumTemperatures]int8
-	TemperatureState  BatteryTemperatureState
-	StateOfHealth     uint8
-	LowSOC            bool
-	State             BatteryState
-	SerialNumber      [BatterySerialNumberLen]byte
-	ManufacturingDate string
-	CycleCount        uint16
-	RemainingCapacity uint16
-	FullCapacity      uint16
+	Present            bool
+	Voltage            uint16
+	Current            int16
+	FWVersion          string
+	Charge             uint8
+	FaultCode          uint16        // Keep raw fault code for reference
+	Faults             BatteryFaults // Detailed fault breakdown
+	Temperature        [BatteryNumTemperatures]int8
+	TemperatureState   BatteryTemperatureState
+	StateOfHealth      uint8
+	LowSOC             bool
+	State              BatteryState
+	SerialNumber       [BatterySerialNumberLen]byte
+	ManufacturingDate  string
+	CycleCount         uint16
+	RemainingCapacity  uint16
+	FullCapacity       uint16
+	ZeroDataRetryCount int // Counter for consecutive zero data responses
 }
 
 // ServiceConfig represents the configuration for the battery service

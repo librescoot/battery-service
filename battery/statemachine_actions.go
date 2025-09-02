@@ -422,18 +422,16 @@ func (sm *BatteryStateMachine) actionDeactivationSuccess(machine *BatteryStateMa
 }
 
 func (sm *BatteryStateMachine) actionActivationFailed(machine *BatteryStateMachine, event BatteryEvent) error {
-	sm.reader.dataMutex.Lock()
-	sm.reader.data.Faults.NotFollowingCommand = true
-	sm.reader.dataMutex.Unlock()
+	// Use debounced fault setting to prevent flapping
+	sm.reader.setFaultWithDebounce("NotFollowingCommand", true)
 
 	sm.logger(hal.LogLevelError, "Battery activation failed")
 	return sm.reader.updateRedisStatus()
 }
 
 func (sm *BatteryStateMachine) actionDeactivationFailed(machine *BatteryStateMachine, event BatteryEvent) error {
-	sm.reader.dataMutex.Lock()
-	sm.reader.data.Faults.NotFollowingCommand = true
-	sm.reader.dataMutex.Unlock()
+	// Use debounced fault setting to prevent flapping
+	sm.reader.setFaultWithDebounce("NotFollowingCommand", true)
 
 	sm.logger(hal.LogLevelError, "Battery deactivation failed")
 	return sm.reader.updateRedisStatus()
@@ -768,8 +766,10 @@ func (sm *BatteryStateMachine) actionRecovery(machine *BatteryStateMachine, even
 	sm.reader.dataMutex.Lock()
 	sm.reader.data.Faults.ReaderError = false
 	sm.reader.data.Faults.CommunicationError = false
-	sm.reader.data.Faults.NotFollowingCommand = false
 	sm.reader.dataMutex.Unlock()
+
+	// Use debounced fault clearing to prevent flapping
+	sm.reader.setFaultWithDebounce("NotFollowingCommand", false)
 
 	sm.logger(hal.LogLevelInfo, "Recovery from error state")
 	return sm.reader.updateRedisStatus()

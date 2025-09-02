@@ -29,8 +29,16 @@ const (
 	temperatureStateHotLimit  = 60  // Celsius
 
 	// Retry constants
-	maxReadRetries       = 3 // Increased from 2
-	maxWriteRetries      = 3 // Increased from 2
-	maxActivationRetries = 3 // Maximum number of times to retry activation sequence
+	maxReadRetries       = 3  // Increased from 2
+	maxWriteRetries      = 3  // Increased from 2
+	maxActivationRetries = 3  // Maximum number of times to retry activation sequence
+	maxZeroDataRetries   = 10 // Maximum consecutive zero data responses before giving up
+
+	// Critical fault threshold - faults with ID >= this value cause battery to be reported as not present
+	criticalFaultThreshold = 33
+
+	// Fault debouncing timing
+	faultDebounceSetTime   = 5 * time.Second  // Time to confirm fault presence
+	faultDebounceResetTime = 10 * time.Second // Time to confirm fault absence
 
 )
