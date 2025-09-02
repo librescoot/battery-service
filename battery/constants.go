@@ -41,4 +41,9 @@ const (
 	faultDebounceSetTime   = 5 * time.Second  // Time to confirm fault presence
 	faultDebounceResetTime = 10 * time.Second // Time to confirm fault absence
 
+	// LED maintenance timing
+	timeCmdSlow            = 1 * time.Second // Slow command timing for LED operations
+	timeCmdFirstOpened     = 2 * time.Second // First seatbox opened command timing
+	timeCmdFirstOpenedLong = 3 * time.Second // First seatbox opened when battery asleep
+
 )

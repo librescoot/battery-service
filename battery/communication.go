@@ -216,6 +216,28 @@ endReadRetryLoop: // Label to jump to for final error handling
 	return data, nil
 }
 
+// getCommandTiming returns the appropriate timing delay for a command
+func (r *BatteryReader) getCommandTiming(cmd BatteryCommand) time.Duration {
+	switch cmd {
+	case BatteryCommandSocUpdate, BatteryCommandLedPassthrough, BatteryCommandErrorDetected:
+		// LED-related commands use slower timing for maintenance
+		return timeCmdSlow
+	case BatteryCommandUserOpenedSeatbox:
+		// First seatbox opened commands have special timing based on battery state
+		r.dataMutex.RLock()
+		batteryState := r.data.State
+		r.dataMutex.RUnlock()
+
+		if batteryState == BatteryStateAsleep {
+			return timeCmdFirstOpenedLong // 3s for asleep battery
+		}
+		return timeCmdFirstOpened // 2s for awake battery
+	default:
+		// Standard timing for all other commands
+		return timeCmd
+	}
+}
+
 // sendCommand sends a command to the battery with retries
 func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) error {
 	// Check if the reader is temporarily powered down
@@ -237,9 +259,12 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 		}
 	}
 
+	// Get appropriate timing for this command
+	cmdTiming := r.getCommandTiming(cmd)
+
 	// Ensure minimum time between commands (this applies to the pre-sequence commands too due to recursive calls)
-	if time.Since(r.lastCmd) < timeCmd {
-		sleepCtx, cancelSleep := context.WithTimeout(ctx, timeCmd-time.Since(r.lastCmd))
+	if time.Since(r.lastCmd) < cmdTiming {
+		sleepCtx, cancelSleep := context.WithTimeout(ctx, cmdTiming-time.Since(r.lastCmd))
 		select {
 		case <-sleepCtx.Done():
 			cancelSleep()
@@ -247,7 +272,7 @@ func (r *BatteryReader) sendCommand(ctx context.Context, cmd BatteryCommand) err
 				return fmt.Errorf("context cancelled during command delay: %w", sleepCtx.Err())
 			}
 			// If timeout expired, just continue, minimum time passed
-		case <-time.After(timeCmd - time.Since(r.lastCmd)):
+		case <-time.After(cmdTiming - time.Since(r.lastCmd)):
 			// Normal sleep completion
 		}
 		cancelSleep()
