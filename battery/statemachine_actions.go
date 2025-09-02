@@ -357,87 +357,8 @@ func (sm *BatteryStateMachine) actionRequestActivation(machine *BatteryStateMach
 	return nil
 }
 
-func (sm *BatteryStateMachine) actionRequestDeactivation(machine *BatteryStateMachine, event BatteryEvent) error {
-	// SAFETY: Cancel any ongoing operations immediately when seatbox opens
-	sm.reader.dataMutex.Lock()
-	if sm.reader.operationCancel != nil {
-		sm.reader.operationCancel()
-		// Create new context for the OFF command
-		sm.reader.operationCtx, sm.reader.operationCancel = context.WithCancel(sm.reader.service.ctx)
-	}
-	state := sm.reader.data.State
-	sm.reader.dataMutex.Unlock()
-
-	sm.logger(hal.LogLevelWarning, "SAFETY: Seatbox opened - cancelling operations and sending OFF command")
-
-	if state == BatteryStateIdle || state == BatteryStateAsleep {
-		// Send event asynchronously to avoid deadlock
-		go func() {
-			time.Sleep(timeCmd)
-			sm.SendEvent(EventStateVerified)
-		}()
-		return nil
-	}
-
-	// Send OFF command immediately (respecting 400ms hardware timing)
-	if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandOff); err != nil {
-		// Check if context was cancelled (tag departed)
-		if strings.Contains(err.Error(), "context cancel") || strings.Contains(err.Error(), "invalid state") {
-			sm.logger(hal.LogLevelInfo, "Deactivation command cancelled due to tag departure")
-			// Don't send failure event - let tag departure handling take over
-			return nil
-		}
-		// Schedule failure event for other errors
-		go func() {
-			time.Sleep(timeCmd)
-			sm.SendEvent(EventCommandFailed)
-		}()
-		return fmt.Errorf("failed to send OFF command: %w", err)
-	}
-
-	// Schedule state verification with shorter delay
-	go func() {
-		// Use operation context so this gets cancelled if tag departs
-		ctx := sm.reader.getOperationContext()
-		select {
-		case <-time.After(timeStateVerify):
-			// Continue with verification
-		case <-ctx.Done():
-			// Context cancelled, tag departed
-			sm.logger(hal.LogLevelDebug, "Deactivation verification cancelled due to tag departure")
-			return
-		}
-
-		if err := sm.reader.readBatteryStatus(); err != nil {
-			// Check if context was cancelled
-			if strings.Contains(err.Error(), "context cancel") {
-				sm.logger(hal.LogLevelDebug, "Status read cancelled during deactivation due to tag departure")
-				return
-			}
-			sm.SendEvent(EventStateVerificationFailed)
-		} else {
-			sm.reader.dataMutex.Lock()
-			newState := sm.reader.data.State
-			sm.reader.dataMutex.Unlock()
-
-			if newState == BatteryStateIdle || newState == BatteryStateAsleep {
-				sm.SendEvent(EventStateVerified)
-			} else {
-				sm.SendEvent(EventStateVerificationFailed)
-			}
-		}
-	}()
-
-	return nil
-}
-
 func (sm *BatteryStateMachine) actionActivationSuccess(machine *BatteryStateMachine, event BatteryEvent) error {
 	sm.logger(hal.LogLevelInfo, "Battery successfully activated")
-	return sm.reader.updateRedisStatus()
-}
-
-func (sm *BatteryStateMachine) actionDeactivationSuccess(machine *BatteryStateMachine, event BatteryEvent) error {
-	sm.logger(hal.LogLevelInfo, "Battery successfully deactivated")
 	return sm.reader.updateRedisStatus()
 }
 
@@ -446,14 +367,6 @@ func (sm *BatteryStateMachine) actionActivationFailed(machine *BatteryStateMachi
 	sm.reader.setFaultWithDebounce("NotFollowingCommand", true)
 
 	sm.logger(hal.LogLevelError, "Battery activation failed")
-	return sm.reader.updateRedisStatus()
-}
-
-func (sm *BatteryStateMachine) actionDeactivationFailed(machine *BatteryStateMachine, event BatteryEvent) error {
-	// Use debounced fault setting to prevent flapping
-	sm.reader.setFaultWithDebounce("NotFollowingCommand", true)
-
-	sm.logger(hal.LogLevelError, "Battery deactivation failed")
 	return sm.reader.updateRedisStatus()
 }
 

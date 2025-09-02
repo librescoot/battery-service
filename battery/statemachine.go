@@ -95,7 +95,6 @@ const (
 	StateIdleReady
 	StateActiveRequested
 	StateActive
-	StateDeactivating
 	StateError
 	StateDisabled
 )
@@ -119,8 +118,6 @@ func (s BatteryMachineState) String() string {
 		return "ActiveRequested"
 	case StateActive:
 		return "Active"
-	case StateDeactivating:
-		return "Deactivating"
 	case StateError:
 		return "Error"
 	case StateDisabled:
@@ -261,15 +258,6 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateActive, EventHeartbeatTick, StateActive, sm.actionHeartbeat},
 		{StateActive, EventHALError, StateError, sm.actionHALError},
 		{StateActive, EventDisabled, StateDisabled, sm.actionDisable},
-
-		// From Deactivating
-		{StateDeactivating, EventStateVerified, StateIdleStandby, sm.actionDeactivationSuccess},
-		{StateDeactivating, EventStateVerificationFailed, StateError, sm.actionDeactivationFailed},
-		{StateDeactivating, EventCommandFailed, StateError, sm.actionCommandFailed},
-		{StateDeactivating, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
-		{StateDeactivating, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
-		{StateDeactivating, EventTagArrived, StateInitializing, sm.actionInitializeBattery}, // Handle tag re-arrival during deactivation
-		{StateDeactivating, EventDisabled, StateDisabled, sm.actionDisable},
 
 		// From Error
 		{StateError, EventHALRecovered, StateIdleStandby, sm.actionRecovery},
