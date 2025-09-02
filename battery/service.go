@@ -85,16 +85,23 @@ func (s *Service) createReader(index int, role BatteryRole, deviceName string, l
 
 // Start starts the battery service
 func (s *Service) Start() error {
-	// Start Redis subscription
-	go s.handleRedisSubscription()
-
+	// Start all readers in parallel
+	var wg sync.WaitGroup
 	for _, reader := range s.readers {
 		if reader != nil {
-			if err := reader.Start(); err != nil {
-				s.logger.Printf("Failed to start reader %d: %v", reader.index, err)
-			}
+			wg.Add(1)
+			go func(r *BatteryReader) {
+				defer wg.Done()
+				if err := r.Start(); err != nil {
+					s.logger.Printf("Failed to start reader %d: %v", r.index, err)
+				}
+			}(reader)
 		}
 	}
+	wg.Wait()
+	
+	// Start Redis subscription after all readers initialized
+	go s.handleRedisSubscription()
 	return nil
 }
 
