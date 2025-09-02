@@ -209,15 +209,35 @@ func (sm *BatteryStateMachine) actionSeatboxOpened(machine *BatteryStateMachine,
 	sm.reader.dataMutex.Lock()
 	if sm.reader.operationCancel != nil {
 		sm.reader.operationCancel()
-		// Create new context for the command
+		// Create new context for the command sequence
 		sm.reader.operationCtx, sm.reader.operationCancel = context.WithCancel(sm.reader.service.ctx)
 	}
+	batteryState := sm.reader.data.State
 	sm.reader.dataMutex.Unlock()
 
-	// Send UserOpenedSeatbox command
-	if err := sm.reader.sendCommand(sm.reader.getOperationContext(), BatteryCommandUserOpenedSeatbox); err != nil {
+	ctx := sm.reader.getOperationContext()
+
+	// OEM sequence: 1. OFF -> 2. SEATBOX_OPENED -> 3. INSERTED_IN_SCOOTER
+
+	// Step 1: Send OFF command if battery is active
+	if batteryState == BatteryStateActive {
+		if err := sm.reader.sendCommand(ctx, BatteryCommandOff); err != nil {
+			return fmt.Errorf("failed to send OFF during seatbox open sequence: %w", err)
+		}
+		time.Sleep(timeCmd) // Wait between commands
+	}
+
+	// Step 2: Send UserOpenedSeatbox command
+	if err := sm.reader.sendCommand(ctx, BatteryCommandUserOpenedSeatbox); err != nil {
 		return fmt.Errorf("failed to send UserOpenedSeatbox: %w", err)
 	}
+	time.Sleep(timeCmd) // Wait between commands
+
+	// Step 3: Send InsertedInScooter command to reestablish scooter context
+	if err := sm.reader.sendCommand(ctx, BatteryCommandInsertedInScooter); err != nil {
+		return fmt.Errorf("failed to send InsertedInScooter during seatbox open sequence: %w", err)
+	}
+
 	return nil
 }
 

@@ -247,13 +247,13 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateActiveRequested, EventCommandFailed, StateError, sm.actionCommandFailed},
 		{StateActiveRequested, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
 		{StateActiveRequested, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
-		{StateActiveRequested, EventSeatboxOpened, StateDeactivating, sm.actionRequestDeactivation},
+		{StateActiveRequested, EventSeatboxOpened, StateIdleStandby, sm.actionSeatboxOpened},
 		{StateActiveRequested, EventLowSOC, StateActiveRequested, sm.actionLowSOCWhileActive},
 		{StateActiveRequested, EventDisabled, StateDisabled, sm.actionDisable},
 		{StateActiveRequested, EventStateTimeout, StateDiscovering, sm.actionStateTimeout},
 
 		// From Active
-		{StateActive, EventSeatboxOpened, StateDeactivating, sm.actionRequestDeactivation},
+		{StateActive, EventSeatboxOpened, StateIdleStandby, sm.actionSeatboxOpened},
 		{StateActive, EventLowSOC, StateActive, sm.actionLowSOCWhileActive},
 		{StateActive, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
 		{StateActive, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
