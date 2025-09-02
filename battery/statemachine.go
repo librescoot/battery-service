@@ -257,6 +257,7 @@ func (sm *BatteryStateMachine) setupTransitions() {
 		{StateActive, EventLowSOC, StateActive, sm.actionLowSOCWhileActive},
 		{StateActive, EventBatteryRemoved, StateNotPresent, sm.actionBatteryRemoved},
 		{StateActive, EventTagDeparted, StateDiscovering, sm.actionStartDiscovery},
+		{StateActive, EventTagArrived, StateActive, nil}, // Stay in Active when tag arrives (already active)
 		{StateActive, EventHeartbeatTick, StateActive, sm.actionHeartbeat},
 		{StateActive, EventHALError, StateError, sm.actionHALError},
 		{StateActive, EventDisabled, StateDisabled, sm.actionDisable},
