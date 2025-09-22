@@ -2,9 +2,6 @@ package battery
 
 import (
 	"context"
-	"fmt"
-	"log"
-	"sync"
 	"time"
 
 	"battery-service/nfc/hal"
@@ -12,292 +9,288 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// ErrHALRecreatedRetryRead signals that the HAL was recreated and the read operation should be retried.
-var errHALRecreatedRetryRead = fmt.Errorf("HAL was recreated, retry read operation")
-
-// BatteryReader represents a single battery reader instance
-type BatteryReader struct {
-	// Lock ordering: ALWAYS acquire nfcMutex before dataMutex to prevent deadlocks
-	nfcMutex  sync.Mutex   // Serializes access to NFC HAL operations (acquire first)
-	dataMutex sync.RWMutex // Protects battery data and state (acquire second)
-
-	index                     int
-	role                      BatteryRole // Role of this battery (active or inactive)
-	hal                       hal.HAL
-	data                      BatteryData
-	enabled                   bool
-	deviceName                string // NFC device path
-	logLevel                  int    // Log level for this reader
-	service                   *Service
-	lastCmd                   time.Time
-	justInserted              bool
-	readyToScoot              bool                 // Flag indicating battery responded with ReadyToScoot
-	stopChan                  chan struct{}        // Channel to signal goroutine shutdown
-	lastPublishedData         BatteryData          // Stores the state as of the last successful Redis update with PUBLISH
-	lastBattery1MaintPollTime time.Time            // Tracks last maintenance poll for battery 1
-	lastIdleAsleepPollTime    time.Time            // Tracks last poll time for battery 0 when idle/asleep in stand-by
-	lastReinitialization      time.Time            // Track when HAL was last reinitialized
-	isPoweredDown             bool                 // Indicates reader is temporarily powered down during low-frequency polling
-	stateMachine              *BatteryStateMachine // State machine for managing battery transitions
-
-	// Operation cancellation context - cancelled when tag departs to abort pending operations
-	// Protected by contextMutex for atomic swapping
-	contextMutex    sync.RWMutex
-	operationCtx    context.Context
-	operationCancel context.CancelFunc
-
-	// Track consecutive HAL reinitializations for detecting stuck states
-	halReinitCount int
-
-	// Channel to signal successful operations to heartbeat goroutine
-	successSignal chan struct{}
-
-	// Fault debouncing timers
-	faultDebounceTimers map[string]*time.Timer
-	faultDebounceMutex  sync.RWMutex
-}
-
-// getOperationContext returns the operation context if available, otherwise the service context
-// This is safe for concurrent use and returns a context that won't be invalidated during use
-func (r *BatteryReader) getOperationContext() context.Context {
-	r.contextMutex.RLock()
-	defer r.contextMutex.RUnlock()
-	if r.operationCtx != nil {
-		return r.operationCtx
-	}
-	return r.service.ctx
-}
-
-// swapOperationContext atomically cancels the old context and creates a new one
-func (r *BatteryReader) swapOperationContext() {
-	r.contextMutex.Lock()
-	defer r.contextMutex.Unlock()
-
-	if r.operationCancel != nil {
-		r.operationCancel()
-	}
-	r.operationCtx, r.operationCancel = context.WithCancel(r.service.ctx)
-}
-
-// signalSuccess sends a non-blocking signal to the heartbeat goroutine
-// to indicate a successful hardware operation.
-func (r *BatteryReader) signalSuccess() {
-	// A non-blocking send prevents this call from ever delaying an operation.
-	// If the channel is full, the default case is taken and the signal is dropped.
-	// This is fine; we only need to prevent the heartbeat timeout.
-	select {
-	case r.successSignal <- struct{}{}:
-	default:
-	}
-}
-
-// Service represents the battery service that manages multiple readers
-type Service struct {
-	sync.Mutex
-	config        *ServiceConfig
-	batteryConfig *BatteryConfiguration
-	readers       []*BatteryReader
-	logger        *log.Logger
-	redis         *redis.Client
-	ctx           context.Context
-	cancel        context.CancelFunc
-	debug         bool // Add debug flag here
-	seatboxOpen   bool // Track current seatbox state
-
-	// Vehicle state tracking
-	vehicleState string
-
-	// Redis update serialization
-	redisMutex sync.Mutex // Serializes Redis update operations
-}
-
-// BatteryState represents the state of the battery
-type BatteryState uint32
+type BMSState uint32
 
 const (
-	BatteryStateUnknown BatteryState = 0
-	BatteryStateAsleep  BatteryState = 0xA4983474
-	BatteryStateIdle    BatteryState = 0xB9164828
-	BatteryStateActive  BatteryState = 0xC6583518
+	BMSStateUnknown BMSState = 0
+	BMSStateAsleep  BMSState = 0xA4983474
+	BMSStateIdle    BMSState = 0xB9164828
+	BMSStateActive  BMSState = 0xC6583518
 )
 
-// String returns a string representation of the battery state
-func (s BatteryState) String() string {
+func (s BMSState) String() string {
 	switch s {
-	case BatteryStateAsleep:
+	case BMSStateUnknown:
+		return "unknown"
+	case BMSStateAsleep:
 		return "asleep"
-	case BatteryStateIdle:
+	case BMSStateIdle:
 		return "idle"
-	case BatteryStateActive:
+	case BMSStateActive:
 		return "active"
 	default:
 		return "unknown"
 	}
 }
 
-// BatteryCommand represents commands that can be sent to the battery
-type BatteryCommand uint32
+type BMSCommand uint32
 
 const (
-	// Commands to Battery Management Software
-	BatteryCommandOn                BatteryCommand = 0x50505050 // Turn on the high-current path, Enters BatteryActive mode.
-	BatteryCommandOff               BatteryCommand = 0xCAFEF00D // Turn off the high-current path, Enters BatteryIdle mode.
-	BatteryCommandSleepNow          BatteryCommand = 0x39845983 // Force Battery to enter BatteryAsleep mode immediately.
-	BatteryCommandInsertedInCharger BatteryCommand = 0x4D415856 // Charger tells Battery that it is now in the Charger. ("MAXV")
-	BatteryCommandInsertedInScooter BatteryCommand = 0x44414E41 // Scooter tells Battery that it is now in the Scooter. ("ANAD")
-	BatteryCommandChargerHeartbeat  BatteryCommand = 0x4755494C // This signal indicates that the Battery is in the Charger. ("GUIL")
-	BatteryCommandScooterHeartbeat  BatteryCommand = 0x534E4A41 // This signal indicates that the Battery is in the Scooter. ("SNJA")
-	BatteryCommandBatteryRemoved    BatteryCommand = 0x4753534F // Battery Management System tells LED Ring that Battery removed from Charger or from Scooter. ("GSSO")
-	BatteryCommandSocUpdate         BatteryCommand = 0xFE4C4958 // Battery Management System tells LED Ring the SOC percentage, set data[0] = SOC %. ("þLIX")
-	BatteryCommandUserOpenedSeatbox BatteryCommand = 0x48525259 // Scooter sends this command to BMS, which forwards command to LED Ring. ("HRRY")
-	BatteryCommandUserClosedSeatbox BatteryCommand = 0x4D4B4D4B // Scooter sends this command to BMS, which forwards command to LED Ring. ("MKMK")
-	BatteryCommandErrorDetected     BatteryCommand = 0x54484D53 // Battery Management System sends this command to LED Ring when an error is detected. ("THMS")
-	BatteryCommandLedPassthrough    BatteryCommand = 0x52AAABEB // Entire BatteryControlMessage is forwarded to LED Ring.
-
-	// Responses from Battery Management Software (written to command register)
-	BatteryCommandReadyToCharge BatteryCommand = 0x4D485249 // Battery writes this to indicate ready to charge. ("MHRI")
-	BatteryCommandReadyToScoot  BatteryCommand = 0x4D484D54 // Battery writes this to indicate ready to scoot. ("MHMT")
-
-	BatteryCommandNone BatteryCommand = 0 // Keep for default/unknown
+	BMSCmdNone              BMSCommand = 0
+	BMSCmdOn                BMSCommand = 0x50505050
+	BMSCmdOff               BMSCommand = 0xCAFEF00D
+	BMSCmdInsertedInScooter BMSCommand = 0x44414E41
+	BMSCmdSeatboxOpened     BMSCommand = 0x48525259
+	BMSCmdSeatboxClosed     BMSCommand = 0x4D4B4D4B
+	BMSCmdHeartbeatScooter  BMSCommand = 0x534E4A41
+	BMSCmdInsertedInCharger BMSCommand = 0x4D415856
+	BMSCmdHeartbeatCharger  BMSCommand = 0x4755494C
+	BMSCmdReadyToCharge     BMSCommand = 0x4D485249
+	BMSCmdReadyToScoot      BMSCommand = 0x4D484D54
 )
 
-// String returns a string representation of the battery command with hex and ASCII
-func (c BatteryCommand) String() string {
-	// Convert to bytes (big-endian order for ASCII display)
-	bytes := []byte{
-		byte(c >> 24),
-		byte(c >> 16),
-		byte(c >> 8),
-		byte(c),
-	}
-
-	// Convert to ASCII, replacing non-printable with '.'
-	ascii := make([]byte, 4)
-	for i, b := range bytes {
-		if b >= 32 && b <= 126 { // Printable ASCII range
-			ascii[i] = b
-		} else {
-			ascii[i] = '.'
-		}
-	}
-
+func (c BMSCommand) String() string {
 	switch c {
-	case BatteryCommandOn:
-		return fmt.Sprintf("BMS_CMD_ON (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandOff:
-		return fmt.Sprintf("BMS_CMD_OFF (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandSleepNow:
-		return fmt.Sprintf("BMS_CMD_SLEEP_NOW (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandInsertedInCharger:
-		return fmt.Sprintf("BMS_CMD_INSERTED_IN_CHARGER (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandInsertedInScooter:
-		return fmt.Sprintf("BMS_CMD_INSERTED_IN_SCOOTER (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandChargerHeartbeat:
-		return fmt.Sprintf("BMS_CMD_CHARGER_HEARTBEAT (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandScooterHeartbeat:
-		return fmt.Sprintf("BMS_CMD_SCOOTER_HEARTBEAT (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandBatteryRemoved:
-		return fmt.Sprintf("BMS_CMD_BATTERY_REMOVED (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandSocUpdate:
-		return fmt.Sprintf("BMS_CMD_SOC_UPDATE (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandUserOpenedSeatbox:
-		return fmt.Sprintf("BMS_CMD_USER_OPENED_SEATBOX (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandUserClosedSeatbox:
-		return fmt.Sprintf("BMS_CMD_USER_CLOSED_SEATBOX (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandErrorDetected:
-		return fmt.Sprintf("BMS_CMD_ERROR_DETECTED (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandLedPassthrough:
-		return fmt.Sprintf("BMS_CMD_LED_PASSTHROUGH (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandReadyToCharge:
-		return fmt.Sprintf("BMS_CMD_READY_TO_CHARGE (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandReadyToScoot:
-		return fmt.Sprintf("BMS_CMD_READY_TO_SCOOT (0x%08X) \"%s\"", uint32(c), string(ascii))
-	case BatteryCommandNone:
-		return fmt.Sprintf("BMS_CMD_NONE (0x%08X) \"%s\"", uint32(c), string(ascii))
+	case BMSCmdNone:
+		return "NONE"
+	case BMSCmdOn:
+		return "ON"
+	case BMSCmdOff:
+		return "OFF"
+	case BMSCmdInsertedInScooter:
+		return "INSERTED_IN_SCOOTER"
+	case BMSCmdSeatboxOpened:
+		return "SEATBOX_OPENED"
+	case BMSCmdSeatboxClosed:
+		return "SEATBOX_CLOSED"
+	case BMSCmdHeartbeatScooter:
+		return "HEARTBEAT_SCOOTER"
+	case BMSCmdInsertedInCharger:
+		return "INSERTED_IN_CHARGER"
+	case BMSCmdHeartbeatCharger:
+		return "HEARTBEAT_CHARGER"
+	case BMSCmdReadyToCharge:
+		return "READY_TO_CHARGE"
+	case BMSCmdReadyToScoot:
+		return "READY_TO_SCOOT"
 	default:
-		return fmt.Sprintf("BMS_CMD_UNKNOWN (0x%08X) \"%s\"", uint32(c), string(ascii))
+		return "UNKNOWN"
 	}
 }
 
-// BatteryTemperatureState represents the temperature state of the battery
-type BatteryTemperatureState int
+type VehicleState string
 
 const (
-	BatteryTemperatureStateUnknown BatteryTemperatureState = iota
-	BatteryTemperatureStateCold
-	BatteryTemperatureStateHot
-	BatteryTemperatureStateIdeal
+	VehicleStateStandby                    VehicleState = "stand-by"
+	VehicleStateParked                     VehicleState = "parked"
+	VehicleStateReadyToDrive               VehicleState = "ready-to-drive"
+	VehicleStateWaitingSeatbox             VehicleState = "waiting-seatbox"
+	VehicleStateShuttingDown               VehicleState = "shutting-down"
+	VehicleStateUpdating                   VehicleState = "updating"
+	VehicleStateWaitingHibernation         VehicleState = "waiting-hibernation"
+	VehicleStateWaitingHibernationAdvanced VehicleState = "waiting-hibernation-advanced"
+	VehicleStateWaitingHibernationSeatbox  VehicleState = "waiting-hibernation-seatbox"
+	VehicleStateWaitingHibernationConfirm  VehicleState = "waiting-hibernation-confirm"
+	VehicleStateOther                      VehicleState = "other"
 )
 
-// String returns a string representation of the temperature state
-func (s BatteryTemperatureState) String() string {
-	switch s {
-	case BatteryTemperatureStateCold:
-		return "cold"
-	case BatteryTemperatureStateHot:
-		return "hot"
-	case BatteryTemperatureStateIdeal:
-		return "ideal"
-	default:
-		return "unknown"
-	}
-}
+type BMSTemperatureState int
 
-// Constants for battery data
 const (
-	BatteryFWVersionLen         = 7 // "255.255"
-	BatterySerialNumberLen      = 16
-	BatteryManufacturingDateLen = 10 // "2020-01-01"
-	BatteryNumTemperatures      = 4
+	BMSTemperatureStateUnknown BMSTemperatureState = iota
+	BMSTemperatureStateCold
+	BMSTemperatureStateHot
+	BMSTemperatureStateIdeal
 )
 
-// BatteryFaults represents specific fault conditions reported by the battery
-type BatteryFaults struct {
-	ChargeTempOverHigh    bool
-	ChargeTempOverLow     bool
-	DischargeTempOverHigh bool
-	DischargeTempOverLow  bool
-	SignalWireBroken      bool
-	SecondLevelOverTemp   bool
-	PackVoltageHigh       bool
-	MOSTempOverHigh       bool
-	CellVoltageHigh       bool
-	PackVoltageLow        bool
-	CellVoltageLow        bool
-	ChargeOverCurrent     bool
-	DischargeOverCurrent  bool
-	ShortCircuit          bool
-	NotFollowingCommand   bool // Battery state not changing as expected after command
-	ZeroData              bool // Received all zero data from battery
-	CommunicationError    bool // Error during NFC read/write
-	ReaderError           bool // Underlying NFC reader hardware error
+const (
+	BMSTemperatureStateColdLimit = 2
+	BMSTemperatureStateHotLimit  = 43
+)
+
+type BMSFault int
+
+const (
+	BMSFaultNone BMSFault = 0
+
+	BMSFaultChgTempOverHighProt BMSFault = 1
+	BMSFaultChgTempOverLowProt  BMSFault = 2
+	BMSFaultDsgTempOverHighProt BMSFault = 3
+	BMSFaultDsgTempOverLowProt  BMSFault = 4
+	BMSFaultSignalWireBrokeProt BMSFault = 5
+	BMSFaultSecondLvlOverTemp   BMSFault = 6
+	BMSFaultPackVoltHighProt    BMSFault = 7
+	BMSFaultMosTempOverHighProt BMSFault = 8
+	BMSFaultCellVoltHighProt    BMSFault = 9
+	BMSFaultPackVoltLowProt     BMSFault = 10
+	BMSFaultCellVoltLowProt     BMSFault = 11
+	BMSFaultCrgOverCurrentProt  BMSFault = 12
+	BMSFaultDsgOverCurrentProt  BMSFault = 13
+	BMSFaultShortCircuitProt    BMSFault = 14
+	BMSFaultReserved            BMSFault = 15
+	BMSFaultReserved2           BMSFault = 16
+
+	BMSFaultBMSNotFollowingCmd BMSFault = 32
+	BMSFaultBMSZeroData        BMSFault = 33
+	BMSFaultBMSCommsError      BMSFault = 34
+	BMSFaultNFCReaderError     BMSFault = 35
+
+	BMSFaultNum BMSFault = 64
+)
+
+func (f BMSFault) IsCritical() bool {
+	return f >= BMSFaultBMSZeroData
 }
 
-// BatteryData represents the data read from a battery
-type BatteryData struct {
-	Present            bool
-	Voltage            uint16
-	Current            int16
-	FWVersion          string
-	Charge             uint8
-	FaultCode          uint16        // Keep raw fault code for reference
-	Faults             BatteryFaults // Detailed fault breakdown
-	Temperature        [BatteryNumTemperatures]int8
-	TemperatureState   BatteryTemperatureState
-	StateOfHealth      uint8
-	LowSOC             bool
-	State              BatteryState
-	SerialNumber       [BatterySerialNumberLen]byte
-	ManufacturingDate  string
-	CycleCount         uint16
-	RemainingCapacity  uint16
-	FullCapacity       uint16
-	ZeroDataRetryCount int // Counter for consecutive zero data responses
+type BMSData struct {
+	Present           bool                `json:"present"`
+	Voltage           uint                `json:"voltage"`
+	Current           int                 `json:"current"`
+	FwVersion         string              `json:"fw_version"`
+	Charge            uint                `json:"charge"`
+	FaultCode         uint                `json:"fault_code"`
+	Temperature       [4]int              `json:"temperature"`
+	TemperatureState  BMSTemperatureState `json:"temperature_state"`
+	StateOfHealth     uint8               `json:"state_of_health"`
+	LowSOC            bool                `json:"low_soc"`
+	State             BMSState            `json:"state"`
+	SerialNumber      string              `json:"serial_number"`
+	ManuDate          string              `json:"manu_date"`
+	CycleCount        uint                `json:"cycle_count"`
+	RemainingCapacity uint                `json:"remaining_capacity"`
+	FullCapacity      uint                `json:"full_capacity"`
+	EmptyOr0Data      int                 `json:"empty_or_0_data"`
 }
 
-// ServiceConfig represents the configuration for the battery service
+const (
+	BMSTimeReinit               = 2 * time.Second
+	BMSTimeDeparture            = 500 * time.Millisecond
+	BMSTimeCheckReader          = 10 * time.Second
+	BMSTimeReadable             = 250 * time.Millisecond
+	BMSTimeCmd                  = 400 * time.Millisecond
+	BMSTimeCmdSlow              = 1 * time.Second
+	BMSTimeCmdFirstOpenedAwake  = 2 * time.Second
+	BMSTimeCmdFirstOpenedAsleep = 3 * time.Second
+	BMSTimeUpdateOn             = 10 * time.Second
+	BMSTimePresence             = 10 * time.Second
+)
+
+// Retry limits
+const (
+	BMSMaxZeroRetryHeartbeat = 10
+	BMSMaxRetryTakeInhibitor = 10
+	BMSMinSOC                = 0
+)
+
+type BatteryRole string
+
+const (
+	BatteryRoleActive   BatteryRole = "active"
+	BatteryRoleInactive BatteryRole = "inactive"
+)
+
+// Configuration types
 type ServiceConfig struct {
 	RedisServerAddress string
 	RedisServerPort    uint16
 	TestMainPower      bool
+	HeartbeatTimeout   time.Duration
+	OffUpdateTime      time.Duration
+}
+
+type BatteryReaderConfig struct {
+	Index      int
+	Role       BatteryRole
+	Enabled    bool
+	DeviceName string
+	LogLevel   int
+}
+
+type BatteryConfiguration struct {
+	Readers []BatteryReaderConfig
+}
+
+// Initialization completion tracking
+type InitComplete struct {
+	VehicleState bool
+	SeatboxLock  bool
+}
+
+// Service represents the main battery service
+type Service struct {
+	config        *ServiceConfig
+	batteryConfig *BatteryConfiguration
+	logger        Logger
+	ctx           context.Context
+	cancel        context.CancelFunc
+	debug         bool
+	redis         *redis.Client
+	vehicleState  VehicleState
+	readers       []*BatteryReader
+}
+
+// BatteryReader represents a single battery reader with its own event loop
+type BatteryReader struct {
+	// Basic configuration
+	index      int
+	role       BatteryRole
+	deviceName string
+	logLevel   int
+	service    *Service
+
+	// NFC HAL - owned exclusively by this reader's goroutine
+	hal *hal.PN7150
+
+	// State machine
+	state State
+	data  BMSData
+
+	// Event loop control
+	stopChan    chan struct{}
+	restartChan chan struct{} // Preemption mechanism
+
+	// Timer management
+	stateTimer       *time.Timer
+	heartbeatTimer   *time.Timer
+	heartbeatRunning bool
+
+	// Event channels
+	vehicleStateChan chan VehicleState
+	seatboxLockChan  chan bool
+	enabledChan      chan bool
+
+	// State tracking
+	enabled                  bool
+	vehicleState             VehicleState
+	seatboxLockClosed        bool
+	latchedSeatboxLockClosed bool
+	justInserted             bool
+	justOpened               bool
+	lastCmdTime              time.Time
+	initComplete             InitComplete
+	previousTagPresent       bool
+
+	// Fault management
+	faultDebounceTimers map[BMSFault]*time.Timer
+	faultStates         map[BMSFault]*FaultState
+
+	// Redis
+	redis *redis.Client
+
+	// Power management
+	suspendInhibitor interface{}
+}
+
+type FaultState struct {
+	Present      bool
+	PendingSet   bool
+	PendingReset bool
+	SetTimer     *time.Timer
+	ResetTimer   *time.Timer
+}
+
+// Interface types for dependency injection
+type Logger interface {
+	Printf(format string, v ...interface{})
+	Fatalf(format string, v ...interface{})
 }

@@ -6,25 +6,25 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"battery-service/battery"
 )
 
 func main() {
-	// Parse command line flags
 	config := &battery.ServiceConfig{}
 
-	// Redis configuration
 	flag.StringVar(&config.RedisServerAddress, "redis-server", "127.0.0.1", "Redis server address")
 	var redisPort uint
 	flag.UintVar(&redisPort, "redis-port", 6379, "Redis server port")
 
-	// Battery service configuration
 	flag.BoolVar(&config.TestMainPower, "test-main-power", false, "Enable main power test mode")
+	var heartbeatTimeout, offUpdateTime uint
+	flag.UintVar(&heartbeatTimeout, "heartbeat-timeout", 40, "Heartbeat timeout for standby mode in seconds")
+	flag.UintVar(&offUpdateTime, "off-update-time", 1800, "Update time when disabled in seconds (30 minutes)")
 	var debugMode bool
 	flag.BoolVar(&debugMode, "debug", false, "Enable debug logging for detailed NCI/DATA messages")
 
-	// Battery configuration
 	var device0, device1 string
 	var logLevel0, logLevel1 int
 	var battery1Active bool
@@ -36,18 +36,17 @@ func main() {
 
 	flag.Parse()
 
-	// Convert uint to uint16 where needed
 	config.RedisServerPort = uint16(redisPort)
+	config.HeartbeatTimeout = time.Duration(heartbeatTimeout) * time.Second
+	config.OffUpdateTime = time.Duration(offUpdateTime) * time.Second
 
-	// Create logger with systemd/journald awareness
 	var logger *log.Logger
 	if os.Getenv("INVOCATION_ID") != "" {
-		logger = log.New(os.Stdout, "", 0)
+		logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
 	} else {
-		logger = log.New(os.Stdout, "librescoot-battery: ", log.LstdFlags|log.Lmsgprefix)
+		logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds|log.Lmsgprefix)
 	}
 
-	// Create battery configuration
 	batteryConfig := &battery.BatteryConfiguration{
 		Readers: []battery.BatteryReaderConfig{
 			{
@@ -67,27 +66,26 @@ func main() {
 		},
 	}
 
-	// Set battery 1 role based on flag
 	if battery1Active {
 		batteryConfig.Readers[1].Role = battery.BatteryRoleActive
 	}
 
-	// Create battery service
 	service, err := battery.NewService(config, batteryConfig, logger, debugMode)
 	if err != nil {
 		logger.Fatalf("Failed to create battery service: %v", err)
 	}
 
-	// Start the service
 	if err := service.Start(); err != nil {
 		logger.Fatalf("Failed to start battery service: %v", err)
 	}
 
-	// Wait for interrupt signal
+	logger.Printf("Battery service v2 started with %d readers", len(batteryConfig.Readers))
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	// Stop the service
+	logger.Printf("Shutting down battery service v2...")
+
 	service.Stop()
 }
