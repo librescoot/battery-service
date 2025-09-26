@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"battery-service/nfc/hal"
+
 	"github.com/redis/go-redis/v9"
 )
 
@@ -141,9 +142,16 @@ func (r *BatteryReader) run() {
 }
 
 func (r *BatteryReader) handleRestart() {
-	if r.isIn(StateTagPresent) && !r.isIn(StateCheckPresence) {
-		r.service.logger.Printf("Battery %d: Restarting state machine", r.index)
+	inTagPresent := r.isIn(StateTagPresent)
+	inCheckPresence := r.isIn(StateCheckPresence)
+	r.service.logger.Printf("Battery %d: Restart requested - currentState=%s, inStateTagPresent=%t, inStateCheckPresence=%t",
+		r.index, r.state, inTagPresent, inCheckPresence)
+
+	if inTagPresent {
+		r.service.logger.Printf("Battery %d: Restarting state machine from %s", r.index, r.state)
 		r.transitionTo(StateTagPresent)
+	} else {
+		r.service.logger.Printf("Battery %d: Restart skipped - not in StateTagPresent (current: %s)", r.index, r.state)
 	}
 }
 
@@ -228,17 +236,31 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 	r.initComplete.SeatboxLock = true
 	r.seatboxLockClosed = closed
 
+	// Log state machine info on seatbox change
+	r.service.logger.Printf("Battery %d: Seatbox %s - role=%s, state=%s, enabled=%t, inStateTagPresent=%t",
+		r.index, map[bool]string{true: "closed", false: "opened"}[closed], r.role, r.state, r.enabled, r.isIn(StateTagPresent))
+
 	if r.role == BatteryRoleActive {
 		newEnabled := closed
 		if r.enabled != newEnabled {
+			r.service.logger.Printf("Battery %d: Active battery enabled state changing from %t to %t", r.index, r.enabled, newEnabled)
 			r.enabled = newEnabled
 			if r.isIn(StateTagPresent) {
+				r.service.logger.Printf("Battery %d: Triggering restart due to enabled state change", r.index)
 				r.triggerRestart()
+			} else {
+				r.service.logger.Printf("Battery %d: Not triggering restart - not in StateTagPresent (current state: %s)", r.index, r.state)
 			}
+		} else {
+			r.service.logger.Printf("Battery %d: Active battery enabled state unchanged (enabled=%t)", r.index, r.enabled)
 		}
+	} else {
+		r.service.logger.Printf("Battery %d: Inactive battery - skipping enabled state logic", r.index)
 	}
 
 	oldLatch := r.latchedSeatboxLockClosed
+	r.service.logger.Printf("Battery %d: Latch logic - vehicleState=%s, oldLatch=%t, seatboxClosed=%t",
+		r.index, r.vehicleState, oldLatch, closed)
 	if r.vehicleState == VehicleStateReadyToDrive {
 		r.latchedSeatboxLockClosed = closed
 	} else if closed {
@@ -246,9 +268,17 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 	} else {
 		r.latchedSeatboxLockClosed = false
 	}
+	r.service.logger.Printf("Battery %d: Latch updated from %t to %t", r.index, oldLatch, r.latchedSeatboxLockClosed)
 
 	if r.latchedSeatboxLockClosed != oldLatch && r.isIn(StateTagPresent) {
+		r.service.logger.Printf("Battery %d: Latch changed (%t -> %t) and in StateTagPresent - triggering restart",
+			r.index, oldLatch, r.latchedSeatboxLockClosed)
 		r.triggerRestart()
+	} else if r.latchedSeatboxLockClosed != oldLatch {
+		r.service.logger.Printf("Battery %d: Latch changed (%t -> %t) but NOT in StateTagPresent (current state: %s) - restart skipped",
+			r.index, oldLatch, r.latchedSeatboxLockClosed, r.state)
+	} else {
+		r.service.logger.Printf("Battery %d: Latch unchanged (%t) - no restart needed", r.index, oldLatch)
 	}
 
 	r.checkInitComplete()
