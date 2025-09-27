@@ -452,8 +452,8 @@ func (r *BatteryReader) updateTemperatureState() {
 }
 
 func (r *BatteryReader) sendStatusUpdate() {
-	effectivePresent := r.data.Present && !r.hasCriticalFaults()
-	previousEffectivePresent := r.previousData.Present && !r.hasCriticalFaultsPrevious()
+	effectivePresent := r.data.Present
+	previousEffectivePresent := r.previousData.Present
 
 	hashKey := fmt.Sprintf("battery:%d", r.index)
 	channel := fmt.Sprintf("battery:%d", r.index)

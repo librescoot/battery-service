@@ -169,26 +169,6 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 	}
 }
 
-func (r *BatteryReader) hasCriticalFaults() bool {
-	for fault, state := range r.faultStates {
-		config, exists := faultConfigs[fault]
-		if exists && config.IsCritical && state.Present {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *BatteryReader) hasCriticalFaultsPrevious() bool {
-	for fault, state := range r.faultStates {
-		config, exists := faultConfigs[fault]
-		if exists && config.IsCritical && state.PublishedToRedis {
-			return true
-		}
-	}
-	return false
-}
-
 func (r *BatteryReader) parseHardwareFaults(faultCode uint) {
 	for bit := 0; bit < 16; bit++ {
 		fault := BMSFault(bit + 1)
