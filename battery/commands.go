@@ -178,8 +178,8 @@ func (r *BatteryReader) readStatus() bool {
 		r.index, r.data.State.String(), r.data.Voltage, r.data.Current, r.data.Charge,
 		r.data.Temperature[0], r.data.Temperature[1], r.data.Temperature[2], r.data.Temperature[3])
 
-	r.setNFCFault(BMSFaultBMSCommsError, false)
-	r.setNFCFault(BMSFaultBMSZeroData, false)
+	r.setFault(BMSFaultBMSCommsError, false)
+	r.setFault(BMSFaultBMSZeroData, false)
 
 	// Reset communication failure counter on successful read
 	r.commFailureCount = 0
@@ -289,7 +289,7 @@ func (r *BatteryReader) handleNFCError(err error) {
 	if isHALError(err) {
 		r.commFailureCount++
 		r.service.logger.Warnf("Battery %d: Communication failure %d: %v", r.index, r.commFailureCount, err)
-		r.setNFCFault(BMSFaultBMSCommsError, true)
+		r.setFault(BMSFaultBMSCommsError, true)
 	} else {
 		// Transient errors - no fault, will be retried by caller
 		r.service.logger.Debugf("Battery %d: Transient error, retrying: %v", r.index, err)
@@ -616,7 +616,7 @@ func (r *BatteryReader) batteryEmpty() bool {
 
 func (r *BatteryReader) checkInactive() bool {
 	correct := (r.data.State == BMSStateAsleep) || (r.data.State == BMSStateIdle)
-	r.setStateFault(BMSFaultBMSNotFollowingCmd, !correct)
+	r.setFault(BMSFaultBMSNotFollowingCmd, !correct)
 	return correct
 }
 
@@ -636,7 +636,7 @@ func (r *BatteryReader) checkStateCorrect(raiseFault bool) bool {
 			!tryingToSwitchOnWithLowSOCOrFault &&
 			r.data.EmptyOr0Data == 0
 
-		r.setStateFault(BMSFaultBMSNotFollowingCmd, faultCriteria)
+		r.setFault(BMSFaultBMSNotFollowingCmd, faultCriteria)
 	}
 
 	return correct
@@ -849,10 +849,3 @@ func (r *BatteryReader) releaseInhibitor() {
 	r.suspendInhibitor = nil
 }
 
-func (r *BatteryReader) setNFCFault(fault BMSFault, present bool) {
-	r.setFault(fault, present)
-}
-
-func (r *BatteryReader) setStateFault(fault BMSFault, present bool) {
-	r.setFault(fault, present)
-}
