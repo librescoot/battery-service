@@ -68,6 +68,9 @@ func (r *BatteryReader) Start() error {
 	}
 	r.service.logger.Infof("Battery %d: NFC reader initialized successfully", r.index)
 
+	// Clear NFC reader error fault on successful initialization
+	r.setFault(BMSFaultNFCReaderError, false)
+
 	go r.run()
 
 	return nil
