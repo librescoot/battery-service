@@ -138,12 +138,16 @@ func (r *BatteryReader) sendNotPresent() {
 }
 
 func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present bool) {
-	// Add fault event to Redis stream
 	batteryName := fmt.Sprintf("battery:%d", r.index)
+	faultSetKey := fmt.Sprintf("battery:%d:fault", r.index)
+	ctx := context.TODO()
 
 	if present {
-		// Fault set event
-		if err := r.redis.XAdd(context.TODO(), &redis.XAddArgs{
+		if err := r.redis.SAdd(ctx, faultSetKey, fault).Err(); err != nil {
+			r.service.logger.Warnf("Battery %d: Failed to add fault to set: %v", r.index, err)
+		}
+
+		if err := r.redis.XAdd(ctx, &redis.XAddArgs{
 			Stream: "events:faults",
 			MaxLen: 1000,
 			Values: map[string]interface{}{
@@ -154,9 +158,16 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 		}).Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to add fault event to stream: %v", r.index, err)
 		}
+
+		if err := r.redis.Publish(ctx, batteryName, "fault").Err(); err != nil {
+			r.service.logger.Warnf("Battery %d: Failed to publish fault notification: %v", r.index, err)
+		}
 	} else {
-		// Fault clear event (negative code)
-		if err := r.redis.XAdd(context.TODO(), &redis.XAddArgs{
+		if err := r.redis.SRem(ctx, faultSetKey, fault).Err(); err != nil {
+			r.service.logger.Warnf("Battery %d: Failed to remove fault from set: %v", r.index, err)
+		}
+
+		if err := r.redis.XAdd(ctx, &redis.XAddArgs{
 			Stream: "events:faults",
 			MaxLen: 1000,
 			Values: map[string]interface{}{
@@ -165,6 +176,10 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 			},
 		}).Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to add fault clear event to stream: %v", r.index, err)
+		}
+
+		if err := r.redis.Publish(ctx, batteryName, "fault").Err(); err != nil {
+			r.service.logger.Warnf("Battery %d: Failed to publish fault clear notification: %v", r.index, err)
 		}
 	}
 }
