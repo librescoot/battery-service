@@ -644,7 +644,7 @@ func (r *BatteryReader) checkStateCorrect(raiseFault bool) bool {
 
 func (r *BatteryReader) handleDeparture() {
 	r.service.logger.Infof("Battery %d: Tag departed", r.index)
-	r.data.Present = false
+	r.data = BMSData{}
 	r.sendStatusUpdate()
 }
 

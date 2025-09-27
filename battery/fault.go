@@ -132,7 +132,7 @@ func (r *BatteryReader) clearLesserFaults(referenceFault BMSFault, includeRefere
 }
 
 func (r *BatteryReader) sendNotPresent() {
-	r.data.Present = false
+	r.data = BMSData{}
 	r.sendStatusUpdate()
 	r.service.logger.Warnf("Battery %d: Reported as not present due to critical fault", r.index)
 }
