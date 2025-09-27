@@ -660,7 +660,7 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 
 	case nciRFDeactivateOID:
 		if p.logCallback != nil {
-			p.logCallback(LogLevelDebug, "Tag departure")
+			p.logCallback(LogLevelDebug, "RF_DEACTIVATE_NTF received")
 		}
 		// When a deactivation notification is received, it means no tag is currently active.
 		// Always clear current tag information and transition to discovering state.
@@ -1103,9 +1103,6 @@ func (p *PN7150) SelectTag(tagIdx uint) error {
 	// Wait for tag activation
 	err = p.awaitNotification(0x0105, 250) // RF_INTF_ACTIVATED notification
 	if err != nil {
-		if err.Error() == "timeout" {
-			return fmt.Errorf("tag departed")
-		}
 		return err
 	}
 

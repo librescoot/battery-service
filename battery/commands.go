@@ -110,7 +110,13 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 				r.service.logger.Debugf("Battery %d: Arbiter busy at 0x%04X, calling SelectTag(0) (retry %d)", r.index, address, retry)
 			}
 			if err := r.hal.SelectTag(0); err != nil {
-				r.service.logger.Warnf("Battery %d: SelectTag failed: %v", r.index, err)
+				// Only treat as tag departed if SelectTag explicitly returns ErrTagDeparted
+				if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
+					return nil, err
+				}
+				// Other SelectTag errors (e.g., timeout) - log and continue retry
+				r.service.logger.Warnf("Battery %d: SelectTag failed: %v, continuing retry", r.index, err)
+				// Don't continue - this retry failed, try the whole read again
 			}
 			// Reset verification state on arbiter busy
 			check = false
@@ -224,7 +230,13 @@ func (r *BatteryReader) writeCommand(cmd BMSCommand) {
 				r.service.logger.Debugf("Battery %d: Arbiter busy writing command %s, calling SelectTag(0) (retry %d)", r.index, cmd, retry)
 			}
 			if err := r.hal.SelectTag(0); err != nil {
-				r.service.logger.Warnf("Battery %d: SelectTag failed: %v", r.index, err)
+				// Only treat as tag departed if SelectTag explicitly returns ErrTagDeparted
+				if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
+					lastErr = err
+					break
+				}
+				// Other SelectTag errors (e.g., timeout) - log and continue retry
+				r.service.logger.Warnf("Battery %d: SelectTag failed: %v, continuing retry", r.index, err)
 			}
 			continue
 		}
