@@ -1313,15 +1313,11 @@ func (p *PN7150) handle0300Error(operation string) (bool, error) {
 		p.logCallback(LogLevelWarning, fmt.Sprintf("NTAG arbiter busy in %s", operation))
 	}
 
-	// Immediately attempt tag reselection for arbiter busy
 	if p.numTags > 0 {
 		if p.logCallback != nil {
 			p.logCallback(LogLevelInfo, "Attempting tag reselection for arbiter busy conflict")
 		}
 
-		time.Sleep(25 * time.Millisecond)
-
-		// Try tag reselection to resolve arbiter conflict
 		err := p.reselectCurrentTag()
 		if err != nil {
 			if p.logCallback != nil {

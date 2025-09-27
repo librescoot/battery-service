@@ -169,6 +169,12 @@ func (r *BatteryReader) enterState(newState State) {
 	case StateCondCheckPresence:
 		r.takeInhibitor()
 		r.retryZeroDataOrEmptyBattery()
+		// Check if tag is still present before attempting read
+		r.checkForTags()
+		if r.state != StateCondCheckPresence {
+			// Tag departed, checkForTags() triggered transition
+			return
+		}
 		if r.readStatus() {
 			r.data.EmptyOr0Data = 0
 			r.transitionTo(StateWaitLastCmd)
@@ -183,6 +189,12 @@ func (r *BatteryReader) enterState(newState State) {
 		}
 
 	case StateCheckPresence:
+		// Check if tag is still present before writing command
+		r.checkForTags()
+		if r.state != StateCheckPresence {
+			// Tag departed, checkForTags() triggered transition
+			return
+		}
 		r.setStateTimer(BMSTimePresence)
 		r.writeCommandProtected(BMSCmdInsertedInScooter)
 

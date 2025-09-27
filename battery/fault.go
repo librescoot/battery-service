@@ -60,7 +60,7 @@ func (r *BatteryReader) setFault(fault BMSFault, present bool) {
 		r.faultStates[fault] = state
 	}
 
-	if state.Present == present {
+	if state.Present == present && !state.PendingSet && !state.PendingReset {
 		return
 	}
 
