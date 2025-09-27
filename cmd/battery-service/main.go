@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -11,9 +12,20 @@ import (
 	"battery-service/battery"
 )
 
+// Build-time variables set by linker
+var (
+	gitRevision = "unknown"
+	buildTime   = "unknown"
+)
+
 func main() {
 	config := &battery.ServiceConfig{}
 
+	// Version flag
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+
+	// Redis configuration
 	flag.StringVar(&config.RedisServerAddress, "redis-server", "127.0.0.1", "Redis server address")
 	var redisPort uint
 	flag.UintVar(&redisPort, "redis-port", 6379, "Redis server port")
@@ -36,13 +48,20 @@ func main() {
 
 	flag.Parse()
 
+	// Show version and exit if requested
+	if showVersion {
+		fmt.Printf("battery-service version %s (built %s)\n", gitRevision, buildTime)
+		os.Exit(0)
+	}
+
+	// Convert uint to uint16 and Duration where needed
 	config.RedisServerPort = uint16(redisPort)
 	config.HeartbeatTimeout = time.Duration(heartbeatTimeout) * time.Second
 	config.OffUpdateTime = time.Duration(offUpdateTime) * time.Second
 
 	var logger *log.Logger
 	if os.Getenv("INVOCATION_ID") != "" {
-		logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+		logger = log.New(os.Stdout, "", log.LstdFlags)
 	} else {
 		logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds|log.Lmsgprefix)
 	}
@@ -70,6 +89,10 @@ func main() {
 		batteryConfig.Readers[1].Role = battery.BatteryRoleActive
 	}
 
+	// Log version information at startup
+	logger.Printf("Battery service v2 starting (git: %s, built: %s)", gitRevision, buildTime)
+
+	// Create battery service
 	service, err := battery.NewService(config, batteryConfig, logger, debugMode)
 	if err != nil {
 		logger.Fatalf("Failed to create battery service: %v", err)
