@@ -356,42 +356,15 @@ func (r *BatteryReader) triggerRestart() {
 }
 
 func (r *BatteryReader) SetEnabled(enabled bool) {
-	select {
-	case r.enabledChan <- enabled:
-	default:
-		select {
-		case <-r.enabledChan:
-			r.enabledChan <- enabled
-		default:
-			r.enabledChan <- enabled
-		}
-	}
+	tryUpdateChannel(r.enabledChan, enabled)
 }
 
 func (r *BatteryReader) SendVehicleStateChange(state VehicleState) {
-	select {
-	case r.vehicleStateChan <- state:
-	default:
-		select {
-		case <-r.vehicleStateChan:
-			r.vehicleStateChan <- state
-		default:
-			r.vehicleStateChan <- state
-		}
-	}
+	tryUpdateChannel(r.vehicleStateChan, state)
 }
 
 func (r *BatteryReader) SendSeatboxLockChange(closed bool) {
-	select {
-	case r.seatboxLockChan <- closed:
-	default:
-		select {
-		case <-r.seatboxLockChan:
-			r.seatboxLockChan <- closed
-		default:
-			r.seatboxLockChan <- closed
-		}
-	}
+	tryUpdateChannel(r.seatboxLockChan, closed)
 }
 
 func (r *BatteryReader) fetchInitialRedisState() {
