@@ -190,16 +190,24 @@ func parseNCIResponse(data []byte) (*nciResponse, error) {
 		if header.Length < 1 {
 			return nil, fmt.Errorf("invalid response length")
 		}
+		// Make a copy of the payload to avoid referencing the reusable buffer
+		payloadLen := int(header.Length) - 1
+		payload := make([]byte, payloadLen)
+		copy(payload, data[4:3+header.Length])
 		return &nciResponse{
 			Status:  data[3],
-			Payload: data[4 : 3+header.Length],
+			Payload: payload,
 		}, nil
 	}
 
 	// For notifications, no status byte
+	// Make a copy of the payload to avoid referencing the reusable buffer
+	payloadLen := int(header.Length)
+	payload := make([]byte, payloadLen)
+	copy(payload, data[3:3+header.Length])
 	return &nciResponse{
 		Status:  nciStatusOK,
-		Payload: data[3 : 3+header.Length],
+		Payload: payload,
 	}, nil
 }
 

@@ -1107,6 +1107,7 @@ func (p *PN7150) SelectTag(tagIdx uint) error {
 	}
 
 	p.tagSelected = true
+	p.state = statePresent // Update state since awaitNotification consumed RF_INTF_ACTIVATED
 	return nil
 }
 
@@ -1630,6 +1631,16 @@ func (p *PN7150) tagEventReader() {
 		}
 
 		if n == 0 {
+			continue
+		}
+
+		// Only call DetectTags when we're in discovery mode
+		// This prevents interfering with synchronous operations like SelectTag
+		p.mutex.Lock()
+		inDiscovery := (p.state == stateDiscovering)
+		p.mutex.Unlock()
+
+		if !inDiscovery {
 			continue
 		}
 
