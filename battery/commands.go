@@ -98,9 +98,25 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 			continue
 		}
 		lastErr = err
+
+		// Tag departed - don't retry
 		if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
 			return nil, err
 		}
+
+		// Arbiter busy - retry with SelectTag(0)
+		if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrArbiterBusy {
+			if r.service.debug {
+				r.service.logger.Debugf("Battery %d: Arbiter busy at 0x%04X, calling SelectTag(0) (retry %d)", r.index, address, retry)
+			}
+			if err := r.hal.SelectTag(0); err != nil {
+				r.service.logger.Warnf("Battery %d: SelectTag failed: %v", r.index, err)
+			}
+			// Reset verification state on arbiter busy
+			check = false
+			continue
+		}
+
 		if r.service.debug {
 			r.service.logger.Debugf("Battery %d: Read error at 0x%04X: %v (retry %d)", r.index, address, err, retry)
 		}
@@ -186,16 +202,39 @@ func (r *BatteryReader) writeCommand(cmd BMSCommand) {
 	cmdBytes[2] = byte(cmd >> 16)
 	cmdBytes[3] = byte(cmd >> 24)
 
-	if err := r.hal.WriteBinary(0x0330, cmdBytes); err != nil {
-		r.service.logger.Errorf("Battery %d: Failed to write command %s: %v", r.index, cmd, err)
-		r.handleNFCError(err)
-	} else {
-		r.updateLastCmdTime()
-		r.commFailureCount = 0
-		r.lastSuccessfulComm = time.Now()
-		r.service.logger.Infof("Battery %d: Sent command %s", r.index, cmd)
+	// Retry logic for arbiter busy
+	const maxRetries = 3
+	var lastErr error
+	for retry := 0; retry < maxRetries; retry++ {
+		err := r.hal.WriteBinary(0x0330, cmdBytes)
+		if err == nil {
+			r.updateLastCmdTime()
+			r.commFailureCount = 0
+			r.lastSuccessfulComm = time.Now()
+			r.service.logger.Infof("Battery %d: Sent command %s", r.index, cmd)
+			r.stopDiscovery()
+			return
+		}
+
+		lastErr = err
+
+		// Arbiter busy - retry with SelectTag(0)
+		if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrArbiterBusy {
+			if r.service.debug {
+				r.service.logger.Debugf("Battery %d: Arbiter busy writing command %s, calling SelectTag(0) (retry %d)", r.index, cmd, retry)
+			}
+			if err := r.hal.SelectTag(0); err != nil {
+				r.service.logger.Warnf("Battery %d: SelectTag failed: %v", r.index, err)
+			}
+			continue
+		}
+
+		// Other errors - don't retry
+		break
 	}
 
+	r.service.logger.Errorf("Battery %d: Failed to write command %s after %d retries: %v", r.index, cmd, maxRetries, lastErr)
+	r.handleNFCError(lastErr)
 	r.stopDiscovery()
 }
 
@@ -205,17 +244,6 @@ func (r *BatteryReader) writeCommandProtected(cmd BMSCommand) {
 
 func (r *BatteryReader) handleNFCError(err error) {
 	r.service.logger.Errorf("Battery %d: NFC communication error: %v", r.index, err)
-
-	// Handle post-reinitialization recovery
-	if err != nil && (strings.Contains(err.Error(), "aborted") && strings.Contains(err.Error(), "after HAL reinitialization")) {
-		r.service.logger.Infof("Battery %d: HAL reinitialization completed, restarting state machine from discovery", r.index)
-		r.setNFCFault(BMSFaultBMSCommsError, false)
-		r.commFailureCount = 0
-		r.lastSuccessfulComm = time.Now()
-		time.Sleep(100 * time.Millisecond)
-		r.transitionTo(StateDiscoverTag)
-		return
-	}
 
 	// Handle tag departure - no fault, clean transition
 	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
@@ -238,13 +266,20 @@ func (r *BatteryReader) handleNFCError(err error) {
 		return
 	}
 
+	// Handle multiple tags detected
+	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrMultipleTags {
+		r.service.logger.Warnf("Battery %d: Multiple tags detected - retrying", r.index)
+		// Treat as transient - will retry on next discovery
+		return
+	}
+
 	// Only set BMSCommsError and count failures for actual HAL errors
 	if isHALError(err) {
 		r.commFailureCount++
 		r.service.logger.Warnf("Battery %d: Communication failure %d: %v", r.index, r.commFailureCount, err)
 		r.setNFCFault(BMSFaultBMSCommsError, true)
 	} else {
-		// Transient errors - no fault, will be retried by HAL layer
+		// Transient errors - no fault, will be retried by caller
 		r.service.logger.Debugf("Battery %d: Transient error, retrying: %v", r.index, err)
 	}
 }
@@ -262,21 +297,27 @@ func isHALError(err error) bool {
 		return false
 	}
 
+	// Multiple tags is not a HAL error
+	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrMultipleTags {
+		return false
+	}
+
 	// Transient errors are not HAL errors
 	if isTransientError(err) {
 		return false
 	}
 
-	// Everything else is considered a HAL error requiring potential reinitialization
+	// Everything else is considered a HAL error
 	return true
 }
 
 func isTransientError(err error) bool {
-	errStr := err.Error()
-	return strings.Contains(errStr, "0300") ||
-		strings.Contains(errStr, "arbiter busy") ||
-		strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "NACK")
+	// Check for arbiter busy error code
+	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrArbiterBusy {
+		return true
+	}
+
+	return false
 }
 
 func (r *BatteryReader) parseStatusData(status0, status1, status2 []byte) {

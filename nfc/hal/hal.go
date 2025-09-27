@@ -38,6 +38,9 @@ type HAL interface {
 
 	// GetFd returns the file descriptor for the NFC device
 	GetFd() int
+
+	// SelectTag selects a specific tag by index for communication
+	SelectTag(tagIdx uint) error
 }
 
 // State represents the state of the NFC controller
@@ -71,7 +74,9 @@ func (s State) String() string {
 
 // Error codes
 const (
-	ErrTagDeparted = -100
+	ErrTagDeparted  = -0x100
+	ErrArbiterBusy  = -0x103 // NTAG I2C arbiter busy (locked to I2C interface)
+	ErrMultipleTags = -0x104
 )
 
 // Error represents an NFC error

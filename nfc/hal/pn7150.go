@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -72,8 +71,6 @@ type PN7150 struct {
 	tagEventReaderStop    chan struct{}
 	tagEventReaderRunning bool
 	detectionFailures     int
-
-	lastRecovery time.Time
 }
 
 func NewPN7150(devName string, logCallback LogCallback, app interface{}, standbyEnabled, lpcdEnabled bool, debugMode bool) (*PN7150, error) {
@@ -631,6 +628,18 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 			return nil, nil
 		}
 
+		// Reject multiple tags
+		if p.numTags > 1 {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelError, fmt.Sprintf("Multiple tags detected: %d (not supported)", p.numTags))
+			}
+			// Clear tag state and return to discovering
+			p.numTags = 0
+			p.state = stateDiscovering
+			p.tagSelected = false
+			return nil, NewError(ErrMultipleTags, "multiple tags not supported")
+		}
+
 		// Tag is now present and selected
 		p.state = statePresent
 		p.tagSelected = true
@@ -661,6 +670,16 @@ func (p *PN7150) DetectTags() ([]Tag, error) {
 	}
 
 	if p.state == statePresent && p.numTags > 0 {
+		// Additional check for multi-tag scenarios
+		if p.numTags > 1 {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelError, fmt.Sprintf("Multiple tags present: %d (not supported)", p.numTags))
+			}
+			p.numTags = 0
+			p.state = stateDiscovering
+			p.tagSelected = false
+			return nil, NewError(ErrMultipleTags, "multiple tags not supported")
+		}
 		return p.tags[:p.numTags], nil
 	}
 	return nil, nil
@@ -806,8 +825,8 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
-			// Handle serious I/O errors with reinitialization
-			return nil, p.handleSeriousErrorWithReinit(err, "read command")
+			// Return error immediately - no automatic recovery
+			return nil, err
 		}
 
 		// We may receive multiple responses - keep reading until we get the actual data
@@ -825,16 +844,10 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 			// Check for special response codes - NTAG arbiter busy
 			if len(resp) >= 5 && resp[3] == 0x03 {
 				// 0x03 = NTAG arbiter busy (locked to I2C interface)
-				// Always treat as arbiter busy since there are no other 0x03 errors
-
-				shouldContinue, err := p.handle0300Error("read")
-				if !shouldContinue {
-					lastErr = err
-					break
+				if p.logCallback != nil {
+					p.logCallback(LogLevelWarning, "NTAG arbiter busy in read")
 				}
-				lastErr = err
-				// Break to outer retry loop to re-attempt the read operation
-				break
+				return nil, NewError(ErrArbiterBusy, "NTAG arbiter busy")
 			}
 
 			// For DATA packets, first 3 bytes are NCI header
@@ -847,14 +860,10 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 
 			// Check for arbiter busy in message type field as well
 			if mt == 0x03 {
-				shouldContinue, err := p.handle0300Error("read")
-				if !shouldContinue {
-					lastErr = err
-					break
+				if p.logCallback != nil {
+					p.logCallback(LogLevelWarning, "NTAG arbiter busy in read (message type)")
 				}
-				lastErr = err
-				// Break to outer retry loop to re-attempt the read operation
-				break
+				return nil, NewError(ErrArbiterBusy, "NTAG arbiter busy")
 			}
 
 			if mt != nciMsgTypeData {
@@ -873,11 +882,6 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 			return result, nil
 		}
 
-		// If we broke from inner loop with arbiter busy (lastErr != nil but reselection succeeded), retry
-		if lastErr != nil && strings.Contains(lastErr.Error(), "arbiter busy") {
-			continue
-		}
-
 		// If we broke from inner loop with no error (soft recovery), continue retry
 		if lastErr == nil {
 			continue
@@ -888,15 +892,6 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 	}
 
 	if lastErr != nil {
-		// Check if this is a tag departure error first
-		if nfcErr, ok := lastErr.(*Error); ok && nfcErr.Code == ErrTagDeparted {
-			return nil, lastErr // Return tag departure error directly without HAL reinitialization
-		}
-		// For serious errors (not 0300, timeout, or tag departure), perform full reinitialization
-		if !strings.Contains(lastErr.Error(), "0300") && !strings.Contains(lastErr.Error(), "timeout") && !strings.Contains(lastErr.Error(), "reinitialization") && !strings.Contains(lastErr.Error(), "tag departed") {
-			finalErr := p.handleSeriousErrorWithReinit(lastErr, "read after retries")
-			return nil, fmt.Errorf("read failed after %d retries: %v", maxRFRetries, finalErr)
-		}
 		return nil, fmt.Errorf("read failed after %d retries: %v", maxRFRetries, lastErr)
 	}
 
@@ -979,8 +974,8 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
-			// Handle serious I/O errors with reinitialization
-			return p.handleSeriousErrorWithReinit(err, "write command")
+			// Return error immediately - no automatic recovery
+			return err
 		}
 
 		// We may receive multiple responses - keep reading until we get the actual ACK
@@ -988,16 +983,10 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 			// Check for special response codes - NTAG arbiter busy
 			if len(resp) >= 5 && resp[3] == 0x03 {
 				// 0x03 = NTAG arbiter busy (locked to I2C interface)
-				// Always treat as arbiter busy since there are no other 0x03 errors
-
-				shouldContinue, err := p.handle0300Error("write")
-				if !shouldContinue {
-					lastErr = err
-					break
+				if p.logCallback != nil {
+					p.logCallback(LogLevelWarning, "NTAG arbiter busy in write")
 				}
-				lastErr = err
-				// Break to outer retry loop to re-attempt the write operation
-				break
+				return NewError(ErrArbiterBusy, "NTAG arbiter busy")
 			}
 
 			// For T2T, we expect an ACK (0x0A) response
@@ -1029,11 +1018,6 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 			break
 		}
 
-		// If we broke from inner loop with arbiter busy (lastErr != nil but reselection succeeded), retry
-		if lastErr != nil && strings.Contains(lastErr.Error(), "arbiter busy") {
-			continue
-		}
-
 		// If we broke from inner loop with no error (soft recovery), continue retry
 		if lastErr == nil {
 			continue
@@ -1044,15 +1028,6 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 	}
 
 	if lastErr != nil {
-		// Check if this is a tag departure error first
-		if nfcErr, ok := lastErr.(*Error); ok && nfcErr.Code == ErrTagDeparted {
-			return lastErr // Return tag departure error directly without HAL reinitialization
-		}
-		// For serious errors (not 0300, timeout, or tag departure), perform full reinitialization
-		if !strings.Contains(lastErr.Error(), "0300") && !strings.Contains(lastErr.Error(), "timeout") && !strings.Contains(lastErr.Error(), "reinitialization") && !strings.Contains(lastErr.Error(), "tag departed") {
-			finalErr := p.handleSeriousErrorWithReinit(lastErr, "write after retries")
-			return fmt.Errorf("write failed after %d retries: %v", maxRFRetries, finalErr)
-		}
 		return fmt.Errorf("write failed after %d retries: %v", maxRFRetries, lastErr)
 	}
 	return fmt.Errorf("write failed with unknown error")
@@ -1138,88 +1113,6 @@ func (p *PN7150) SelectTag(tagIdx uint) error {
 	return nil
 }
 
-// reselectCurrentTag reselects the current tag to resolve NTAG I2C arbiter conflicts
-// Uses RF_DEACTIVATE → RF_DISCOVER_SELECT sequence to reset tag state
-// Note: This function assumes the caller already holds the PN7150 lock
-func (p *PN7150) reselectCurrentTag() error {
-	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "Reselecting tag to resolve arbiter busy conflict")
-	}
-
-	tagIdx := uint(0) // Always reselect tag 0
-
-	if tagIdx >= uint(p.numTags) {
-		return fmt.Errorf("invalid tag index for reselection: %d", tagIdx)
-	}
-
-	// Step 1: Deactivate current tag to sleep mode (if selected)
-	if p.tagSelected {
-		deactivateCmd := []byte{
-			0x21, // MT=CMD (1 << 5), GID=RF
-			0x06, // OID=DEACTIVATE
-			0x01, // Length
-			0x01, // Deactivation type = Sleep
-		}
-
-		resp, err := p.transfer(deactivateCmd)
-		if err != nil {
-			return fmt.Errorf("RF deactivate failed during reselection: %v", err)
-		}
-
-		// Check deactivate response
-		if len(resp) < 4 || resp[0] != 0x41 || resp[1] != 0x06 || resp[3] != 0x00 {
-			return fmt.Errorf("RF deactivate response invalid during reselection: %x", resp)
-		}
-
-		// Wait for deactivate notification
-		time.Sleep(10 * time.Millisecond)
-		p.tagSelected = false
-	}
-
-	// Step 2: RF_DISCOVER_SELECT to reselect the tag
-	discoverSelectCmd := []byte{
-		0x21, // MT=CMD (1 << 5), GID=RF
-		0x04, // OID=DISCOVER_SELECT
-		0x03, // Length
-		0x01, // Discovery ID (1-based, so tag 0 = discovery ID 1)
-		0x02, // RF Protocol = T2T
-		0x01, // RF Interface = FRAME interface
-	}
-
-	resp, err := p.transfer(discoverSelectCmd)
-	if err != nil {
-		return fmt.Errorf("RF discover select failed during reselection: %v", err)
-	}
-
-	// Check discover select response
-	if len(resp) < 4 || resp[0] != 0x41 || resp[1] != 0x04 || resp[3] != 0x00 {
-		return fmt.Errorf("RF discover select response invalid during reselection: %x", resp)
-	}
-
-	// Step 3: Wait for RF_INTF_ACTIVATED notification (0x0105)
-	// Give it some time to activate
-	time.Sleep(20 * time.Millisecond)
-
-	// Try to read the activation notification
-	activationResp, err := p.transfer(nil)
-	if err != nil {
-		return fmt.Errorf("failed to receive activation notification during reselection: %v", err)
-	}
-
-	// Check for RF_INTF_ACTIVATED notification
-	if len(activationResp) < 4 || activationResp[0] != 0x61 || activationResp[1] != 0x05 {
-		return fmt.Errorf("expected RF_INTF_ACTIVATED notification, got: %x", activationResp)
-	}
-
-	p.tagSelected = true
-
-	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "Tag reselection completed successfully")
-	}
-
-	return nil
-}
-
 // GetTagEventChannel implements HAL.GetTagEventChannel
 func (p *PN7150) GetTagEventChannel() <-chan TagEvent {
 	return p.tagEventChan
@@ -1252,118 +1145,25 @@ func (p *PN7150) SetTagEventReaderEnabled(enabled bool) {
 	}
 }
 
-// handleSeriousErrorWithReinit handles serious I/O errors by detecting tag departure or performing full HAL reinitialization
-// It unlocks the mutex, performs reinitialization, and re-locks the mutex
-// Returns an error that includes both the original error and any reinitialization error
-func (p *PN7150) handleSeriousErrorWithReinit(err error, operation string) error {
-	// Only handle serious I/O errors, not temporary ones
-	if err == unix.EINTR || err == unix.EAGAIN || err == unix.ETIMEDOUT {
-		return err
-	}
-
-	// Check if this error indicates tag departure (common tag departure errors)
-	if err == unix.ENODEV || err == unix.ENXIO || err == unix.ENOENT ||
-		strings.Contains(err.Error(), "no such device") ||
-		strings.Contains(err.Error(), "device or address") {
-
-		if p.logCallback != nil {
-			p.logCallback(LogLevelInfo, fmt.Sprintf("%s failed with tag departure error: %v - sending tag departure event", operation, err))
-		}
-
-		// Send tag departure event immediately instead of HAL reinitialization
-		select {
-		case p.tagEventChan <- TagEvent{Type: TagDeparture}:
-		default:
-		}
-		return NewError(ErrTagDeparted, fmt.Sprintf("tag departed during %s", operation))
-	}
-
-	// Simple time-based rate limiting
-	minReinitInterval := 2 * time.Second
-
-	if time.Since(p.lastRecovery) < minReinitInterval {
-		if p.logCallback != nil {
-			p.logCallback(LogLevelWarning, fmt.Sprintf("%s failed with serious error: %v - HAL reinitialization rate limited", operation, err))
-		}
-		return fmt.Errorf("%s failed: %v", operation, err)
-	}
-
-	if p.logCallback != nil {
-		p.logCallback(LogLevelError, fmt.Sprintf("%s failed with serious error: %v - attempting HAL reinitialization", operation, err))
-	}
-
-	p.lastRecovery = time.Now()
-
-	// Perform HAL reinitialization
-	reinitErr := p.FullReinitialize()
-	if reinitErr != nil {
-		if p.logCallback != nil {
-			p.logCallback(LogLevelError, fmt.Sprintf("HAL reinitialization failed: %v", reinitErr))
-		}
-		return fmt.Errorf("%s failed: %v, reinit failed: %v", operation, err, reinitErr)
-	}
-
-	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "HAL reinitialization completed successfully")
-	}
-
-	// Return error indicating operation was aborted after HAL reinitialization
-	return fmt.Errorf("%s aborted after HAL reinitialization", operation)
-}
-
-// handle0300Error handles NTAG arbiter busy (0x03) errors with tag reselection
-// Returns true if the operation should continue retrying, false if it should abort
-func (p *PN7150) handle0300Error(operation string) (bool, error) {
-	if p.logCallback != nil {
-		p.logCallback(LogLevelWarning, fmt.Sprintf("NTAG arbiter busy in %s", operation))
-	}
-
-	if p.numTags > 0 {
-		if p.logCallback != nil {
-			p.logCallback(LogLevelInfo, "Attempting tag reselection for arbiter busy conflict")
-		}
-
-		err := p.reselectCurrentTag()
-		if err != nil {
-			if p.logCallback != nil {
-				p.logCallback(LogLevelWarning, fmt.Sprintf("Tag reselection failed: %v", err))
-			}
-			// Return error to allow retry
-			return true, fmt.Errorf("tag reselection failed: %v", err)
-		}
-		// Tag reselection succeeded (already logged in reselectCurrentTag), continue retry
-		return true, nil
-	}
-
-	// Avoid HAL reinitialization on 0x03 errors - just keep retrying
-	// If no tags, return error
-	return true, fmt.Errorf("NTAG arbiter busy")
-}
-
 // handleCreditNotification handles CORE_CONN_CREDITS_NTF and reads the next response
 // Returns the next response or an error
 func (p *PN7150) handleCreditNotification() ([]byte, error) {
-	// This is a credit notification, read the next response
-	resp, err := p.transfer(nil)
-	if err != nil {
-		return nil, err
-	}
+	deadline := time.Now().Add(readTimeout)
 
-	// If we get no response after credit notification, this indicates tag departure
-	if len(resp) == 0 {
-		if p.logCallback != nil {
-			p.logCallback(LogLevelInfo, "No response after credit notification - tag departed")
+	for {
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timeout waiting for response after credit notification")
 		}
 
-		// Send tag departure event immediately instead of HAL reinitialization
-		select {
-		case p.tagEventChan <- TagEvent{Type: TagDeparture}:
-		default:
+		resp, err := p.transfer(nil)
+		if err != nil {
+			return nil, err
 		}
-		return nil, NewError(ErrTagDeparted, "tag departed during credit notification")
-	}
 
-	return resp, nil
+		if len(resp) > 0 {
+			return resp, nil
+		}
+	}
 }
 
 // awaitNotification waits for a specific notification message with timeout tracking
