@@ -830,90 +830,76 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 		}
 	}
 
-	// Add retries for RF frame corruption errors
-	const maxRFRetries = 4
-	var lastErr error
-
-	for retry := 0; retry < maxRFRetries; retry++ {
-		resp, err := p.transfer(p.txBuf[:p.txSize])
+	// Retry only for I2C syscall interruptions (EINTR/EAGAIN)
+	const maxI2CRetries = 4
+	var resp []byte
+	var err error
+	for i := 0; i < maxI2CRetries; i++ {
+		resp, err = p.transfer(p.txBuf[:p.txSize])
 		if err != nil {
-			lastErr = err
-			// Only retry on temporary errors
+			// Only retry on temporary I2C errors
 			if err == unix.EINTR || err == unix.EAGAIN {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
-			// Return error immediately - no automatic recovery
+			// All other errors return immediately
 			return nil, err
 		}
+		break
+	}
+	if err != nil {
+		return nil, err
+	}
 
-		// We may receive multiple responses - keep reading until we get the actual data
-		for {
-			// Check for CORE_CONN_CREDITS_NTF
-			if len(resp) >= 3 && resp[0] == 0x60 && resp[1] == 0x06 {
-				resp, err = p.handleCreditNotification()
-				if err != nil {
-					lastErr = err
-					break
-				}
-				continue
+	// Process response - no retry loop, return errors immediately
+	for {
+		// Check for CORE_CONN_CREDITS_NTF
+		if len(resp) >= 3 && resp[0] == 0x60 && resp[1] == 0x06 {
+			resp, err = p.handleCreditNotification()
+			if err != nil {
+				return nil, err
 			}
-
-			// Check for special response codes - NTAG arbiter busy
-			if len(resp) >= 5 && resp[3] == 0x03 {
-				// 0x03 = NTAG arbiter busy (locked to I2C interface)
-				if p.logCallback != nil {
-					p.logCallback(LogLevelWarning, "NTAG arbiter busy in read")
-				}
-				return nil, NewError(ErrArbiterBusy, "NTAG arbiter busy")
-			}
-
-			// For DATA packets, first 3 bytes are NCI header
-			if len(resp) < 3 {
-				lastErr = fmt.Errorf("response too short")
-				break
-			}
-
-			mt := (resp[0] >> nciMsgTypeBit) & 0x03
-
-			// Check for arbiter busy in message type field as well
-			if mt == 0x03 {
-				if p.logCallback != nil {
-					p.logCallback(LogLevelWarning, "NTAG arbiter busy in read (message type)")
-				}
-				return nil, NewError(ErrArbiterBusy, "NTAG arbiter busy")
-			}
-
-			if mt != nciMsgTypeData {
-				lastErr = fmt.Errorf("unexpected response type: %02x", mt)
-				break
-			}
-
-			// Success - return the payload
-			if p.debug {
-				if p.logCallback != nil {
-					p.logCallback(LogLevelDebug, fmt.Sprintf("DATA_RX: %X", resp[3:]))
-				}
-			}
-			result := make([]byte, len(resp)-3)
-			copy(result, resp[3:])
-			return result, nil
-		}
-
-		// If we broke from inner loop with no error (soft recovery), continue retry
-		if lastErr == nil {
 			continue
 		}
 
-		// Otherwise we have an error, add delay and retry
-		time.Sleep(10 * time.Millisecond)
-	}
+		// Check for special response codes - NTAG arbiter busy
+		if len(resp) >= 5 && resp[3] == 0x03 {
+			// 0x03 = NTAG arbiter busy (locked to I2C interface)
+			if p.logCallback != nil {
+				p.logCallback(LogLevelDebug, "NTAG arbiter busy in read")
+			}
+			return nil, NewError(ErrArbiterBusy, "NTAG arbiter busy")
+		}
 
-	if lastErr != nil {
-		return nil, fmt.Errorf("read failed after %d retries: %v", maxRFRetries, lastErr)
-	}
+		// For DATA packets, first 3 bytes are NCI header
+		if len(resp) < 3 {
+			return nil, fmt.Errorf("response too short")
+		}
 
-	return nil, fmt.Errorf("read failed with unknown error")
+		mt := (resp[0] >> nciMsgTypeBit) & 0x03
+
+		// Check for arbiter busy in message type field as well
+		if mt == 0x03 {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelDebug, "NTAG arbiter busy in read (message type)")
+			}
+			return nil, NewError(ErrArbiterBusy, "NTAG arbiter busy")
+		}
+
+		if mt != nciMsgTypeData {
+			return nil, fmt.Errorf("unexpected response type: %02x", mt)
+		}
+
+		// Success - return the payload
+		if p.debug {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelDebug, fmt.Sprintf("DATA_RX: %X", resp[3:]))
+			}
+		}
+		result := make([]byte, len(resp)-3)
+		copy(result, resp[3:])
+		return result, nil
+	}
 }
 
 // WriteBinary implements HAL.WriteBinary
@@ -979,76 +965,64 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 		}
 	}
 
-	// Add retries for RF frame corruption errors
-	const maxRFRetries = 4
-	var lastErr error
-
-	for retry := 0; retry < maxRFRetries; retry++ {
-		resp, err := p.transfer(p.txBuf[:p.txSize])
+	// Retry only for I2C syscall interruptions (EINTR/EAGAIN)
+	const maxI2CRetries = 4
+	var resp []byte
+	var err error
+	for i := 0; i < maxI2CRetries; i++ {
+		resp, err = p.transfer(p.txBuf[:p.txSize])
 		if err != nil {
-			lastErr = err
-			// Only retry on temporary errors
+			// Only retry on temporary I2C errors
 			if err == unix.EINTR || err == unix.EAGAIN {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
-			// Return error immediately - no automatic recovery
+			// All other errors return immediately
 			return err
 		}
+		break
+	}
+	if err != nil {
+		return err
+	}
 
-		// We may receive multiple responses - keep reading until we get the actual ACK
-		for {
-			// Check for special response codes - NTAG arbiter busy
-			if len(resp) >= 5 && resp[3] == 0x03 {
-				// 0x03 = NTAG arbiter busy (locked to I2C interface)
-				if p.logCallback != nil {
-					p.logCallback(LogLevelDebug, "NTAG arbiter busy in write")
-				}
-				return NewError(ErrArbiterBusy, "NTAG arbiter busy")
+	// Process response - no retry loop, return errors immediately
+	for {
+		// Check for special response codes - NTAG arbiter busy
+		if len(resp) >= 5 && resp[3] == 0x03 {
+			// 0x03 = NTAG arbiter busy (locked to I2C interface)
+			if p.logCallback != nil {
+				p.logCallback(LogLevelDebug, "NTAG arbiter busy in write")
 			}
-
-			// For T2T, we expect an ACK (0x0A) response
-			if protocol == RFProtocolT2T {
-				if len(resp) >= 4 && resp[3] == 0x0A {
-					return nil
-				}
-			}
-
-			// For ISO-DEP, check the response status
-			if protocol == RFProtocolISODEP {
-				if len(resp) >= 5 && resp[3] == 0x90 && resp[4] == 0x00 {
-					return nil
-				}
-			}
-
-			// Check if this is a CORE_CONN_CREDITS_NTF
-			if len(resp) >= 3 && resp[0] == 0x60 && resp[1] == 0x06 {
-				resp, err = p.handleCreditNotification()
-				if err != nil {
-					lastErr = err
-					break
-				}
-				continue
-			}
-
-			// If we get here, the response wasn't what we expected
-			lastErr = fmt.Errorf("invalid response: %X", resp)
-			break
+			return NewError(ErrArbiterBusy, "NTAG arbiter busy")
 		}
 
-		// If we broke from inner loop with no error (soft recovery), continue retry
-		if lastErr == nil {
+		// For T2T, we expect an ACK (0x0A) response
+		if protocol == RFProtocolT2T {
+			if len(resp) >= 4 && resp[3] == 0x0A {
+				return nil
+			}
+		}
+
+		// For ISO-DEP, check the response status
+		if protocol == RFProtocolISODEP {
+			if len(resp) >= 5 && resp[3] == 0x90 && resp[4] == 0x00 {
+				return nil
+			}
+		}
+
+		// Check if this is a CORE_CONN_CREDITS_NTF
+		if len(resp) >= 3 && resp[0] == 0x60 && resp[1] == 0x06 {
+			resp, err = p.handleCreditNotification()
+			if err != nil {
+				return err
+			}
 			continue
 		}
 
-		// Otherwise we have an error, add delay and retry
-		time.Sleep(10 * time.Millisecond)
+		// If we get here, the response wasn't what we expected
+		return fmt.Errorf("invalid response: %X", resp)
 	}
-
-	if lastErr != nil {
-		return fmt.Errorf("write failed after %d retries: %v", maxRFRetries, lastErr)
-	}
-	return fmt.Errorf("write failed with unknown error")
 }
 
 // SelectTag selects a specific tag for communication
