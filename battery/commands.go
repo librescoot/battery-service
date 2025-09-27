@@ -35,7 +35,7 @@ func (r *BatteryReader) startDiscovery() {
 func (r *BatteryReader) stopDiscovery() {
 	if err := r.hal.StopDiscovery(); err != nil {
 		if strings.Contains(err.Error(), "invalid state for stopping discovery") {
-				return
+			return
 		}
 		r.service.logger.Printf("Battery %d: Failed to stop discovery: %v", r.index, err)
 	}
@@ -579,11 +579,18 @@ func (r *BatteryReader) heartbeatMonitor() {
 			return
 
 		case <-r.getHeartbeatTimer():
-			if !r.checkStateCorrect(false) {
-				r.handleDeparture()
-				r.transitionTo(StateDiscoverTag)
-			} else {
-				r.triggerHeartbeatTimeout()
+			// Heartbeat timeout during any heartbeat-related state
+			if r.isInHeartbeatTree() {
+				if !r.checkStateCorrect(false) {
+					// Battery state wrong after timeout - force rediscovery
+					r.service.logger.Printf("Battery %d: Recovery timeout after %s - forcing rediscovery", r.index, r.getHeartbeatInterval())
+					r.handleDeparture()
+					r.transitionTo(StateDiscoverTag)
+				} else {
+					// State correct - restart heartbeat cycle
+					r.service.logger.Printf("Battery %d: Heartbeat timeout - restarting cycle", r.index)
+					r.transitionTo(StateHeartbeat)
+				}
 			}
 		}
 	}
@@ -602,6 +609,18 @@ func (r *BatteryReader) triggerHeartbeatTimeout() {
 	}
 }
 
+// Check if we're in any heartbeat-related state (including recovery states)
+func (r *BatteryReader) isInHeartbeatTree() bool {
+	switch r.state {
+	case StateHeartbeat, StateHeartbeatActions, StateSendClosed,
+		StateSendOnOff, StateCondStateOK, StateSendInsertedClosed, StateWaitUpdate:
+		return true
+	default:
+		return false
+	}
+}
+
+// Placeholder implementations for suspend inhibitor
 func (r *BatteryReader) takeInhibitor() {
 }
 

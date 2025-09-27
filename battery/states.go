@@ -251,6 +251,8 @@ func (r *BatteryReader) enterState(newState State) {
 	case StateWaitUpdate:
 		r.stopTimerIfBatteryEmpty()
 		r.releaseInhibitor()
+		r.clearHeartbeatTimer() // Clear recovery heartbeat timer
+		// Set state timer for next heartbeat interval
 		r.setStateTimer(r.getHeartbeatInterval())
 
 	case StateSendInsertedClosed:
@@ -269,7 +271,8 @@ func (r *BatteryReader) exitState() {
 	case StateCondCheckPresence:
 		r.releaseInhibitor()
 	case StateHeartbeat:
-		r.clearHeartbeatTimer()
+		// Don't clear heartbeat timer - keep it running during recovery
+		// r.clearHeartbeatTimer()
 	case StateHeartbeatActions:
 		r.releaseInhibitor()
 	}
