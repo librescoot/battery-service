@@ -414,8 +414,21 @@ func (r *BatteryReader) fetchInitialRedisState() {
 
 func (r *BatteryReader) makeLogCallback() hal.LogCallback {
 	return func(level hal.LogLevel, message string) {
-		if int(level) <= r.logLevel {
-			r.service.logger.Debugf("Battery %d NFC: %s", r.index, message)
+		if int(level) > r.logLevel {
+			return
+		}
+
+		msg := fmt.Sprintf("Battery %d NFC: %s", r.index, message)
+
+		switch level {
+		case hal.LogLevelError:
+			r.service.stdLogger.Printf("ERROR: %s", msg)
+		case hal.LogLevelWarning:
+			r.service.stdLogger.Printf("WARN: %s", msg)
+		case hal.LogLevelInfo:
+			r.service.stdLogger.Printf("%s", msg)
+		case hal.LogLevelDebug:
+			r.service.stdLogger.Printf("DEBUG: %s", msg)
 		}
 	}
 }

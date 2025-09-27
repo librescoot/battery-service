@@ -2,6 +2,7 @@ package battery
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"battery-service/nfc/hal"
@@ -221,6 +222,7 @@ type Service struct {
 	config        *ServiceConfig
 	batteryConfig *BatteryConfiguration
 	logger        *Logger
+	stdLogger     *log.Logger
 	ctx           context.Context
 	cancel        context.CancelFunc
 	debug         bool

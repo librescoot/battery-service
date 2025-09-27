@@ -45,19 +45,12 @@ func main() {
 	var logLevel0, logLevel1 int
 	var battery1Active bool
 	flag.StringVar(&device0, "device0", "/dev/pn5xx_i2c0", "Battery 0 NFC device")
-	flag.IntVar(&logLevel0, "log0", -1, "Battery 0 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
+	flag.IntVar(&logLevel0, "log0", 3, "Battery 0 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
 	flag.StringVar(&device1, "device1", "/dev/pn5xx_i2c1", "Battery 1 NFC device")
-	flag.IntVar(&logLevel1, "log1", -1, "Battery 1 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
+	flag.IntVar(&logLevel1, "log1", 3, "Battery 1 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
 	flag.BoolVar(&battery1Active, "battery1-active", false, "Enable battery 1 as active in addition to battery 0 (default: inactive)")
 
 	flag.Parse()
-
-	if logLevel0 == -1 {
-		logLevel0 = serviceLogLevel
-	}
-	if logLevel1 == -1 {
-		logLevel1 = serviceLogLevel
-	}
 
 	// Show version and exit if requested
 	if showVersion {

@@ -16,6 +16,7 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 		config:        config,
 		batteryConfig: batteryConfig,
 		logger:        NewLogger(logger, logLevel),
+		stdLogger:     logger,
 		ctx:           ctx,
 		cancel:        cancel,
 		debug:         debugMode,
