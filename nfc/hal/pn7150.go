@@ -273,10 +273,6 @@ func (p *PN7150) Initialize() error {
 	}
 
 	if !p.transitionTableSent {
-		if p.logCallback != nil {
-			p.logCallback(LogLevelInfo, "Sending RF transition table for first time")
-		}
-
 		type rfTransition struct {
 			id     byte
 			offset byte
@@ -305,54 +301,77 @@ func (p *PN7150) Initialize() error {
 			{0x0a, 0x33, []byte{0x80, 0x86, 0x00, 0x70}},
 		}
 
-		configCmd := []byte{
-			0x20,                   // MT=CMD (1 << 5), GID=CORE
-			0x02,                   // OID=SET_CONFIG
-			0x00,                   // Length placeholder
-			byte(len(transitions)), // Number of parameters
-		}
-
-		for _, t := range transitions {
-			configCmd = append(configCmd,
-				0xA0,                 // RF_TRANSITION_CFG >> 8
-				0x0D,                 // RF_TRANSITION_CFG & 0xFF
-				byte(2+len(t.value)), // Parameter length
-				t.id,                 // Transition ID
-				t.offset,             // Offset
-			)
-			configCmd = append(configCmd, t.value...)
-		}
-
-		configCmd[2] = byte(len(configCmd) - 3)
-
-		resp, err := p.transfer(configCmd)
-		if err != nil {
-			return fmt.Errorf("RF transitions configuration failed: %v", err)
-		}
-
-		nciResp, err := parseNCIResponse(resp)
-		if err != nil {
-			return fmt.Errorf("failed to parse RF transitions response: %v", err)
-		}
-
-		if !isSuccessResponse(nciResp) {
-			return fmt.Errorf("RF transitions configuration failed with status: %02x", nciResp.Status)
-		}
-
+		// Check if RF transitions are already configured correctly
 		if p.logCallback != nil {
-			p.logCallback(LogLevelDebug, "Verifying RF transitions")
+			p.logCallback(LogLevelDebug, "Verifying RF transitions before upload")
 		}
+		allCorrect := true
 		for _, t := range transitions {
-			err := p.checkRFTransition(t.id, t.offset, t.value)
-			if err != nil {
-				return fmt.Errorf("RF transition verification failed: %v", err)
+			if err := p.checkRFTransition(t.id, t.offset, t.value); err != nil {
+				allCorrect = false
+				break
 			}
 		}
 
-		p.transitionTableSent = true
+		if allCorrect {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelInfo, "RF transitions already configured correctly - skipping upload")
+			}
+			p.transitionTableSent = true
+		} else {
+			if p.logCallback != nil {
+				p.logCallback(LogLevelInfo, "RF transitions need update - uploading table")
+			}
 
-		if p.logCallback != nil {
-			p.logCallback(LogLevelInfo, "RF transition table sent and verified successfully - will be skipped on future initializations")
+			configCmd := []byte{
+				0x20,                   // MT=CMD (1 << 5), GID=CORE
+				0x02,                   // OID=SET_CONFIG
+				0x00,                   // Length placeholder
+				byte(len(transitions)), // Number of parameters
+			}
+
+			for _, t := range transitions {
+				configCmd = append(configCmd,
+					0xA0,                 // RF_TRANSITION_CFG >> 8
+					0x0D,                 // RF_TRANSITION_CFG & 0xFF
+					byte(2+len(t.value)), // Parameter length
+					t.id,                 // Transition ID
+					t.offset,             // Offset
+				)
+				configCmd = append(configCmd, t.value...)
+			}
+
+			configCmd[2] = byte(len(configCmd) - 3)
+
+			resp, err := p.transfer(configCmd)
+			if err != nil {
+				return fmt.Errorf("RF transitions configuration failed: %v", err)
+			}
+
+			nciResp, err := parseNCIResponse(resp)
+			if err != nil {
+				return fmt.Errorf("failed to parse RF transitions response: %v", err)
+			}
+
+			if !isSuccessResponse(nciResp) {
+				return fmt.Errorf("RF transitions configuration failed with status: %02x", nciResp.Status)
+			}
+
+			if p.logCallback != nil {
+				p.logCallback(LogLevelDebug, "Verifying RF transitions after upload")
+			}
+			for _, t := range transitions {
+				err := p.checkRFTransition(t.id, t.offset, t.value)
+				if err != nil {
+					return fmt.Errorf("RF transition verification failed: %v", err)
+				}
+			}
+
+			p.transitionTableSent = true
+
+			if p.logCallback != nil {
+				p.logCallback(LogLevelInfo, "RF transition table uploaded and verified successfully")
+			}
 		}
 	}
 
