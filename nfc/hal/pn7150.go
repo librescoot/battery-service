@@ -525,7 +525,7 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 	p.tagSelected = false
 
 	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, fmt.Sprintf("Started discovery with poll period %d ms", pollPeriod))
+		p.logCallback(LogLevelDebug, fmt.Sprintf("Started discovery with poll period %d ms", pollPeriod))
 	}
 
 	return nil
