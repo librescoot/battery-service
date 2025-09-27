@@ -70,7 +70,6 @@ type PN7150 struct {
 	tagEventChan          chan TagEvent
 	tagEventReaderStop    chan struct{}
 	tagEventReaderRunning bool
-	detectionFailures     int
 }
 
 func NewPN7150(devName string, logCallback LogCallback, app interface{}, standbyEnabled, lpcdEnabled bool, debugMode bool) (*PN7150, error) {
@@ -1003,7 +1002,7 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 			if len(resp) >= 5 && resp[3] == 0x03 {
 				// 0x03 = NTAG arbiter busy (locked to I2C interface)
 				if p.logCallback != nil {
-					p.logCallback(LogLevelWarning, "NTAG arbiter busy in write")
+					p.logCallback(LogLevelDebug, "NTAG arbiter busy in write")
 				}
 				return NewError(ErrArbiterBusy, "NTAG arbiter busy")
 			}
@@ -1191,7 +1190,7 @@ func (p *PN7150) awaitNotification(msgID uint16, timeoutMs uint) error {
 	for {
 		// Check if we've exceeded the timeout
 		elapsed := time.Since(startTime)
-		if elapsed >= time.Duration(timeoutMs)*time.Millisecond {
+		if elapsed >= remainingTimeout {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelWarning, "await notification timeout")
 			}
