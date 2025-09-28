@@ -137,7 +137,7 @@ func buildCoreInit() []byte {
 }
 
 // NCI RF Discovery Commands
-func buildRFDiscoverCmd(pollPeriod uint) []byte {
+func buildRFDiscoverCmd() []byte {
 	payload := []byte{
 		0x01,                     // Number of technologies
 		nciRFTechNFCAPassivePoll, // RF Technology = NFC-A passive poll mode (0x00)

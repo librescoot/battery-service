@@ -2,7 +2,10 @@
 
 BINARY_NAME=battery-service
 BUILD_DIR=bin
-LDFLAGS=-ldflags "-w -s -extldflags '-static'"
+GIT_REVISION=$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_DIRTY=$(shell git diff --quiet || echo "-dirty")
+VERSION_FLAGS=-X main.gitRevision=$(GIT_REVISION)$(GIT_DIRTY) -X main.buildTime=$(shell date -u +%Y%m%d-%H%M%S)
+LDFLAGS=-ldflags "-w -s -extldflags '-static' $(VERSION_FLAGS)"
 CMD_DIR=cmd/battery-service
 
 build:
@@ -35,4 +38,4 @@ dev-build:
 # Build for the current platform (useful for testing)
 build-native:
 	mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR) 
+	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR) 
