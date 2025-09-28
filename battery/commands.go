@@ -415,7 +415,7 @@ func (r *BatteryReader) updateFaultSet() {
 		}
 	}
 
-	faultChannel := fmt.Sprintf("battery:%d fault", r.index)
+	faultChannel := fmt.Sprintf("battery:%d", r.index)
 	r.redis.Publish(context.TODO(), faultChannel, "fault")
 }
 
