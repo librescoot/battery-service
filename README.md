@@ -6,13 +6,15 @@ The MDB Battery Service is a critical component responsible for managing and mon
 
 ## Features
 
-- Dual battery monitoring system
+- Dual battery monitoring system with a single thread per reader
 - Real-time battery state management
 - NFC-based communication with batteries
 - Temperature monitoring and safety controls
 - Redis-based messaging system for component communication
 - Configurable update intervals for different battery states
 - Automatic battery presence detection
+- Leveled logging for granular log control
+- Build-time and git revision information embedded in the binary
 
 ## Dependencies
 
@@ -24,7 +26,7 @@ The MDB Battery Service is a critical component responsible for managing and mon
 
 The service is built around two main components:
 - **Battery Service**: Core service managing multiple battery readers
-- **Battery Reader**: Individual reader instances managing NFC communication with batteries
+- **Battery Reader**: Individual reader instances managing NFC communication with batteries. Each reader runs in its own thread.
 
 ### Key Components
 
@@ -50,21 +52,33 @@ To run the service:
 
 ### Command Line Options
 
+- `--version`: Show version information (git revision and build time)
 - `--redis-server`: Redis server address (default: "127.0.0.1")
 - `--redis-port`: Redis server port (default: 6379)
 - `--off-update-time`: Update time when off in seconds (default: 1800)
 - `--heartbeat-timeout`: Heartbeat timeout in seconds (default: 40)
 - `--device0`: Battery 0 NFC device path (default: "/dev/pn5xx_i2c0")
 - `--device1`: Battery 1 NFC device path (default: "/dev/pn5xx_i2c1")
-- `--log0`: Battery 0 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)
-- `--log1`: Battery 1 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)
+- `--log`: Service-wide log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG, default: 3)
+- `--log0`: Battery 0 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG). Defaults to `--log` if not set.
+- `--log1`: Battery 1 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG). Defaults to `--log` if not set.
+
+## Logging
+
+The service utilizes a leveled logging system. You can control the verbosity of the logs using the `--log` command-line option for the entire service, or `--log0` and `--log1` for individual battery readers. The log levels are:
+
+- **0=NONE**: No logs
+- **1=ERROR**: Only error messages
+- **2=WARN**: Warning messages and errors
+- **3=INFO**: Informational messages, warnings, and errors (default)
+- **4=DEBUG**: Detailed debug messages, informational messages, warnings, and errors
 
 ## Safety Features
 
 The service implements several safety features:
 - Temperature state monitoring (Cold/Normal/Hot states)
 - Automatic battery presence detection
-- Heartbeat monitoring
+- Heartbeat monitoring to prevent endless recovery loops
 - Multiple retry mechanisms for reliable communication
 - Comprehensive error logging and reporting
 
