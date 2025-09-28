@@ -603,12 +603,6 @@ func (r *BatteryReader) getHeartbeatTimer() <-chan time.Time {
 	return r.heartbeatTimer.C
 }
 
-func (r *BatteryReader) triggerHeartbeatTimeout() {
-	if r.isIn(StateHeartbeat) {
-		r.transitionTo(StateHeartbeatActions)
-	}
-}
-
 // Check if we're in any heartbeat-related state (including recovery states)
 func (r *BatteryReader) isInHeartbeatTree() bool {
 	switch r.state {
@@ -620,11 +614,16 @@ func (r *BatteryReader) isInHeartbeatTree() bool {
 	}
 }
 
-// Placeholder implementations for suspend inhibitor
+// Placeholder implementations for suspend inhibitor.
+// Original service holds a suspend inhibitor for 4s around NFC operations.
+// In theory, the MDB could enter suspend just when we start NFC operations, causing battery heartbeat to fail.
+// In practice, we don't really do suspend states anyway and the risk seems low.
 func (r *BatteryReader) takeInhibitor() {
+	// TODO: acquire suspend inhibitor for 4s
 }
 
 func (r *BatteryReader) releaseInhibitor() {
+	// TODO: release suspend inhibitor
 }
 
 func (r *BatteryReader) setNFCFault(fault BMSFault, present bool) {

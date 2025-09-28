@@ -767,13 +767,14 @@ func (p *PN7150) ReadBinary(address uint16) ([]byte, error) {
 	protocol := p.tags[0].RFProtocol
 
 	var cmd []byte
-	if protocol == RFProtocolT2T {
+	switch protocol {
+	case RFProtocolT2T:
 		// T2T read command: 0x30 followed by block number
 		blockNum := byte(address >> 2) // Convert address to block number (4 bytes per block)
 		cmd = []byte{0x30, blockNum}
-	} else if protocol == RFProtocolISODEP {
+	case RFProtocolISODEP:
 		cmd = []byte{0x00, 0xB0, byte(address >> 8), byte(address & 0xFF), 0x02}
-	} else {
+	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", protocol)
 	}
 
@@ -929,13 +930,14 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 	protocol := p.tags[0].RFProtocol
 
 	var cmd []byte
-	if protocol == RFProtocolT2T {
+	switch protocol {
+	case RFProtocolT2T:
 		// T2T write command: 0xA2 followed by block number and data
 		cmd = make([]byte, 6)
 		cmd[0] = 0xA2               // T2T WRITE command
 		cmd[1] = byte(address >> 2) // Convert address to block number (4 bytes per block)
 		copy(cmd[2:], data)         // Copy the data (4 bytes)
-	} else if protocol == RFProtocolISODEP {
+	case RFProtocolISODEP:
 		// For ISO-DEP, we need to send a different command
 		// The command is: CLA=0x00, INS=0xD6 (UPDATE BINARY), P1=high byte, P2=low byte, Lc=len(data), Data
 		cmd = make([]byte, 5+len(data))
@@ -945,7 +947,7 @@ func (p *PN7150) WriteBinary(address uint16, data []byte) error {
 		cmd[3] = byte(address & 0xFF) // P2 (low byte of address)
 		cmd[4] = byte(len(data))      // Lc (length of data)
 		copy(cmd[5:], data)
-	} else {
+	default:
 		return fmt.Errorf("unsupported protocol: %s", protocol)
 	}
 
