@@ -1,7 +1,11 @@
 package battery
 
 import (
+	"context"
+	"fmt"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type FaultConfig struct {
@@ -13,27 +17,27 @@ type FaultConfig struct {
 }
 
 var faultConfigs = map[BMSFault]FaultConfig{
-	BMSFaultChgTempOverHighProt: {BMSFaultChgTempOverHighProt, "CHG_TEMP_OVER_HIGH_PROT", 0, 0, false},
-	BMSFaultChgTempOverLowProt:  {BMSFaultChgTempOverLowProt, "CHG_TEMP_OVER_LOW_PROT", 0, 0, false},
-	BMSFaultDsgTempOverHighProt: {BMSFaultDsgTempOverHighProt, "DSG_TEMP_OVER_HIGH_PROT", 0, 0, false},
-	BMSFaultDsgTempOverLowProt:  {BMSFaultDsgTempOverLowProt, "DSG_TEMP_OVER_LOW_PROT", 0, 0, false},
-	BMSFaultSignalWireBrokeProt: {BMSFaultSignalWireBrokeProt, "SIGNAL_WIRE_BROKE_PROT", 0, 0, false},
-	BMSFaultSecondLvlOverTemp:   {BMSFaultSecondLvlOverTemp, "SECOND_LVL_OVER_TEMP", 0, 0, false},
-	BMSFaultPackVoltHighProt:    {BMSFaultPackVoltHighProt, "PACK_VOLT_HIGH_PROT", 0, 0, false},
-	BMSFaultMosTempOverHighProt: {BMSFaultMosTempOverHighProt, "MOS_TEMP_OVER_HIGH_PROT", 0, 0, false},
-	BMSFaultCellVoltHighProt:    {BMSFaultCellVoltHighProt, "CELL_VOLT_HIGH_PROT", 0, 0, false},
-	BMSFaultPackVoltLowProt:     {BMSFaultPackVoltLowProt, "PACK_VOLT_LOW_PROT", 0, 0, false},
-	BMSFaultCellVoltLowProt:     {BMSFaultCellVoltLowProt, "CELL_VOLT_LOW_PROT", 0, 0, false},
-	BMSFaultCrgOverCurrentProt:  {BMSFaultCrgOverCurrentProt, "CRG_OVER_CURRENT_PROT", 0, 0, false},
-	BMSFaultDsgOverCurrentProt:  {BMSFaultDsgOverCurrentProt, "DSG_OVER_CURRENT_PROT", 0, 0, false},
-	BMSFaultShortCircuitProt:    {BMSFaultShortCircuitProt, "SHORT_CIRCUIT_PROT", 0, 0, false},
-	BMSFaultReserved:            {BMSFaultReserved, "RESERVED", 0, 0, false},
-	BMSFaultReserved2:           {BMSFaultReserved2, "RESERVED2", 0, 0, false},
+	BMSFaultChgTempOverHighProt: {BMSFaultChgTempOverHighProt, "High temperature during charging", 0, 0, false},
+	BMSFaultChgTempOverLowProt:  {BMSFaultChgTempOverLowProt, "Low temperature during charging", 0, 0, false},
+	BMSFaultDsgTempOverHighProt: {BMSFaultDsgTempOverHighProt, "High temperature during discharge", 0, 0, false},
+	BMSFaultDsgTempOverLowProt:  {BMSFaultDsgTempOverLowProt, "Low temperature during discharge", 0, 0, false},
+	BMSFaultSignalWireBrokeProt: {BMSFaultSignalWireBrokeProt, "Signal wire disconnected", 0, 0, false},
+	BMSFaultSecondLvlOverTemp:   {BMSFaultSecondLvlOverTemp, "Critical temperature level", 0, 0, false},
+	BMSFaultPackVoltHighProt:    {BMSFaultPackVoltHighProt, "Battery pack overvoltage", 0, 0, false},
+	BMSFaultMosTempOverHighProt: {BMSFaultMosTempOverHighProt, "Power transistor overheating", 0, 0, false},
+	BMSFaultCellVoltHighProt:    {BMSFaultCellVoltHighProt, "Cell overvoltage", 0, 0, false},
+	BMSFaultPackVoltLowProt:     {BMSFaultPackVoltLowProt, "Battery pack undervoltage", 0, 0, false},
+	BMSFaultCellVoltLowProt:     {BMSFaultCellVoltLowProt, "Cell undervoltage", 0, 0, false},
+	BMSFaultCrgOverCurrentProt:  {BMSFaultCrgOverCurrentProt, "Charging overcurrent", 0, 0, false},
+	BMSFaultDsgOverCurrentProt:  {BMSFaultDsgOverCurrentProt, "Discharge overcurrent", 0, 0, false},
+	BMSFaultShortCircuitProt:    {BMSFaultShortCircuitProt, "Short circuit detected", 0, 0, false},
+	BMSFaultReserved:            {BMSFaultReserved, "Reserved fault 1", 0, 0, false},
+	BMSFaultReserved2:           {BMSFaultReserved2, "Reserved fault 2", 0, 0, false},
 
-	BMSFaultBMSNotFollowingCmd: {BMSFaultBMSNotFollowingCmd, "BMS_NOT_FOLLOWING_CMD", 5 * time.Second, 10 * time.Second, false},
-	BMSFaultBMSZeroData:        {BMSFaultBMSZeroData, "BMS_ZERO_DATA", 0, 0, true},
-	BMSFaultBMSCommsError:      {BMSFaultBMSCommsError, "BMS_COMMS_ERROR", 5 * time.Second, 10 * time.Second, true},
-	BMSFaultNFCReaderError:     {BMSFaultNFCReaderError, "NFC_READER_ERROR", 30 * time.Second, 0, true},
+	BMSFaultBMSNotFollowingCmd: {BMSFaultBMSNotFollowingCmd, "Battery not responding to commands", 5 * time.Second, 10 * time.Second, false},
+	BMSFaultBMSZeroData:        {BMSFaultBMSZeroData, "Battery data unavailable", 0, 0, true},
+	BMSFaultBMSCommsError:      {BMSFaultBMSCommsError, "Battery communication failed", 5 * time.Second, 10 * time.Second, true},
+	BMSFaultNFCReaderError:     {BMSFaultNFCReaderError, "NFC reader malfunction", 30 * time.Second, 0, true},
 }
 
 func (r *BatteryReader) initializeFaultManagement() {
@@ -134,12 +138,51 @@ func (r *BatteryReader) sendNotPresent() {
 }
 
 func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present bool) {
+	// Add fault event to Redis stream
+	batteryName := fmt.Sprintf("battery:%d", r.index)
+
+	if present {
+		// Fault set event
+		if err := r.redis.XAdd(context.TODO(), &redis.XAddArgs{
+			Stream: "events:faults",
+			MaxLen: 1000,
+			Values: map[string]interface{}{
+				"group":       batteryName,
+				"code":        fmt.Sprintf("%d", fault),
+				"description": config.Description,
+			},
+		}).Err(); err != nil {
+			r.service.logger.Warnf("Battery %d: Failed to add fault event to stream: %v", r.index, err)
+		}
+	} else {
+		// Fault clear event (negative code)
+		if err := r.redis.XAdd(context.TODO(), &redis.XAddArgs{
+			Stream: "events:faults",
+			MaxLen: 1000,
+			Values: map[string]interface{}{
+				"group": batteryName,
+				"code":  fmt.Sprintf("-%d", fault),
+			},
+		}).Err(); err != nil {
+			r.service.logger.Warnf("Battery %d: Failed to add fault clear event to stream: %v", r.index, err)
+		}
+	}
 }
 
 func (r *BatteryReader) hasCriticalFaults() bool {
 	for fault, state := range r.faultStates {
 		config, exists := faultConfigs[fault]
 		if exists && config.IsCritical && state.Present {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *BatteryReader) hasCriticalFaultsPrevious() bool {
+	for fault, state := range r.faultStates {
+		config, exists := faultConfigs[fault]
+		if exists && config.IsCritical && state.PublishedToRedis {
 			return true
 		}
 	}

@@ -242,8 +242,9 @@ type BatteryReader struct {
 	hal *hal.PN7150
 
 	// State machine
-	state State
-	data  BMSData
+	state        State
+	data         BMSData
+	previousData BMSData
 
 	// Event loop control
 	stopChan    chan struct{}
@@ -282,11 +283,10 @@ type BatteryReader struct {
 }
 
 type FaultState struct {
-	Present      bool
-	PendingSet   bool
-	PendingReset bool
-	SetTimer     *time.Timer
-	ResetTimer   *time.Timer
+	Present          bool
+	PendingSet       bool
+	PendingReset     bool
+	SetTimer         *time.Timer
+	ResetTimer       *time.Timer
+	PublishedToRedis bool
 }
-
-

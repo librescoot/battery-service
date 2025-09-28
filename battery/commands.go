@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"battery-service/nfc/hal"
+	"github.com/redis/go-redis/v9"
 )
 
 func (r *BatteryReader) deinitializeNFC() {
@@ -351,9 +352,12 @@ func (r *BatteryReader) updateTemperatureState() {
 
 func (r *BatteryReader) sendStatusUpdate() {
 	effectivePresent := r.data.Present && !r.hasCriticalFaults()
+	previousEffectivePresent := r.previousData.Present && !r.hasCriticalFaultsPrevious()
 
 	hashKey := fmt.Sprintf("battery:%d", r.index)
+	channel := fmt.Sprintf("battery:%d", r.index)
 
+	// Build fields map for all data
 	fields := map[string]interface{}{
 		"present":            fmt.Sprintf("%v", effectivePresent),
 		"state":              r.data.State.String(),
@@ -377,18 +381,46 @@ func (r *BatteryReader) sendStatusUpdate() {
 			r.index, r.data.State.String(), effectivePresent, r.data.Voltage, r.data.Charge)
 	}
 
-	if err := r.redis.HMSet(context.TODO(), hashKey, fields).Err(); err != nil {
-		r.service.logger.Errorf("Battery %d: Failed to update status hash: %v", r.index, err)
+	// Use Redis transaction for atomic updates
+	pipe := r.redis.TxPipeline()
+
+	// Update all fields in Redis hash
+	pipe.HMSet(context.TODO(), hashKey, fields)
+
+	// Update fault set within transaction
+	changedFaults, faultChanges := r.updateFaultSetInTransaction(pipe)
+
+	// Publish notifications only for changed fields
+	if effectivePresent != previousEffectivePresent {
+		pipe.Publish(context.TODO(), channel, "present")
+	}
+	if r.data.State != r.previousData.State {
+		pipe.Publish(context.TODO(), channel, "state")
+	}
+	if r.data.Charge != r.previousData.Charge {
+		pipe.Publish(context.TODO(), channel, "charge")
+	}
+	if r.data.TemperatureState != r.previousData.TemperatureState {
+		pipe.Publish(context.TODO(), channel, "temperature-state")
+	}
+
+	// Execute the transaction
+	if _, err := pipe.Exec(context.TODO()); err != nil {
+		r.service.logger.Errorf("Battery %d: Failed to execute Redis transaction: %v", r.index, err)
 		return
 	}
 
-	r.updateFaultSet()
+	// Update fault tracking flags only after successful transaction
+	if faultChanges {
+		for _, fault := range changedFaults {
+			if state, exists := r.faultStates[fault]; exists {
+				state.PublishedToRedis = state.Present
+			}
+		}
+	}
 
-	channel := fmt.Sprintf("battery:%d", r.index)
-
-	r.redis.Publish(context.TODO(), channel, "present")
-	r.redis.Publish(context.TODO(), channel, "state")
-	r.redis.Publish(context.TODO(), channel, "charge")
+	// Update previous data for next comparison
+	r.previousData = r.data
 }
 
 func (r *BatteryReader) temperatureStateString() string {
@@ -404,19 +436,33 @@ func (r *BatteryReader) temperatureStateString() string {
 	}
 }
 
-func (r *BatteryReader) updateFaultSet() {
+func (r *BatteryReader) updateFaultSetInTransaction(pipe redis.Pipeliner) ([]BMSFault, bool) {
 	faultKey := fmt.Sprintf("battery:%d:fault", r.index)
-
-	r.redis.Del(context.TODO(), faultKey)
+	var changedFaults []BMSFault
+	anyChanges := false
 
 	for fault, state := range r.faultStates {
-		if state.Present {
-			r.redis.SAdd(context.TODO(), faultKey, fmt.Sprintf("%d", fault))
+		// Only update Redis if the fault state changed
+		if state.Present != state.PublishedToRedis {
+			if state.Present {
+				// Add fault to set
+				pipe.SAdd(context.TODO(), faultKey, fmt.Sprintf("%d", fault))
+			} else {
+				// Remove fault from set
+				pipe.SRem(context.TODO(), faultKey, fmt.Sprintf("%d", fault))
+			}
+			changedFaults = append(changedFaults, fault)
+			anyChanges = true
 		}
 	}
 
-	faultChannel := fmt.Sprintf("battery:%d", r.index)
-	r.redis.Publish(context.TODO(), faultChannel, "fault")
+	// Only publish fault notification if there were changes
+	if anyChanges {
+		faultChannel := fmt.Sprintf("battery:%d", r.index)
+		pipe.Publish(context.TODO(), faultChannel, "fault")
+	}
+
+	return changedFaults, anyChanges
 }
 
 func (r *BatteryReader) updateLastCmdTime() {
