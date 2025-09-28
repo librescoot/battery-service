@@ -72,6 +72,8 @@ type PN7150 struct {
 	tagEventReaderStop    chan struct{}
 	tagEventReaderRunning bool
 	detectionFailures     int
+
+	lastRecovery time.Time
 }
 
 func NewPN7150(devName string, logCallback LogCallback, app interface{}, standbyEnabled, lpcdEnabled bool, debugMode bool) (*PN7150, error) {
@@ -1271,16 +1273,37 @@ func (p *PN7150) handleSeriousErrorWithReinit(err error, operation string) error
 		return NewError(ErrTagDeparted, fmt.Sprintf("tag departed during %s", operation))
 	}
 
-	if p.logCallback != nil {
-		p.logCallback(LogLevelError, fmt.Sprintf("%s failed with serious error: %v - HAL reinitialization disabled", operation, err))
+	// Simple time-based rate limiting
+	minReinitInterval := 2 * time.Second
+
+	if time.Since(p.lastRecovery) < minReinitInterval {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelWarning, fmt.Sprintf("%s failed with serious error: %v - HAL reinitialization rate limited", operation, err))
+		}
+		return fmt.Errorf("%s failed: %v", operation, err)
 	}
 
-	// HAL reinitialization disabled - just return the error
-	// // Release lock before reinitialization
-	// reinitErr := p.FullReinitialize()
+	if p.logCallback != nil {
+		p.logCallback(LogLevelError, fmt.Sprintf("%s failed with serious error: %v - attempting HAL reinitialization", operation, err))
+	}
 
-	// Return the original error since reinitialization is disabled
-	return fmt.Errorf("%s failed: %v", operation, err)
+	p.lastRecovery = time.Now()
+
+	// Perform HAL reinitialization
+	reinitErr := p.FullReinitialize()
+	if reinitErr != nil {
+		if p.logCallback != nil {
+			p.logCallback(LogLevelError, fmt.Sprintf("HAL reinitialization failed: %v", reinitErr))
+		}
+		return fmt.Errorf("%s failed: %v, reinit failed: %v", operation, err, reinitErr)
+	}
+
+	if p.logCallback != nil {
+		p.logCallback(LogLevelInfo, "HAL reinitialization completed successfully")
+	}
+
+	// Return error indicating operation was aborted after HAL reinitialization
+	return fmt.Errorf("%s aborted after HAL reinitialization", operation)
 }
 
 // handle0300Error handles NTAG arbiter busy (0x03) errors with tag reselection
@@ -1295,6 +1318,8 @@ func (p *PN7150) handle0300Error(operation string) (bool, error) {
 		if p.logCallback != nil {
 			p.logCallback(LogLevelInfo, "Attempting tag reselection for arbiter busy conflict")
 		}
+
+		time.Sleep(25 * time.Millisecond)
 
 		// Try tag reselection to resolve arbiter conflict
 		err := p.reselectCurrentTag()

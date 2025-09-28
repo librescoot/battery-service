@@ -158,6 +158,10 @@ func (r *BatteryReader) readStatus() bool {
 	r.setNFCFault(BMSFaultBMSCommsError, false)
 	r.setNFCFault(BMSFaultBMSZeroData, false)
 
+	// Reset communication failure counter on successful read
+	r.commFailureCount = 0
+	r.lastSuccessfulComm = time.Now()
+
 	r.sendStatusUpdate()
 
 	return true
@@ -178,6 +182,8 @@ func (r *BatteryReader) writeCommand(cmd BMSCommand) {
 		r.handleNFCError(err)
 	} else {
 		r.updateLastCmdTime()
+		r.commFailureCount = 0
+		r.lastSuccessfulComm = time.Now()
 		r.service.logger.Infof("Battery %d: Sent command %s", r.index, cmd)
 	}
 
@@ -191,14 +197,18 @@ func (r *BatteryReader) writeCommandProtected(cmd BMSCommand) {
 func (r *BatteryReader) handleNFCError(err error) {
 	r.service.logger.Errorf("Battery %d: NFC communication error: %v", r.index, err)
 
+	// Handle post-reinitialization recovery
 	if err != nil && (strings.Contains(err.Error(), "aborted") && strings.Contains(err.Error(), "after HAL reinitialization")) {
 		r.service.logger.Infof("Battery %d: HAL reinitialization completed, restarting state machine from discovery", r.index)
 		r.setNFCFault(BMSFaultBMSCommsError, false)
+		r.commFailureCount = 0
+		r.lastSuccessfulComm = time.Now()
 		time.Sleep(100 * time.Millisecond)
 		r.transitionTo(StateDiscoverTag)
 		return
 	}
 
+	// Handle tag departure - no fault, clean transition
 	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
 		r.service.logger.Infof("Battery %d: Tag departure detected (HAL error code %d)", r.index, nfcErr.Code)
 		if r.isIn(StateTagPresent) {
@@ -219,16 +229,45 @@ func (r *BatteryReader) handleNFCError(err error) {
 		return
 	}
 
-	r.setNFCFault(BMSFaultBMSCommsError, true)
-
+	// Only set BMSCommsError and count failures for actual HAL errors
 	if isHALError(err) {
-		r.service.logger.Warnf("Battery %d: HAL-level error detected, setting fault but not reinitializing", r.index)
+		r.commFailureCount++
+		r.service.logger.Warnf("Battery %d: Communication failure %d: %v", r.index, r.commFailureCount, err)
+		r.setNFCFault(BMSFaultBMSCommsError, true)
+	} else {
+		// Transient errors - no fault, will be retried by HAL layer
+		r.service.logger.Debugf("Battery %d: Transient error, retrying: %v", r.index, err)
 	}
 }
 
 func isHALError(err error) bool {
-	// For now we assume any error is a HAL error
+	if err == nil {
+		return false
+	}
+
+	// Tag departure is not a HAL error
+	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
+		return false
+	}
+	if strings.Contains(err.Error(), "tag departed") {
+		return false
+	}
+
+	// Transient errors are not HAL errors
+	if isTransientError(err) {
+		return false
+	}
+
+	// Everything else is considered a HAL error requiring potential reinitialization
 	return true
+}
+
+func isTransientError(err error) bool {
+	errStr := err.Error()
+	return strings.Contains(errStr, "0300") ||
+		strings.Contains(errStr, "arbiter busy") ||
+		strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "NACK")
 }
 
 func (r *BatteryReader) parseStatusData(status0, status1, status2 []byte) {

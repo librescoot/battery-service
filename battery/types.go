@@ -275,6 +275,10 @@ type BatteryReader struct {
 	faultDebounceTimers map[BMSFault]*time.Timer
 	faultStates         map[BMSFault]*FaultState
 
+	// Recovery tracking
+	commFailureCount   int
+	lastSuccessfulComm time.Time
+
 	// Redis
 	redis *redis.Client
 
