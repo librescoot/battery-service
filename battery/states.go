@@ -138,7 +138,7 @@ func (r *BatteryReader) enterState(newState State) {
 		r.deinitializeNFC()
 
 	case StateNFCReaderOn:
-		r.service.logger.Printf("Battery %d: NFC reader operational, starting discovery", r.index)
+		r.service.logger.Infof("Battery %d: NFC reader operational, starting discovery", r.index)
 		r.transitionTo(StateDiscoverTag)
 
 	case StateDiscoverTag:
@@ -298,6 +298,6 @@ func (r *BatteryReader) getStateTimer() <-chan time.Time {
 
 func (r *BatteryReader) logStateTransition(from, to State) {
 	if from != to {
-		r.service.logger.Printf("Battery %d: %s -> %s", r.index, from, to)
+		r.service.logger.Debugf("Battery %d: %s -> %s", r.index, from, to)
 	}
 }

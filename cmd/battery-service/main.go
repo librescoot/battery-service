@@ -25,6 +25,10 @@ func main() {
 	var showVersion bool
 	flag.BoolVar(&showVersion, "version", false, "Show version information")
 
+	// Service log level
+	var serviceLogLevel int
+	flag.IntVar(&serviceLogLevel, "log", 3, "Service log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
+
 	// Redis configuration
 	flag.StringVar(&config.RedisServerAddress, "redis-server", "127.0.0.1", "Redis server address")
 	var redisPort uint
@@ -41,12 +45,19 @@ func main() {
 	var logLevel0, logLevel1 int
 	var battery1Active bool
 	flag.StringVar(&device0, "device0", "/dev/pn5xx_i2c0", "Battery 0 NFC device")
-	flag.IntVar(&logLevel0, "log0", 3, "Battery 0 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
+	flag.IntVar(&logLevel0, "log0", -1, "Battery 0 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
 	flag.StringVar(&device1, "device1", "/dev/pn5xx_i2c1", "Battery 1 NFC device")
-	flag.IntVar(&logLevel1, "log1", 3, "Battery 1 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
+	flag.IntVar(&logLevel1, "log1", -1, "Battery 1 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
 	flag.BoolVar(&battery1Active, "battery1-active", false, "Enable battery 1 as active in addition to battery 0 (default: inactive)")
 
 	flag.Parse()
+
+	if logLevel0 == -1 {
+		logLevel0 = serviceLogLevel
+	}
+	if logLevel1 == -1 {
+		logLevel1 = serviceLogLevel
+	}
 
 	// Show version and exit if requested
 	if showVersion {
@@ -59,12 +70,14 @@ func main() {
 	config.HeartbeatTimeout = time.Duration(heartbeatTimeout) * time.Second
 	config.OffUpdateTime = time.Duration(offUpdateTime) * time.Second
 
-	var logger *log.Logger
+	var stdLogger *log.Logger
 	if os.Getenv("INVOCATION_ID") != "" {
-		logger = log.New(os.Stdout, "", log.LstdFlags)
+		stdLogger = log.New(os.Stdout, "", 0)
 	} else {
-		logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds|log.Lmsgprefix)
+		stdLogger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds|log.Lmsgprefix)
 	}
+
+	logger := battery.NewLogger(stdLogger, battery.LogLevel(serviceLogLevel))
 
 	batteryConfig := &battery.BatteryConfiguration{
 		Readers: []battery.BatteryReaderConfig{
@@ -90,10 +103,10 @@ func main() {
 	}
 
 	// Log version information at startup
-	logger.Printf("Battery service v2 starting (git: %s, built: %s)", gitRevision, buildTime)
+	logger.Infof("Battery service v2 starting (git: %s, built: %s)", gitRevision, buildTime)
 
 	// Create battery service
-	service, err := battery.NewService(config, batteryConfig, logger, debugMode)
+	service, err := battery.NewService(config, batteryConfig, stdLogger, battery.LogLevel(serviceLogLevel), debugMode)
 	if err != nil {
 		logger.Fatalf("Failed to create battery service: %v", err)
 	}
@@ -102,13 +115,13 @@ func main() {
 		logger.Fatalf("Failed to start battery service: %v", err)
 	}
 
-	logger.Printf("Battery service v2 started with %d readers", len(batteryConfig.Readers))
+	logger.Infof("Battery service v2 started with %d readers", len(batteryConfig.Readers))
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	logger.Printf("Shutting down battery service v2...")
+	logger.Infof("Shutting down battery service v2...")
 
 	service.Stop()
 }

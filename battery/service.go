@@ -9,13 +9,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logger *log.Logger, debugMode bool) (*Service, error) {
+func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logger *log.Logger, logLevel LogLevel, debugMode bool) (*Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Service{
 		config:        config,
 		batteryConfig: batteryConfig,
-		logger:        logger,
+		logger:        NewLogger(logger, logLevel),
 		ctx:           ctx,
 		cancel:        cancel,
 		debug:         debugMode,
@@ -34,13 +34,13 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 	var activeReadersCreated bool
 	for i, readerConfig := range batteryConfig.Readers {
 		if !readerConfig.Enabled {
-			s.logger.Printf("Reader %d is disabled in configuration", readerConfig.Index)
+			s.logger.Infof("Reader %d is disabled in configuration", readerConfig.Index)
 			continue
 		}
 
 		reader, err := NewBatteryReader(readerConfig.Index, readerConfig.Role, readerConfig.DeviceName, readerConfig.LogLevel, s)
 		if err != nil {
-			s.logger.Printf("Failed to create reader %d: %v", readerConfig.Index, err)
+			s.logger.Errorf("Failed to create reader %d: %v", readerConfig.Index, err)
 			continue
 		}
 		s.readers[i] = reader
@@ -58,25 +58,25 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 }
 
 func (s *Service) Start() error {
-	s.logger.Printf("Starting battery service v2")
+	s.logger.Infof("Starting battery service v2")
 
 	go s.runRedisSubscriber()
 
 	for _, reader := range s.readers {
 		if reader != nil {
 			if err := reader.Start(); err != nil {
-				s.logger.Printf("Failed to start reader %d: %v", reader.index, err)
+				s.logger.Errorf("Failed to start reader %d: %v", reader.index, err)
 				continue
 			}
 		}
 	}
 
-	s.logger.Printf("Battery service v2 started successfully")
+	s.logger.Infof("Battery service v2 started successfully")
 	return nil
 }
 
 func (s *Service) Stop() {
-	s.logger.Printf("Stopping battery service v2")
+	s.logger.Infof("Stopping battery service v2")
 
 	s.cancel()
 
@@ -97,7 +97,7 @@ func (s *Service) Stop() {
 		s.redis.Close()
 	}
 
-	s.logger.Printf("Battery service v2 stopped")
+	s.logger.Infof("Battery service v2 stopped")
 }
 
 func (s *Service) SetBatteryEnabled(index int, enabled bool) error {
@@ -110,7 +110,7 @@ func (s *Service) SetBatteryEnabled(index int, enabled bool) error {
 }
 
 func (s *Service) runRedisSubscriber() {
-	s.logger.Printf("Starting Redis subscriber for channels: vehicle:state, vehicle:seatbox:lock")
+	s.logger.Infof("Starting Redis subscriber for channels: vehicle:state, vehicle:seatbox:lock")
 
 	pubsub := s.redis.Subscribe(s.ctx,
 		"vehicle",
@@ -119,22 +119,22 @@ func (s *Service) runRedisSubscriber() {
 
 	_, err := pubsub.Receive(s.ctx)
 	if err != nil {
-		s.logger.Printf("ERROR: Failed to establish Redis subscription: %v", err)
+		s.logger.Errorf("Failed to establish Redis subscription: %v", err)
 		return
 	}
-	s.logger.Printf("Redis subscription established successfully")
+	s.logger.Infof("Redis subscription established successfully")
 
 	ch := pubsub.Channel()
-	s.logger.Printf("Listening for Redis messages...")
+	s.logger.Debugf("Listening for Redis messages...")
 
 	for {
 		select {
 		case msg := <-ch:
 			if msg == nil {
-				s.logger.Printf("Redis channel closed")
+				s.logger.Warnf("Redis channel closed")
 				return
 			}
-			s.logger.Printf("Received Redis message: channel=%s, payload=%s", msg.Channel, msg.Payload)
+			s.logger.Debugf("Received Redis message: channel=%s, payload=%s", msg.Channel, msg.Payload)
 
 			switch msg.Channel {
 			case "vehicle":
@@ -144,14 +144,14 @@ func (s *Service) runRedisSubscriber() {
 				case "seatbox:lock":
 					s.handleSeatboxUpdate()
 				default:
-					s.logger.Printf("Unknown vehicle payload: %s", msg.Payload)
+					s.logger.Debugf("Unknown vehicle payload: %s", msg.Payload)
 				}
 			default:
-				s.logger.Printf("Unknown Redis channel: %s", msg.Channel)
+				s.logger.Warnf("Unknown Redis channel: %s", msg.Channel)
 			}
 
 		case <-s.ctx.Done():
-			s.logger.Printf("Redis subscriber context cancelled")
+			s.logger.Infof("Redis subscriber context cancelled")
 			return
 		}
 	}
@@ -160,12 +160,12 @@ func (s *Service) runRedisSubscriber() {
 func (s *Service) handleVehicleStateMessage() {
 	vehicleState, err := s.redis.HGet(s.ctx, "vehicle", "state").Result()
 	if err != nil {
-		s.logger.Printf("Failed to fetch vehicle state: %v", err)
+		s.logger.Errorf("Failed to fetch vehicle state: %v", err)
 		return
 	}
 
 	newState := VehicleState(vehicleState)
-	s.logger.Printf("Vehicle state changed: %s", newState)
+	s.logger.Infof("Vehicle state changed: %s", newState)
 
 	s.vehicleState = newState
 
@@ -179,12 +179,12 @@ func (s *Service) handleVehicleStateMessage() {
 func (s *Service) handleSeatboxUpdate() {
 	seatboxLock, err := s.redis.HGet(s.ctx, "vehicle", "seatbox:lock").Result()
 	if err != nil {
-		s.logger.Printf("Failed to fetch seatbox lock state: %v", err)
+		s.logger.Errorf("Failed to fetch seatbox lock state: %v", err)
 		return
 	}
 
 	closed := (seatboxLock == "closed")
-	s.logger.Printf("Seatbox lock changed: %s (closed=%t)", seatboxLock, closed)
+	s.logger.Infof("Seatbox lock changed: %s (closed=%t)", seatboxLock, closed)
 
 	for _, reader := range s.readers {
 		if reader != nil {

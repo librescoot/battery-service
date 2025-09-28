@@ -46,7 +46,7 @@ func (r *BatteryReader) initializeFaultManagement() {
 func (r *BatteryReader) setFault(fault BMSFault, present bool) {
 	config, exists := faultConfigs[fault]
 	if !exists {
-		r.service.logger.Printf("Battery %d: Unknown fault %d", r.index, fault)
+		r.service.logger.Warnf("Battery %d: Unknown fault %d", r.index, fault)
 		return
 	}
 
@@ -101,7 +101,7 @@ func (r *BatteryReader) setFault(fault BMSFault, present bool) {
 }
 
 func (r *BatteryReader) activateFault(fault BMSFault, config FaultConfig) {
-	r.service.logger.Printf("Battery %d: Fault %s (%d) activated", r.index, config.Description, fault)
+	r.service.logger.Warnf("Battery %d: Fault %s (%d) activated", r.index, config.Description, fault)
 
 	if config.IsCritical {
 		r.clearLesserFaults(fault, false)
@@ -112,7 +112,7 @@ func (r *BatteryReader) activateFault(fault BMSFault, config FaultConfig) {
 }
 
 func (r *BatteryReader) deactivateFault(fault BMSFault, config FaultConfig) {
-	r.service.logger.Printf("Battery %d: Fault %s (%d) cleared", r.index, config.Description, fault)
+	r.service.logger.Infof("Battery %d: Fault %s (%d) cleared", r.index, config.Description, fault)
 
 	r.reportFault(fault, config, false)
 }
@@ -130,7 +130,7 @@ func (r *BatteryReader) clearLesserFaults(referenceFault BMSFault, includeRefere
 func (r *BatteryReader) sendNotPresent() {
 	r.data.Present = false
 	r.sendStatusUpdate()
-	r.service.logger.Printf("Battery %d: Reported as not present due to critical fault", r.index)
+	r.service.logger.Warnf("Battery %d: Reported as not present due to critical fault", r.index)
 }
 
 func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present bool) {

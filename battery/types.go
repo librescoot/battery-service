@@ -220,7 +220,7 @@ type InitComplete struct {
 type Service struct {
 	config        *ServiceConfig
 	batteryConfig *BatteryConfiguration
-	logger        Logger
+	logger        *Logger
 	ctx           context.Context
 	cancel        context.CancelFunc
 	debug         bool
@@ -289,8 +289,4 @@ type FaultState struct {
 	ResetTimer   *time.Timer
 }
 
-// Interface types for dependency injection
-type Logger interface {
-	Printf(format string, v ...interface{})
-	Fatalf(format string, v ...interface{})
-}
+

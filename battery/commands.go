@@ -14,7 +14,7 @@ func (r *BatteryReader) deinitializeNFC() {
 	if r.hal != nil {
 		r.hal.Deinitialize()
 	}
-	r.service.logger.Printf("Battery %d: NFC deinitialized", r.index)
+	r.service.logger.Infof("Battery %d: NFC deinitialized", r.index)
 }
 
 func (r *BatteryReader) startDiscovery() {
@@ -23,13 +23,13 @@ func (r *BatteryReader) startDiscovery() {
 		pollPeriod = 2500
 	}
 
-	r.service.logger.Printf("Battery %d: Starting discovery with poll period %d ms", r.index, pollPeriod)
+	r.service.logger.Debugf("Battery %d: Starting discovery with poll period %d ms", r.index, pollPeriod)
 	if err := r.hal.StartDiscovery(pollPeriod); err != nil {
-		r.service.logger.Printf("Battery %d: Failed to start discovery: %v", r.index, err)
+		r.service.logger.Errorf("Battery %d: Failed to start discovery: %v", r.index, err)
 		r.handleNFCError(err)
 		return
 	}
-	r.service.logger.Printf("Battery %d: Discovery started successfully", r.index)
+	r.service.logger.Debugf("Battery %d: Discovery started successfully", r.index)
 }
 
 func (r *BatteryReader) stopDiscovery() {
@@ -37,7 +37,7 @@ func (r *BatteryReader) stopDiscovery() {
 		if strings.Contains(err.Error(), "invalid state for stopping discovery") {
 			return
 		}
-		r.service.logger.Printf("Battery %d: Failed to stop discovery: %v", r.index, err)
+		r.service.logger.Warnf("Battery %d: Failed to stop discovery: %v", r.index, err)
 	}
 }
 
@@ -46,7 +46,7 @@ func (r *BatteryReader) checkForTags() {
 
 	if err != nil {
 		if r.previousTagPresent {
-			r.service.logger.Printf("Battery %d: Tag departed (detect failed: %v)", r.index, err)
+			r.service.logger.Infof("Battery %d: Tag departed (detect failed: %v)", r.index, err)
 			if r.isIn(StateTagPresent) {
 				r.handleDeparture()
 				r.transitionTo(StateDiscoverTag)
@@ -59,8 +59,8 @@ func (r *BatteryReader) checkForTags() {
 	tagPresent := len(tags) > 0
 
 	if tagPresent && !r.previousTagPresent {
-		r.service.logger.Printf("Battery %d: Tag arrived: %x", r.index, tags[0].ID)
-		r.service.logger.Printf("Battery %d: Processing tag arrival", r.index)
+		r.service.logger.Infof("Battery %d: Tag arrived: %x", r.index, tags[0].ID)
+		r.service.logger.Debugf("Battery %d: Processing tag arrival", r.index)
 		if r.isIn(StateDiscoverTag) {
 			r.justInserted = true
 			r.transitionTo(StateTagPresent)
@@ -68,7 +68,7 @@ func (r *BatteryReader) checkForTags() {
 	}
 
 	if !tagPresent && r.previousTagPresent {
-		r.service.logger.Printf("Battery %d: Tag departed", r.index)
+		r.service.logger.Infof("Battery %d: Tag departed", r.index)
 		if r.isIn(StateTagPresent) {
 			r.handleDeparture()
 			r.transitionTo(StateDiscoverTag)
@@ -92,7 +92,7 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 					return data, nil
 				}
 				if r.service.debug {
-					r.service.logger.Printf("Battery %d: Read verification mismatch at 0x%04X, retry %d", r.index, address, retry)
+					r.service.logger.Debugf("Battery %d: Read verification mismatch at 0x%04X, retry %d", r.index, address, retry)
 				}
 			}
 			checkBuffer = make([]byte, len(data))
@@ -105,7 +105,7 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 			return nil, err
 		}
 		if r.service.debug {
-			r.service.logger.Printf("Battery %d: Read error at 0x%04X: %v (retry %d)", r.index, address, err, retry)
+			r.service.logger.Debugf("Battery %d: Read error at 0x%04X: %v (retry %d)", r.index, address, err, retry)
 		}
 	}
 
@@ -118,39 +118,39 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 func (r *BatteryReader) readStatus() bool {
 	status0, err := r.readWithVerification(0x0300)
 	if err != nil {
-		r.service.logger.Printf("Battery %d: Failed to read status0: %v", r.index, err)
+		r.service.logger.Warnf("Battery %d: Failed to read status0: %v", r.index, err)
 		r.handleNFCError(err)
 		return false
 	}
 
 	status1, err := r.readWithVerification(0x0310)
 	if err != nil {
-		r.service.logger.Printf("Battery %d: Failed to read status1: %v", r.index, err)
+		r.service.logger.Warnf("Battery %d: Failed to read status1: %v", r.index, err)
 		r.handleNFCError(err)
 		return false
 	}
 
 	status2, err := r.readWithVerification(0x0320)
 	if err != nil {
-		r.service.logger.Printf("Battery %d: Failed to read status2: %v", r.index, err)
+		r.service.logger.Warnf("Battery %d: Failed to read status2: %v", r.index, err)
 		r.handleNFCError(err)
 		return false
 	}
 
 	if r.service.debug {
-		r.service.logger.Printf("Battery %d: STATUS0 raw BEFORE parsing: %x", r.index, status0)
-		r.service.logger.Printf("Battery %d: STATUS1 raw BEFORE parsing: %x", r.index, status1)
-		r.service.logger.Printf("Battery %d: STATUS2 raw BEFORE parsing: %x", r.index, status2)
+		r.service.logger.Debugf("Battery %d: STATUS0 raw BEFORE parsing: %x", r.index, status0)
+		r.service.logger.Debugf("Battery %d: STATUS1 raw BEFORE parsing: %x", r.index, status1)
+		r.service.logger.Debugf("Battery %d: STATUS2 raw BEFORE parsing: %x", r.index, status2)
 		if len(status1) >= 4 {
 			state := uint32(status1[0]) | uint32(status1[1])<<8 | uint32(status1[2])<<16 | uint32(status1[3])<<24
-			r.service.logger.Printf("Battery %d: Raw state bytes STATUS1[0-3]: %02x %02x %02x %02x = 0x%08x (%s)",
+			r.service.logger.Debugf("Battery %d: Raw state bytes STATUS1[0-3]: %02x %02x %02x %02x = 0x%08x (%s)",
 				r.index, status1[0], status1[1], status1[2], status1[3], state, BMSState(state))
 		}
 	}
 
 	r.parseStatusData(status0, status1, status2)
 
-	r.service.logger.Printf("Battery %d: state=%s, voltage=%dmV, current=%dmA, charge=%d%%, temp=[%d,%d,%d,%d]°C",
+	r.service.logger.Infof("Battery %d: state=%s, voltage=%dmV, current=%dmA, charge=%d%%, temp=[%d,%d,%d,%d]°C",
 		r.index, r.data.State.String(), r.data.Voltage, r.data.Current, r.data.Charge,
 		r.data.Temperature[0], r.data.Temperature[1], r.data.Temperature[2], r.data.Temperature[3])
 
@@ -173,11 +173,11 @@ func (r *BatteryReader) writeCommand(cmd BMSCommand) {
 	cmdBytes[3] = byte(cmd >> 24)
 
 	if err := r.hal.WriteBinary(0x0330, cmdBytes); err != nil {
-		r.service.logger.Printf("Battery %d: Failed to write command %s: %v", r.index, cmd, err)
+		r.service.logger.Errorf("Battery %d: Failed to write command %s: %v", r.index, cmd, err)
 		r.handleNFCError(err)
 	} else {
 		r.updateLastCmdTime()
-		r.service.logger.Printf("Battery %d: Sent command %s", r.index, cmd)
+		r.service.logger.Infof("Battery %d: Sent command %s", r.index, cmd)
 	}
 
 	r.stopDiscovery()
@@ -188,10 +188,10 @@ func (r *BatteryReader) writeCommandProtected(cmd BMSCommand) {
 }
 
 func (r *BatteryReader) handleNFCError(err error) {
-	r.service.logger.Printf("Battery %d: NFC communication error: %v", r.index, err)
+	r.service.logger.Errorf("Battery %d: NFC communication error: %v", r.index, err)
 
 	if err != nil && (strings.Contains(err.Error(), "aborted") && strings.Contains(err.Error(), "after HAL reinitialization")) {
-		r.service.logger.Printf("Battery %d: HAL reinitialization completed, restarting state machine from discovery", r.index)
+		r.service.logger.Infof("Battery %d: HAL reinitialization completed, restarting state machine from discovery", r.index)
 		r.setNFCFault(BMSFaultBMSCommsError, false)
 		time.Sleep(100 * time.Millisecond)
 		r.transitionTo(StateDiscoverTag)
@@ -199,7 +199,7 @@ func (r *BatteryReader) handleNFCError(err error) {
 	}
 
 	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
-		r.service.logger.Printf("Battery %d: Tag departure detected (HAL error code %d)", r.index, nfcErr.Code)
+		r.service.logger.Infof("Battery %d: Tag departure detected (HAL error code %d)", r.index, nfcErr.Code)
 		if r.isIn(StateTagPresent) {
 			r.handleDeparture()
 			r.transitionTo(StateDiscoverTag)
@@ -209,7 +209,7 @@ func (r *BatteryReader) handleNFCError(err error) {
 	}
 
 	if err != nil && strings.Contains(err.Error(), "tag departed") {
-		r.service.logger.Printf("Battery %d: Tag departure detected from error message", r.index)
+		r.service.logger.Infof("Battery %d: Tag departure detected from error message", r.index)
 		if r.isIn(StateTagPresent) {
 			r.handleDeparture()
 			r.transitionTo(StateDiscoverTag)
@@ -221,7 +221,7 @@ func (r *BatteryReader) handleNFCError(err error) {
 	r.setNFCFault(BMSFaultBMSCommsError, true)
 
 	if isHALError(err) {
-		r.service.logger.Printf("Battery %d: HAL-level error detected, setting fault but not reinitializing", r.index)
+		r.service.logger.Warnf("Battery %d: HAL-level error detected, setting fault but not reinitializing", r.index)
 	}
 }
 
@@ -373,12 +373,12 @@ func (r *BatteryReader) sendStatusUpdate() {
 	}
 
 	if r.service.debug {
-		r.service.logger.Printf("Battery %d: Publishing state=%s, present=%v, voltage=%d, charge=%d",
+		r.service.logger.Debugf("Battery %d: Publishing state=%s, present=%v, voltage=%d, charge=%d",
 			r.index, r.data.State.String(), effectivePresent, r.data.Voltage, r.data.Charge)
 	}
 
 	if err := r.redis.HMSet(context.TODO(), hashKey, fields).Err(); err != nil {
-		r.service.logger.Printf("Battery %d: Failed to update status hash: %v", r.index, err)
+		r.service.logger.Errorf("Battery %d: Failed to update status hash: %v", r.index, err)
 		return
 	}
 
@@ -496,7 +496,7 @@ func (r *BatteryReader) checkStateCorrect(raiseFault bool) bool {
 }
 
 func (r *BatteryReader) handleDeparture() {
-	r.service.logger.Printf("Battery %d: Tag departed", r.index)
+	r.service.logger.Infof("Battery %d: Tag departed", r.index)
 	r.data.Present = false
 	r.sendStatusUpdate()
 }
@@ -506,7 +506,7 @@ func (r *BatteryReader) retryZeroDataOrEmptyBattery() {
 	r.setupHeartbeatTimer()
 
 	if r.data.EmptyOr0Data == BMSMaxZeroRetryHeartbeat+1 {
-		r.service.logger.Printf("Battery %d: Zero data retry threshold exceeded, but continuing attempts", r.index)
+		r.service.logger.Warnf("Battery %d: Zero data retry threshold exceeded, but continuing attempts", r.index)
 	}
 }
 
@@ -583,12 +583,12 @@ func (r *BatteryReader) heartbeatMonitor() {
 			if r.isInHeartbeatTree() {
 				if !r.checkStateCorrect(false) {
 					// Battery state wrong after timeout - force rediscovery
-					r.service.logger.Printf("Battery %d: Recovery timeout after %s - forcing rediscovery", r.index, r.getHeartbeatInterval())
+					r.service.logger.Warnf("Battery %d: Recovery timeout after %s - forcing rediscovery", r.index, r.getHeartbeatInterval())
 					r.handleDeparture()
 					r.transitionTo(StateDiscoverTag)
 				} else {
 					// State correct - restart heartbeat cycle
-					r.service.logger.Printf("Battery %d: Heartbeat timeout - restarting cycle", r.index)
+					r.service.logger.Warnf("Battery %d: Heartbeat timeout - restarting cycle", r.index)
 					r.transitionTo(StateHeartbeat)
 				}
 			}
