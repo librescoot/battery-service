@@ -270,6 +270,7 @@ type BatteryReader struct {
 	lastCmdTime              time.Time
 	initComplete             InitComplete
 	previousTagPresent       bool
+	tagsDiscovered           bool
 
 	// Fault management
 	faultDebounceTimers map[BMSFault]*time.Timer

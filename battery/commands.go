@@ -18,7 +18,7 @@ func (r *BatteryReader) deinitializeNFC() {
 	r.service.logger.Infof("Battery %d: NFC deinitialized", r.index)
 }
 
-func (r *BatteryReader) startDiscovery() {
+func (r *BatteryReader) startDiscovery() bool {
 	pollPeriod := uint(100)
 	if r.seatboxLockClosed {
 		pollPeriod = 2500
@@ -28,18 +28,21 @@ func (r *BatteryReader) startDiscovery() {
 	if err := r.hal.StartDiscovery(pollPeriod); err != nil {
 		r.service.logger.Errorf("Battery %d: Failed to start discovery: %v", r.index, err)
 		r.handleNFCError(err)
-		return
+		return false
 	}
 	r.service.logger.Debugf("Battery %d: Discovery started successfully", r.index)
+	return true
 }
 
 func (r *BatteryReader) stopDiscovery() {
 	if err := r.hal.StopDiscovery(); err != nil {
 		if strings.Contains(err.Error(), "invalid state for stopping discovery") {
+			r.tagsDiscovered = false
 			return
 		}
 		r.service.logger.Warnf("Battery %d: Failed to stop discovery: %v", r.index, err)
 	}
+	r.tagsDiscovered = false
 }
 
 func (r *BatteryReader) checkForTags() {
@@ -77,6 +80,35 @@ func (r *BatteryReader) checkForTags() {
 	}
 
 	r.previousTagPresent = tagPresent
+}
+
+func (r *BatteryReader) discoverBatteryTag() bool {
+	if r.tagsDiscovered {
+		return true
+	}
+
+	if !r.startDiscovery() {
+		return false
+	}
+
+	timeout := time.Now().Add(3 * time.Second)
+	for time.Now().Before(timeout) {
+		tags, err := r.hal.DetectTags()
+		if err != nil {
+			r.service.logger.Warnf("Battery %d: Tag detection error during discovery: %v", r.index, err)
+			r.handleNFCError(err)
+			return false
+		}
+		if len(tags) > 0 {
+			r.service.logger.Debugf("Battery %d: Battery tag discovered", r.index)
+			r.tagsDiscovered = true
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	r.service.logger.Warnf("Battery %d: Tag discovery timeout", r.index)
+	return false
 }
 
 func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
@@ -117,6 +149,11 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 }
 
 func (r *BatteryReader) readStatus() bool {
+	if !r.discoverBatteryTag() {
+		r.service.logger.Warnf("Battery %d: Failed to discover tag before reading status", r.index)
+		return false
+	}
+
 	status0, err := r.readWithVerification(0x0300)
 	if err != nil {
 		r.service.logger.Warnf("Battery %d: Failed to read status0: %v", r.index, err)
@@ -171,6 +208,11 @@ func (r *BatteryReader) readStatus() bool {
 }
 
 func (r *BatteryReader) writeCommand(cmd BMSCommand) {
+	if !r.discoverBatteryTag() {
+		r.service.logger.Warnf("Battery %d: Failed to discover tag before writing command", r.index)
+		return
+	}
+
 	r.takeInhibitor()
 	defer r.releaseInhibitor()
 
