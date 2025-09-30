@@ -162,6 +162,9 @@ func (r *BatteryReader) readStatus() bool {
 	r.commFailureCount = 0
 	r.lastSuccessfulComm = time.Now()
 
+	// Reset recovery counter on successful read
+	r.data.EmptyOr0Data = 0
+
 	r.sendStatusUpdate()
 
 	return true
@@ -587,11 +590,13 @@ func (r *BatteryReader) handleDeparture() {
 }
 
 func (r *BatteryReader) retryZeroDataOrEmptyBattery() {
-	// Always continue heartbeat to retry, never give up
-	r.setupHeartbeatTimer()
-
-	if r.data.EmptyOr0Data == BMSMaxZeroRetryHeartbeat+1 {
-		r.service.logger.Warnf("Battery %d: Zero data retry threshold exceeded, but continuing attempts", r.index)
+	if r.data.EmptyOr0Data <= BMSMaxZeroRetryHeartbeat {
+		// Continue heartbeat to retry
+		r.setupHeartbeatTimer()
+	} else {
+		// Exceeded threshold - stop heartbeat, will rely on passive discovery
+		r.service.logger.Warnf("Battery %d: Giving up active recovery after %d attempts (~110s)", r.index, r.data.EmptyOr0Data)
+		r.clearHeartbeatTimer()
 	}
 }
 
@@ -620,20 +625,35 @@ func (r *BatteryReader) setupHeartbeatTimer() {
 		}
 	}
 
-	r.clearHeartbeatTimer()
+	r.service.logger.Debugf("Battery %d: Setting up heartbeat timer for %s (vehicleState=%s, enabled=%t, state=%s)",
+		r.index, heartbeatInterval, r.vehicleState, r.enabled, r.state)
 
-	r.heartbeatTimer = time.NewTimer(heartbeatInterval)
+	if r.heartbeatTimer == nil {
+		// First time setup
+		r.heartbeatTimer = time.NewTimer(heartbeatInterval)
+	} else {
+		// Reset existing timer - this preserves the channel
+		if !r.heartbeatTimer.Stop() {
+			// Timer already fired, drain the channel
+			select {
+			case <-r.heartbeatTimer.C:
+			default:
+			}
+		}
+		r.heartbeatTimer.Reset(heartbeatInterval)
+	}
 
 	if !r.heartbeatRunning {
 		r.heartbeatRunning = true
+		r.service.logger.Debugf("Battery %d: Starting heartbeat monitor goroutine", r.index)
 		go r.heartbeatMonitor()
 	}
 }
 
 func (r *BatteryReader) clearHeartbeatTimer() {
 	if r.heartbeatTimer != nil {
+		// Stop the timer but don't set to nil - preserve the channel for heartbeat monitor
 		r.heartbeatTimer.Stop()
-		r.heartbeatTimer = nil
 	}
 }
 
@@ -665,8 +685,16 @@ func (r *BatteryReader) heartbeatMonitor() {
 
 		case <-r.getHeartbeatTimer():
 			// Heartbeat timeout during any heartbeat-related state
+			r.service.logger.Debugf("Battery %d: Heartbeat timer fired, state=%s, inHeartbeatTree=%t",
+				r.index, r.state, r.isInHeartbeatTree())
 			if r.isInHeartbeatTree() {
-				if !r.checkStateCorrect(false) {
+				stateCorrect := r.checkStateCorrect(false)
+				r.service.logger.Debugf("Battery %d: State correct check: %t (current=%s, expected=%s)",
+					r.index, stateCorrect, r.data.State, func() string {
+						if r.enabled && !r.batteryEmpty() { return "active" }
+						return "asleep/idle"
+					}())
+				if !stateCorrect {
 					// Battery state wrong after timeout - force rediscovery
 					r.service.logger.Warnf("Battery %d: Recovery timeout after %s - forcing rediscovery", r.index, r.getHeartbeatInterval())
 					r.handleDeparture()

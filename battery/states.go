@@ -170,9 +170,16 @@ func (r *BatteryReader) enterState(newState State) {
 		r.takeInhibitor()
 		r.retryZeroDataOrEmptyBattery()
 		if r.readStatus() {
+			r.data.EmptyOr0Data = 0
 			r.transitionTo(StateWaitLastCmd)
 		} else {
-			r.transitionTo(StateCheckPresence)
+			// Check threshold - if exceeded, give up active recovery
+			if r.data.EmptyOr0Data > BMSMaxZeroRetryHeartbeat {
+				r.service.logger.Warnf("Battery %d: Recovery threshold exceeded, entering passive discovery", r.index)
+				r.transitionTo(StateTagAbsent)
+			} else {
+				r.transitionTo(StateCheckPresence)
+			}
 		}
 
 	case StateCheckPresence:

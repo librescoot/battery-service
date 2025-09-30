@@ -192,6 +192,9 @@ func (r *BatteryReader) handleTimeout() {
 		if r.readStatus() {
 			r.checkForTags() // Check for tag departure during LED cycle
 			r.transitionTo(StateSendOpened)
+		} else {
+			// On failure, return to check presence to retry
+			r.transitionTo(StateCheckPresence)
 		}
 
 	case StateSendClosed:
@@ -201,6 +204,9 @@ func (r *BatteryReader) handleTimeout() {
 		if r.readStatus() {
 			r.checkForTags() // Check for tag departure during heartbeat
 			r.transitionTo(StateCondStateOK)
+		} else {
+			// On failure, return to check presence to retry
+			r.transitionTo(StateCheckPresence)
 		}
 
 	case StateSendInsertedClosed:
@@ -227,6 +233,11 @@ func (r *BatteryReader) handleVehicleStateChange(newState VehicleState) {
 		if r.isIn(StateTagPresent) {
 			r.triggerRestart()
 		}
+	}
+
+	// Reset recovery counter on vehicle state change (except in/out of ready-to-drive)
+	if oldVehicleState != VehicleStateReadyToDrive && newState != VehicleStateReadyToDrive {
+		r.data.EmptyOr0Data = 0
 	}
 
 	r.checkInitComplete()
@@ -279,6 +290,11 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 			r.index, oldLatch, r.latchedSeatboxLockClosed, r.state)
 	} else {
 		r.service.logger.Debugf("Battery %d: Latch unchanged (%t) - no restart needed", r.index, oldLatch)
+	}
+
+	// Reset recovery counter on seatbox change (if not latched in ready-to-drive)
+	if r.vehicleState != VehicleStateReadyToDrive || !r.latchedSeatboxLockClosed {
+		r.data.EmptyOr0Data = 0
 	}
 
 	r.checkInitComplete()
