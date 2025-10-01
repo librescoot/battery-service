@@ -51,6 +51,9 @@ func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel i
 		return nil, fmt.Errorf("failed to create NFC HAL for reader %d: %v", index, err)
 	}
 
+	reader.tagEventChan = reader.hal.GetTagEventChannel()
+	reader.hal.SetTagEventReaderEnabled(true)
+
 	reader.initializeFaultManagement()
 
 	return reader, nil
@@ -137,6 +140,9 @@ func (r *BatteryReader) run() {
 		case enabled := <-r.enabledChan:
 			r.handleEnabledChange(enabled)
 
+		case event := <-r.tagEventChan:
+			r.handleTagEvent(event)
+
 		}
 	}
 }
@@ -155,6 +161,35 @@ func (r *BatteryReader) handleRestart() {
 	}
 }
 
+func (r *BatteryReader) handleTagEvent(event hal.TagEvent) {
+	switch event.Type {
+	case hal.TagArrival:
+		if event.Tag != nil {
+			r.service.logger.Infof("Battery %d: Tag arrived: %X", r.index, event.Tag.ID)
+		} else {
+			r.service.logger.Infof("Battery %d: Tag arrived", r.index)
+		}
+		r.service.logger.Debugf("Battery %d: Processing tag arrival", r.index)
+		if r.isIn(StateDiscoverTag) {
+			r.justInserted = true
+			r.previousTagPresent = true
+			r.transitionTo(StateTagPresent)
+		}
+
+	case hal.TagDeparture:
+		if event.Tag != nil {
+			r.service.logger.Infof("Battery %d: Tag departed: %X", r.index, event.Tag.ID)
+		} else {
+			r.service.logger.Infof("Battery %d: Tag departed", r.index)
+		}
+		if r.isIn(StateTagPresent) {
+			r.handleDeparture()
+			r.transitionTo(StateDiscoverTag)
+		}
+		r.previousTagPresent = false
+	}
+}
+
 func (r *BatteryReader) handleTimeout() {
 	switch r.state {
 	case StateNFCReaderOff:
@@ -164,14 +199,7 @@ func (r *BatteryReader) handleTimeout() {
 		r.transitionTo(StateTagAbsent)
 
 	case StateTagAbsent:
-		r.checkForTags() // Discovery was started on state entry
-		if r.state == StateTagAbsent {
-			checkInterval := BMSTimeCheckReader // 10s default
-			if !r.seatboxLockClosed {
-				checkInterval = 1 * time.Second
-			}
-			r.setStateTimer(checkInterval)
-		}
+		r.setStateTimer(BMSTimeCheckReader)
 
 	case StateCheckPresence:
 		r.transitionTo(StateCondCheckPresence)
@@ -190,10 +218,8 @@ func (r *BatteryReader) handleTimeout() {
 	case StateSendInsertedOpen:
 		r.justInserted = false
 		if r.readStatus() {
-			r.checkForTags() // Check for tag departure during LED cycle
 			r.transitionTo(StateSendOpened)
 		} else {
-			// On failure, return to check presence to retry
 			r.transitionTo(StateCheckPresence)
 		}
 
@@ -202,10 +228,8 @@ func (r *BatteryReader) handleTimeout() {
 
 	case StateSendOnOff:
 		if r.readStatus() {
-			r.checkForTags() // Check for tag departure during heartbeat
 			r.transitionTo(StateCondStateOK)
 		} else {
-			// On failure, return to check presence to retry
 			r.transitionTo(StateCheckPresence)
 		}
 

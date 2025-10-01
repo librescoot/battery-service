@@ -259,6 +259,7 @@ type BatteryReader struct {
 	vehicleStateChan chan VehicleState
 	seatboxLockChan  chan bool
 	enabledChan      chan bool
+	tagEventChan     <-chan hal.TagEvent
 
 	// State tracking
 	enabled                  bool

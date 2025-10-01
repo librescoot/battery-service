@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"battery-service/nfc/hal"
+
 	"github.com/redis/go-redis/v9"
 )
 
@@ -43,43 +44,6 @@ func (r *BatteryReader) stopDiscovery() {
 		r.service.logger.Warnf("Battery %d: Failed to stop discovery: %v", r.index, err)
 	}
 	r.tagsDiscovered = false
-}
-
-func (r *BatteryReader) checkForTags() {
-	tags, err := r.hal.DetectTags()
-
-	if err != nil {
-		if r.previousTagPresent {
-			r.service.logger.Infof("Battery %d: Tag departed (detect failed: %v)", r.index, err)
-			if r.isIn(StateTagPresent) {
-				r.handleDeparture()
-				r.transitionTo(StateDiscoverTag)
-			}
-			r.previousTagPresent = false
-		}
-		return
-	}
-
-	tagPresent := len(tags) > 0
-
-	if tagPresent && !r.previousTagPresent {
-		r.service.logger.Infof("Battery %d: Tag arrived: %x", r.index, tags[0].ID)
-		r.service.logger.Debugf("Battery %d: Processing tag arrival", r.index)
-		if r.isIn(StateDiscoverTag) {
-			r.justInserted = true
-			r.transitionTo(StateTagPresent)
-		}
-	}
-
-	if !tagPresent && r.previousTagPresent {
-		r.service.logger.Infof("Battery %d: Tag departed", r.index)
-		if r.isIn(StateTagPresent) {
-			r.handleDeparture()
-			r.transitionTo(StateDiscoverTag)
-		}
-	}
-
-	r.previousTagPresent = tagPresent
 }
 
 func (r *BatteryReader) discoverBatteryTag() bool {
@@ -733,7 +697,9 @@ func (r *BatteryReader) heartbeatMonitor() {
 				stateCorrect := r.checkStateCorrect(false)
 				r.service.logger.Debugf("Battery %d: State correct check: %t (current=%s, expected=%s)",
 					r.index, stateCorrect, r.data.State, func() string {
-						if r.enabled && !r.batteryEmpty() { return "active" }
+						if r.enabled && !r.batteryEmpty() {
+							return "active"
+						}
 						return "asleep/idle"
 					}())
 				if !stateCorrect {
