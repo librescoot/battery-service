@@ -788,16 +788,60 @@ func (r *BatteryReader) isInHeartbeatTree() bool {
 	}
 }
 
-// Placeholder implementations for suspend inhibitor.
-// Original service holds a suspend inhibitor for 4s around NFC operations.
-// In theory, the MDB could enter suspend just when we start NFC operations, causing battery heartbeat to fail.
-// In practice, we don't really do suspend states anyway and the risk seems low.
+// takeInhibitor acquires a systemd suspend inhibitor lock to prevent system suspend
+// during critical NFC operations.
+//
+// The function retries up to BMSMaxRetryTakeInhibitor times with a 1ms delay between
+// attempts. If acquisition fails, the error is logged but the system continues to
+// operate (degraded mode).
 func (r *BatteryReader) takeInhibitor() {
-	// TODO: acquire suspend inhibitor for 4s
+	// If we already have an inhibitor, don't acquire another one
+	if r.suspendInhibitor != nil && r.suspendInhibitor.IsActive() {
+		r.service.logger.Debugf("Battery %d: Inhibitor already acquired", r.index)
+		return
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < BMSMaxRetryTakeInhibitor; attempt++ {
+		inhibitor, err := NewSuspendInhibitor(
+			"BATTERY_NFC_TRANSACTION_INHIBITOR",
+			"NFC_TRANSACTION",
+			"block",
+		)
+		if err == nil {
+			r.suspendInhibitor = inhibitor
+			r.service.logger.Debugf("Battery %d: Inhibitor acquired", r.index)
+			return
+		}
+
+		lastErr = err
+		r.service.logger.Errorf("Battery %d: Failed to acquire suspend inhibitor (attempt %d/%d): %v",
+			r.index, attempt+1, BMSMaxRetryTakeInhibitor, err)
+
+		if attempt < BMSMaxRetryTakeInhibitor-1 {
+			time.Sleep(1 * time.Millisecond)
+		}
+	}
+
+	// If we exhausted all retries, log the final error
+	r.service.logger.Errorf("Battery %d: Failed to acquire suspend inhibitor after %d attempts: %v",
+		r.index, BMSMaxRetryTakeInhibitor, lastErr)
 }
 
+// releaseInhibitor releases the systemd suspend inhibitor lock, allowing the system
+// to suspend again. This should be called after critical NFC operations complete.
 func (r *BatteryReader) releaseInhibitor() {
-	// TODO: release suspend inhibitor
+	if r.suspendInhibitor == nil {
+		return
+	}
+
+	r.service.logger.Debugf("Battery %d: Releasing inhibitor", r.index)
+
+	if err := r.suspendInhibitor.Release(); err != nil {
+		r.service.logger.Warnf("Battery %d: Failed to release inhibitor: %v", r.index, err)
+	}
+
+	r.suspendInhibitor = nil
 }
 
 func (r *BatteryReader) setNFCFault(fault BMSFault, present bool) {

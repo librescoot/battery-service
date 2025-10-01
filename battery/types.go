@@ -287,7 +287,7 @@ type BatteryReader struct {
 	redis *redis.Client
 
 	// Power management
-	suspendInhibitor interface{}
+	suspendInhibitor *SuspendInhibitor
 }
 
 type FaultState struct {
