@@ -815,8 +815,13 @@ func (r *BatteryReader) takeInhibitor() {
 		}
 
 		lastErr = err
-		r.service.logger.Errorf("Battery %d: Failed to acquire suspend inhibitor (attempt %d/%d): %v",
-			r.index, attempt+1, BMSMaxRetryTakeInhibitor, err)
+		if attempt == 0 {
+			r.service.logger.Debugf("Battery %d: Failed to acquire suspend inhibitor (attempt %d/%d): %v",
+				r.index, attempt+1, BMSMaxRetryTakeInhibitor, err)
+		} else {
+			r.service.logger.Warnf("Battery %d: Failed to acquire suspend inhibitor (attempt %d/%d): %v",
+				r.index, attempt+1, BMSMaxRetryTakeInhibitor, err)
+		}
 
 		if attempt < BMSMaxRetryTakeInhibitor-1 {
 			time.Sleep(1 * time.Millisecond)
