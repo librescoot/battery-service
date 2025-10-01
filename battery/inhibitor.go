@@ -12,6 +12,7 @@ import (
 // descriptor is closed.
 type SuspendInhibitor struct {
 	fd   int
+	conn *dbus.Conn
 	name string
 }
 
@@ -30,7 +31,6 @@ func NewSuspendInhibitor(name, why, mode string) (*SuspendInhibitor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to system bus: %w", err)
 	}
-	defer conn.Close()
 
 	// Call the Inhibit method on systemd's login manager
 	obj := conn.Object("org.freedesktop.login1", "/org/freedesktop/login1")
@@ -41,30 +41,41 @@ func NewSuspendInhibitor(name, why, mode string) (*SuspendInhibitor, error) {
 		mode)             // mode
 
 	if call.Err != nil {
+		conn.Close()
 		return nil, fmt.Errorf("failed to acquire inhibitor lock: %w", call.Err)
 	}
 
 	// Extract the file descriptor from the response
 	var fd dbus.UnixFD
 	if err := call.Store(&fd); err != nil {
+		conn.Close()
 		return nil, fmt.Errorf("failed to extract file descriptor: %w", err)
 	}
 
 	return &SuspendInhibitor{
 		fd:   int(fd),
+		conn: conn,
 		name: name,
 	}, nil
 }
 
-// Release closes the inhibitor file descriptor, releasing the lock
-// and allowing the system to suspend again.
+// Release closes the inhibitor file descriptor and DBus connection,
+// releasing the lock and allowing the system to suspend again.
 func (si *SuspendInhibitor) Release() error {
 	if si.fd < 0 {
 		return nil // already released
 	}
 
 	if err := syscall.Close(si.fd); err != nil {
+		if si.conn != nil {
+			si.conn.Close()
+		}
 		return fmt.Errorf("failed to close inhibitor fd: %w", err)
+	}
+
+	if si.conn != nil {
+		si.conn.Close()
+		si.conn = nil
 	}
 
 	si.fd = -1
