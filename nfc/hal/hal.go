@@ -35,6 +35,9 @@ type HAL interface {
 
 	// GetTagEventChannel returns a channel that receives tag events
 	GetTagEventChannel() <-chan TagEvent
+
+	// GetFd returns the file descriptor for the NFC device
+	GetFd() int
 }
 
 // State represents the state of the NFC controller

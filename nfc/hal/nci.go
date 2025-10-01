@@ -237,13 +237,25 @@ func parseRFIntfActivatedNtf(data []byte) (*Tag, error) {
 	}
 
 	if rfTechnology == nciRFTechNFCAPassivePoll {
-		uidLen := data[9]
-		if len(data) < int(10+uidLen) {
-			return nil, fmt.Errorf("invalid UID length")
+		techParamsLen := data[9]
+		if len(data) < int(10+techParamsLen) {
+			return nil, fmt.Errorf("invalid tech params length")
 		}
+		// NFC-A tech params structure: SENS_RES (2 bytes) + NFCID1 Len (1 byte) + NFCID1 + SEL_RES Len + SEL_RES
+		if techParamsLen < 3 {
+			return nil, fmt.Errorf("tech params too short for NFC-A")
+		}
+		// Skip SENS_RES (2 bytes at offset 10-11)
+		nfcid1Len := data[12]
+		if len(data) < int(13+nfcid1Len) {
+			return nil, fmt.Errorf("invalid NFCID1 length")
+		}
+		// Make a copy of the UID data to avoid referencing the reusable buffer
+		uid := make([]byte, nfcid1Len)
+		copy(uid, data[13:13+nfcid1Len])
 		return &Tag{
 			RFProtocol: rfProtocol,
-			ID:         data[10 : 10+uidLen],
+			ID:         uid,
 		}, nil
 	}
 

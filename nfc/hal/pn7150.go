@@ -1225,6 +1225,11 @@ func (p *PN7150) GetTagEventChannel() <-chan TagEvent {
 	return p.tagEventChan
 }
 
+// GetFd implements HAL.GetFd
+func (p *PN7150) GetFd() int {
+	return p.fd
+}
+
 // SetTagEventReaderEnabled enables or disables the tag event reader goroutine
 func (p *PN7150) SetTagEventReaderEnabled(enabled bool) {
 
@@ -1781,15 +1786,13 @@ func (p *PN7150) transfer(tx []byte) ([]byte, error) {
 	return p.transferWithTimeout(tx, readTimeout)
 }
 
-// tagEventReader is a goroutine that continuously monitors for tag arrival/departure events
+// tagEventReader is a goroutine that continuously monitors for tag arrival events
 func (p *PN7150) tagEventReader() {
-	// Recover from panics and restart the goroutine
 	defer func() {
 		if r := recover(); r != nil {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelError, fmt.Sprintf("Tag event reader panicked: %v, restarting...", r))
 			}
-			// Try to restart the goroutine if HAL is still running
 			if p.tagEventReaderRunning && p.state != stateUninitialized {
 				go p.tagEventReader()
 			}
@@ -1797,11 +1800,9 @@ func (p *PN7150) tagEventReader() {
 	}()
 
 	var previousTags []Tag
-	ticker := time.NewTicker(100 * time.Millisecond) // Poll every 100ms
-	defer ticker.Stop()
 
 	if p.logCallback != nil {
-		p.logCallback(LogLevelDebug, "Tag event reader started")
+		p.logCallback(LogLevelDebug, "Tag event reader started (fd-driven, arrival-only)")
 	}
 
 	for {
@@ -1811,69 +1812,36 @@ func (p *PN7150) tagEventReader() {
 				p.logCallback(LogLevelDebug, "Tag event reader stopped")
 			}
 			return
-		case <-ticker.C:
-			// Only process if we're in discovering or present state
-			state := p.GetState()
-			if state != StateDiscovering && state != StatePresent {
+		default:
+		}
+
+		pfd := unix.PollFd{
+			Fd:     int32(p.fd),
+			Events: unix.POLLIN,
+		}
+
+		n, err := unix.Poll([]unix.PollFd{pfd}, 1000)
+		if err != nil {
+			if err == unix.EINTR {
 				continue
 			}
-
-			// Get current tags
-			currentTags, err := p.DetectTags()
-			if err != nil {
-				// Check for serious errors that might indicate goroutine should exit
-				if strings.Contains(err.Error(), "invalid state") || strings.Contains(err.Error(), "unexpected reset") {
-					if p.logCallback != nil {
-						p.logCallback(LogLevelError, fmt.Sprintf("Tag event reader detected serious error: %v, exiting for reinit", err))
-					}
-					// Send a tag departed event to trigger recovery
-					select {
-					case p.tagEventChan <- TagEvent{Type: TagDeparture}:
-					default:
-					}
-					return
-				}
-
-				// Increment detection failures for robust departure detection
-				p.detectionFailures++
-				failures := p.detectionFailures
-
-				// If we have consecutive failures and previously had tags, treat as departure
-				if failures >= 3 && len(previousTags) > 0 {
-					if p.logCallback != nil {
-						p.logCallback(LogLevelWarning, fmt.Sprintf("Tag detection failed %d times, treating as departure", failures))
-					}
-
-					// Generate departure event for each previously detected tag
-					for _, prevTag := range previousTags {
-						tagCopy := prevTag
-						event := TagEvent{
-							Type: TagDeparture,
-							Tag:  &tagCopy,
-						}
-						select {
-						case p.tagEventChan <- event:
-							if p.logCallback != nil {
-								p.logCallback(LogLevelInfo, fmt.Sprintf("Tag departed (detection failure): %X", prevTag.ID))
-							}
-						default:
-							if p.logCallback != nil {
-								p.logCallback(LogLevelWarning, "Tag event channel full, dropping departure event")
-							}
-						}
-					}
-
-					// Clear previous tags and reset failure counter
-					previousTags = nil
-					p.detectionFailures = 0
-				}
-				continue
+			if p.logCallback != nil {
+				p.logCallback(LogLevelError, fmt.Sprintf("Poll error: %v", err))
 			}
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 
-			// Reset detection failures on successful detection
-			p.detectionFailures = 0
+		if n == 0 {
+			continue
+		}
 
-			// Check for tag arrivals
+		currentTags, err := p.DetectTags()
+		if err != nil {
+			continue
+		}
+
+		if len(currentTags) > 0 {
 			for _, currentTag := range currentTags {
 				found := false
 				for _, prevTag := range previousTags {
@@ -1883,7 +1851,6 @@ func (p *PN7150) tagEventReader() {
 					}
 				}
 				if !found {
-					// New tag arrived
 					tagCopy := currentTag
 					event := TagEvent{
 						Type: TagArrival,
@@ -1895,7 +1862,6 @@ func (p *PN7150) tagEventReader() {
 							p.logCallback(LogLevelInfo, fmt.Sprintf("Tag arrived: %X", currentTag.ID))
 						}
 					default:
-						// Channel full, drop event
 						if p.logCallback != nil {
 							p.logCallback(LogLevelWarning, "Tag event channel full, dropping arrival event")
 						}
@@ -1903,37 +1869,6 @@ func (p *PN7150) tagEventReader() {
 				}
 			}
 
-			// Check for tag departures
-			for _, prevTag := range previousTags {
-				found := false
-				for _, currentTag := range currentTags {
-					if tagsEqual(&prevTag, &currentTag) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					// Tag departed
-					tagCopy := prevTag
-					event := TagEvent{
-						Type: TagDeparture,
-						Tag:  &tagCopy,
-					}
-					select {
-					case p.tagEventChan <- event:
-						if p.logCallback != nil {
-							p.logCallback(LogLevelInfo, fmt.Sprintf("Tag departed: %X", prevTag.ID))
-						}
-					default:
-						// Channel full, drop event
-						if p.logCallback != nil {
-							p.logCallback(LogLevelWarning, "Tag event channel full, dropping departure event")
-						}
-					}
-				}
-			}
-
-			// Update previous tags
 			previousTags = make([]Tag, len(currentTags))
 			copy(previousTags, currentTags)
 		}
