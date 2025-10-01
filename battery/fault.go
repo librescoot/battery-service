@@ -143,7 +143,7 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 	ctx := context.TODO()
 
 	if present {
-		if err := r.redis.SAdd(ctx, faultSetKey, fault).Err(); err != nil {
+		if err := r.redis.SAdd(ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to add fault to set: %v", r.index, err)
 		}
 
@@ -163,7 +163,7 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 			r.service.logger.Warnf("Battery %d: Failed to publish fault notification: %v", r.index, err)
 		}
 	} else {
-		if err := r.redis.SRem(ctx, faultSetKey, fault).Err(); err != nil {
+		if err := r.redis.SRem(ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to remove fault from set: %v", r.index, err)
 		}
 
