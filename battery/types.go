@@ -296,9 +296,6 @@ type BatteryReader struct {
 	commFailureCount   int
 	lastSuccessfulComm time.Time
 
-	// Redis
-	redis *redis.Client
-
 	// Power management
 	suspendInhibitor *SuspendInhibitor
 }

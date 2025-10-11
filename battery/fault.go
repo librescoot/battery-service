@@ -141,11 +141,11 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 	faultSetKey := fmt.Sprintf("battery:%d:fault", r.index)
 
 	if present {
-		if err := r.redis.SAdd(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
+		if err := r.service.redis.SAdd(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to add fault to set: %v", r.index, err)
 		}
 
-		if err := r.redis.XAdd(r.ctx, &redis.XAddArgs{
+		if err := r.service.redis.XAdd(r.ctx, &redis.XAddArgs{
 			Stream: "events:faults",
 			MaxLen: 1000,
 			Values: map[string]interface{}{
@@ -157,15 +157,15 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 			r.service.logger.Warnf("Battery %d: Failed to add fault event to stream: %v", r.index, err)
 		}
 
-		if err := r.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
+		if err := r.service.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to publish fault notification: %v", r.index, err)
 		}
 	} else {
-		if err := r.redis.SRem(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
+		if err := r.service.redis.SRem(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to remove fault from set: %v", r.index, err)
 		}
 
-		if err := r.redis.XAdd(r.ctx, &redis.XAddArgs{
+		if err := r.service.redis.XAdd(r.ctx, &redis.XAddArgs{
 			Stream: "events:faults",
 			MaxLen: 1000,
 			Values: map[string]interface{}{
@@ -176,7 +176,7 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 			r.service.logger.Warnf("Battery %d: Failed to add fault clear event to stream: %v", r.index, err)
 		}
 
-		if err := r.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
+		if err := r.service.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to publish fault clear notification: %v", r.index, err)
 		}
 	}

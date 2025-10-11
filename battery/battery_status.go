@@ -157,7 +157,7 @@ func (r *BatteryReader) sendStatusUpdate() {
 	}
 
 	// Use Redis transaction for atomic updates
-	pipe := r.redis.TxPipeline()
+	pipe := r.service.redis.TxPipeline()
 
 	// Update all fields in Redis hash
 	pipe.HMSet(r.ctx, hashKey, fields)

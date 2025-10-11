@@ -5,8 +5,6 @@ import (
 	"time"
 
 	"battery-service/nfc/hal"
-
-	"github.com/redis/go-redis/v9"
 )
 
 func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel int, service *Service) (*BatteryReader, error) {
@@ -35,14 +33,6 @@ func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel i
 		lastCmdTime: time.Now(),
 
 		enabled: (role == BatteryRoleActive),
-	}
-
-	reader.redis = redis.NewClient(&redis.Options{
-		Addr: fmt.Sprintf("%s:%d", service.config.RedisServerAddress, service.config.RedisServerPort),
-	})
-
-	if err := reader.redis.Ping(reader.ctx).Err(); err != nil {
-		return nil, fmt.Errorf("failed to connect to Redis for reader %d: %v", index, err)
 	}
 
 	var err error
@@ -86,10 +76,6 @@ func (r *BatteryReader) Stop() {
 	r.clearHeartbeatTimer()
 
 	r.cleanupFaultManagement()
-
-	if r.redis != nil {
-		r.redis.Close()
-	}
 
 	if r.hal != nil {
 		r.service.logger.Infof("Battery %d: Deinitializing NFC reader", r.index)
@@ -370,7 +356,7 @@ func (r *BatteryReader) SendSeatboxLockChange(closed bool) {
 func (r *BatteryReader) fetchInitialRedisState() {
 	r.service.logger.Debugf("Battery %d: Fetching initial Redis state from hashes", r.index)
 
-	vehicleState, err := r.redis.HGet(r.ctx, "vehicle", "state").Result()
+	vehicleState, err := r.service.redis.HGet(r.ctx, "vehicle", "state").Result()
 	if err == nil {
 		r.service.logger.Debugf("Battery %d: Found vehicle state: %s", r.index, vehicleState)
 		r.handleVehicleStateChange(VehicleState(vehicleState))
@@ -378,7 +364,7 @@ func (r *BatteryReader) fetchInitialRedisState() {
 		r.service.logger.Warnf("Battery %d: No vehicle state in Redis hash: %v", r.index, err)
 	}
 
-	seatboxLock, err := r.redis.HGet(r.ctx, "vehicle", "seatbox:lock").Result()
+	seatboxLock, err := r.service.redis.HGet(r.ctx, "vehicle", "seatbox:lock").Result()
 	if err == nil {
 		closed := (seatboxLock == "closed" || seatboxLock == "true" || seatboxLock == "1")
 		r.service.logger.Debugf("Battery %d: Found seatbox lock state: %s (closed=%t)", r.index, seatboxLock, closed)
