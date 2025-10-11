@@ -97,18 +97,18 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 		lastErr = err
 
 		// Tag departed - don't retry
-		if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
+		if isTagDepartedError(err) {
 			return nil, err
 		}
 
 		// Arbiter busy - retry with SelectTag(0)
-		if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrArbiterBusy {
+		if isArbiterBusyError(err) {
 			if r.service.debug {
 				r.service.logger.Debugf("Battery %d: Arbiter busy at 0x%04X, calling SelectTag(0) (retry %d)", r.index, address, retry)
 			}
 			if err := r.hal.SelectTag(0); err != nil {
 				// Only treat as tag departed if SelectTag explicitly returns ErrTagDeparted
-				if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
+				if isTagDepartedError(err) {
 					return nil, err
 				}
 				// Other SelectTag errors (e.g., timeout) - log and continue retry
@@ -223,13 +223,13 @@ func (r *BatteryReader) writeCommand(cmd BMSCommand) {
 		lastErr = err
 
 		// Arbiter busy - retry with SelectTag(0)
-		if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrArbiterBusy {
+		if isArbiterBusyError(err) {
 			if r.service.debug {
 				r.service.logger.Debugf("Battery %d: Arbiter busy writing command %s, calling SelectTag(0) (retry %d)", r.index, cmd, retry)
 			}
 			if err := r.hal.SelectTag(0); err != nil {
 				// Only treat as tag departed if SelectTag explicitly returns ErrTagDeparted
-				if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
+				if isTagDepartedError(err) {
 					lastErr = err
 					break
 				}
@@ -256,18 +256,8 @@ func (r *BatteryReader) handleNFCError(err error) {
 	r.service.logger.Errorf("Battery %d: NFC communication error: %v", r.index, err)
 
 	// Handle tag departure - no fault, clean transition
-	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
-		r.service.logger.Infof("Battery %d: Tag departure detected (HAL error code %d)", r.index, nfcErr.Code)
-		if r.isIn(StateTagPresent) {
-			r.handleDeparture()
-			r.transitionTo(StateDiscoverTag)
-		}
-		r.previousTagPresent = false
-		return
-	}
-
-	if err != nil && strings.Contains(err.Error(), "tag departed") {
-		r.service.logger.Infof("Battery %d: Tag departure detected from error message", r.index)
+	if isTagDepartedError(err) {
+		r.service.logger.Infof("Battery %d: Tag departure detected", r.index)
 		if r.isIn(StateTagPresent) {
 			r.handleDeparture()
 			r.transitionTo(StateDiscoverTag)
@@ -277,7 +267,7 @@ func (r *BatteryReader) handleNFCError(err error) {
 	}
 
 	// Handle multiple tags detected
-	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrMultipleTags {
+	if isMultipleTagsError(err) {
 		r.service.logger.Warnf("Battery %d: Multiple tags detected - retrying", r.index)
 		// Treat as transient - will retry on next discovery
 		return
@@ -294,21 +284,50 @@ func (r *BatteryReader) handleNFCError(err error) {
 	}
 }
 
+// Error helper functions for cleaner error handling
+
+func isTagDepartedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
+		return true
+	}
+	return strings.Contains(err.Error(), "tag departed")
+}
+
+func isMultipleTagsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	nfcErr, ok := err.(*hal.Error)
+	return ok && nfcErr.Code == hal.ErrMultipleTags
+}
+
+func isArbiterBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	nfcErr, ok := err.(*hal.Error)
+	return ok && nfcErr.Code == hal.ErrArbiterBusy
+}
+
+func isTransientError(err error) bool {
+	return isArbiterBusyError(err)
+}
+
 func isHALError(err error) bool {
 	if err == nil {
 		return false
 	}
 
 	// Tag departure is not a HAL error
-	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
-		return false
-	}
-	if strings.Contains(err.Error(), "tag departed") {
+	if isTagDepartedError(err) {
 		return false
 	}
 
 	// Multiple tags is not a HAL error
-	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrMultipleTags {
+	if isMultipleTagsError(err) {
 		return false
 	}
 
@@ -319,14 +338,5 @@ func isHALError(err error) bool {
 
 	// Everything else is considered a HAL error
 	return true
-}
-
-func isTransientError(err error) bool {
-	// Check for arbiter busy error code
-	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrArbiterBusy {
-		return true
-	}
-
-	return false
 }
 
