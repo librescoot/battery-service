@@ -17,9 +17,9 @@ func (r *BatteryReader) deinitializeNFC() {
 }
 
 func (r *BatteryReader) startDiscovery() bool {
-	pollPeriod := uint(100)
+	pollPeriod := uint(DiscoveryPollFast)
 	if r.seatboxLockClosed {
-		pollPeriod = 2500
+		pollPeriod = DiscoveryPollSlow
 	}
 
 	r.service.logger.Debugf("Battery %d: Starting discovery with poll period %d ms", r.index, pollPeriod)

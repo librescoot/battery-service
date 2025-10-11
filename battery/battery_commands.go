@@ -110,15 +110,15 @@ func (r *BatteryReader) setupHeartbeatTimer() {
 
 	if r.vehicleState == VehicleStateStandby {
 		if r.enabled {
-			heartbeatInterval = 40 * time.Second
+			heartbeatInterval = HeartbeatIntervalActiveStandby
 		} else {
-			heartbeatInterval = 30 * time.Minute
+			heartbeatInterval = HeartbeatIntervalInactive
 		}
 	} else {
 		if r.enabled {
-			heartbeatInterval = BMSTimeUpdateOn // 10s active
+			heartbeatInterval = BMSTimeUpdateOn
 		} else {
-			heartbeatInterval = 30 * time.Minute
+			heartbeatInterval = HeartbeatIntervalInactive
 		}
 	}
 
