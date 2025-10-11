@@ -1,7 +1,6 @@
 package battery
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -140,14 +139,13 @@ func (r *BatteryReader) sendNotPresent() {
 func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present bool) {
 	batteryName := fmt.Sprintf("battery:%d", r.index)
 	faultSetKey := fmt.Sprintf("battery:%d:fault", r.index)
-	ctx := context.TODO()
 
 	if present {
-		if err := r.redis.SAdd(ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
+		if err := r.redis.SAdd(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to add fault to set: %v", r.index, err)
 		}
 
-		if err := r.redis.XAdd(ctx, &redis.XAddArgs{
+		if err := r.redis.XAdd(r.ctx, &redis.XAddArgs{
 			Stream: "events:faults",
 			MaxLen: 1000,
 			Values: map[string]interface{}{
@@ -159,15 +157,15 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 			r.service.logger.Warnf("Battery %d: Failed to add fault event to stream: %v", r.index, err)
 		}
 
-		if err := r.redis.Publish(ctx, batteryName, "fault").Err(); err != nil {
+		if err := r.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to publish fault notification: %v", r.index, err)
 		}
 	} else {
-		if err := r.redis.SRem(ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
+		if err := r.redis.SRem(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to remove fault from set: %v", r.index, err)
 		}
 
-		if err := r.redis.XAdd(ctx, &redis.XAddArgs{
+		if err := r.redis.XAdd(r.ctx, &redis.XAddArgs{
 			Stream: "events:faults",
 			MaxLen: 1000,
 			Values: map[string]interface{}{
@@ -178,7 +176,7 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 			r.service.logger.Warnf("Battery %d: Failed to add fault clear event to stream: %v", r.index, err)
 		}
 
-		if err := r.redis.Publish(ctx, batteryName, "fault").Err(); err != nil {
+		if err := r.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
 			r.service.logger.Warnf("Battery %d: Failed to publish fault clear notification: %v", r.index, err)
 		}
 	}

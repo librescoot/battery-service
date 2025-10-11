@@ -251,6 +251,7 @@ type BatteryReader struct {
 	deviceName string
 	logLevel   int
 	service    *Service
+	ctx        context.Context
 
 	// NFC HAL - owned exclusively by this reader's goroutine
 	hal *hal.PN7150

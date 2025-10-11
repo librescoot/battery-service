@@ -1,7 +1,6 @@
 package battery
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/redis/go-redis/v9"
@@ -161,27 +160,27 @@ func (r *BatteryReader) sendStatusUpdate() {
 	pipe := r.redis.TxPipeline()
 
 	// Update all fields in Redis hash
-	pipe.HMSet(context.TODO(), hashKey, fields)
+	pipe.HMSet(r.ctx, hashKey, fields)
 
 	// Update fault set within transaction
 	changedFaults, faultChanges := r.updateFaultSetInTransaction(pipe)
 
 	// Publish notifications only for changed fields
 	if effectivePresent != previousEffectivePresent {
-		pipe.Publish(context.TODO(), channel, "present")
+		pipe.Publish(r.ctx, channel, "present")
 	}
 	if r.data.State != r.previousData.State {
-		pipe.Publish(context.TODO(), channel, "state")
+		pipe.Publish(r.ctx, channel, "state")
 	}
 	if r.data.Charge != r.previousData.Charge {
-		pipe.Publish(context.TODO(), channel, "charge")
+		pipe.Publish(r.ctx, channel, "charge")
 	}
 	if r.data.TemperatureState != r.previousData.TemperatureState {
-		pipe.Publish(context.TODO(), channel, "temperature-state")
+		pipe.Publish(r.ctx, channel, "temperature-state")
 	}
 
 	// Execute the transaction
-	if _, err := pipe.Exec(context.TODO()); err != nil {
+	if _, err := pipe.Exec(r.ctx); err != nil {
 		r.service.logger.Errorf("Battery %d: Failed to execute Redis transaction: %v", r.index, err)
 		return
 	}
@@ -222,10 +221,10 @@ func (r *BatteryReader) updateFaultSetInTransaction(pipe redis.Pipeliner) ([]BMS
 		if state.Present != state.PublishedToRedis {
 			if state.Present {
 				// Add fault to set
-				pipe.SAdd(context.TODO(), faultKey, fmt.Sprintf("%d", fault))
+				pipe.SAdd(r.ctx, faultKey, fmt.Sprintf("%d", fault))
 			} else {
 				// Remove fault from set
-				pipe.SRem(context.TODO(), faultKey, fmt.Sprintf("%d", fault))
+				pipe.SRem(r.ctx, faultKey, fmt.Sprintf("%d", fault))
 			}
 			changedFaults = append(changedFaults, fault)
 			anyChanges = true
@@ -235,7 +234,7 @@ func (r *BatteryReader) updateFaultSetInTransaction(pipe redis.Pipeliner) ([]BMS
 	// Only publish fault notification if there were changes
 	if anyChanges {
 		faultChannel := fmt.Sprintf("battery:%d", r.index)
-		pipe.Publish(context.TODO(), faultChannel, "fault")
+		pipe.Publish(r.ctx, faultChannel, "fault")
 	}
 
 	return changedFaults, anyChanges

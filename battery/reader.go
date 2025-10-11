@@ -1,7 +1,6 @@
 package battery
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -17,6 +16,7 @@ func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel i
 		deviceName: deviceName,
 		logLevel:   logLevel,
 		service:    service,
+		ctx:        service.ctx,
 
 		stopChan:         make(chan struct{}),
 		restartChan:      make(chan struct{}, 1),
@@ -41,7 +41,7 @@ func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel i
 		Addr: fmt.Sprintf("%s:%d", service.config.RedisServerAddress, service.config.RedisServerPort),
 	})
 
-	if err := reader.redis.Ping(context.TODO()).Err(); err != nil {
+	if err := reader.redis.Ping(reader.ctx).Err(); err != nil {
 		return nil, fmt.Errorf("failed to connect to Redis for reader %d: %v", index, err)
 	}
 
@@ -370,7 +370,7 @@ func (r *BatteryReader) SendSeatboxLockChange(closed bool) {
 func (r *BatteryReader) fetchInitialRedisState() {
 	r.service.logger.Debugf("Battery %d: Fetching initial Redis state from hashes", r.index)
 
-	vehicleState, err := r.redis.HGet(context.TODO(), "vehicle", "state").Result()
+	vehicleState, err := r.redis.HGet(r.ctx, "vehicle", "state").Result()
 	if err == nil {
 		r.service.logger.Debugf("Battery %d: Found vehicle state: %s", r.index, vehicleState)
 		r.handleVehicleStateChange(VehicleState(vehicleState))
@@ -378,7 +378,7 @@ func (r *BatteryReader) fetchInitialRedisState() {
 		r.service.logger.Warnf("Battery %d: No vehicle state in Redis hash: %v", r.index, err)
 	}
 
-	seatboxLock, err := r.redis.HGet(context.TODO(), "vehicle", "seatbox:lock").Result()
+	seatboxLock, err := r.redis.HGet(r.ctx, "vehicle", "seatbox:lock").Result()
 	if err == nil {
 		closed := (seatboxLock == "closed" || seatboxLock == "true" || seatboxLock == "1")
 		r.service.logger.Debugf("Battery %d: Found seatbox lock state: %s (closed=%t)", r.index, seatboxLock, closed)
