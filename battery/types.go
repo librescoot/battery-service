@@ -183,6 +183,18 @@ const (
 	BMSMinSOC                = 0
 )
 
+// Heartbeat intervals
+const (
+	HeartbeatIntervalActiveStandby   = 40 * time.Second
+	HeartbeatIntervalInactive        = 30 * time.Minute
+)
+
+// Discovery polling intervals (milliseconds)
+const (
+	DiscoveryPollFast = 100  // seatbox open
+	DiscoveryPollSlow = 2500 // seatbox closed
+)
+
 type BatteryRole string
 
 const (
