@@ -171,9 +171,10 @@ func (r *BatteryReader) readStatus() bool {
 
 	r.parseStatusData(status0, status1, status2)
 
-	r.service.logger.Infof("Battery %d: state=%s, voltage=%dmV, current=%dmA, charge=%d%%, temp=[%d,%d,%d,%d]°C",
+	r.service.logger.Infof("Battery %d: state=%s, voltage=%dmV, current=%dmA, charge=%d%%, temp=[%d,%d,%d,%d]°C (%s), soh=%d%%, cycles=%d, sn=%s, fw=%s",
 		r.index, r.data.State.String(), r.data.Voltage, r.data.Current, r.data.Charge,
-		r.data.Temperature[0], r.data.Temperature[1], r.data.Temperature[2], r.data.Temperature[3])
+		r.data.Temperature[0], r.data.Temperature[1], r.data.Temperature[2], r.data.Temperature[3],
+		r.temperatureStateString(), r.data.StateOfHealth, r.data.CycleCount, r.data.SerialNumber, r.data.FwVersion)
 
 	r.setFault(BMSFaultBMSCommsError, false)
 	r.setFault(BMSFaultBMSZeroData, false)
