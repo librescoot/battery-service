@@ -144,8 +144,6 @@ func (s *Service) runRedisSubscriber() {
 					s.handleVehicleStateMessage()
 				case "seatbox:lock":
 					s.handleSeatboxUpdate()
-				default:
-					// s.logger.Debugf("Unknown vehicle payload: %s", msg.Payload)
 				}
 			default:
 				s.logger.Warnf("Unknown Redis channel: %s", msg.Channel)
