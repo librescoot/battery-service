@@ -120,7 +120,9 @@ func (p *PN7150) Initialize() error {
 		return fmt.Errorf("failed to power on device: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	// Extended delay after power-on for cold boot scenarios
+	// The PN7150 needs more time to stabilize after a system reboot
+	time.Sleep(500 * time.Millisecond)
 
 	const maxInitRetries = 3
 	var lastErr error
@@ -477,32 +479,57 @@ func (p *PN7150) StartDiscovery(pollPeriod uint) error {
 		byte((pollPeriod >> 8) & 0xFF), // MSB
 	}
 	p.logCallback(LogLevelDebug, fmt.Sprintf("Setting TOTAL_DURATION (0x0000) to %X (%d ms)", totalDurationPayload, pollPeriod))
-	totalDurationConfigCmd := []byte{
-		(nciMsgTypeCommand << nciMsgTypeBit) | nciGroupCore, // 20
-		nciCoreSetConfig,              // 02
-		0x05,                          // Payload length: 1 (NumItems) + 1 (ID) + 1 (Len) + 2 (Value) = 5
-		0x01,                          // Number of Parameter TLVs = 1
-		byte(nciParamIDTotalDuration), // Parameter ID (0x00 for TOTAL_DURATION)
-		0x02,                          // Parameter Length (2 bytes for uint16)
-		totalDurationPayload[0],       // Value LSB
-		totalDurationPayload[1],       // Value MSB
-	}
-	respTotalDuration, errTotalDuration := p.transfer(totalDurationConfigCmd)
-	if errTotalDuration != nil {
-		return fmt.Errorf("failed to set TOTAL_DURATION: %v", errTotalDuration)
-	}
-	nciRespTD, errParseTD := parseNCIResponse(respTotalDuration)
-	if errParseTD != nil || !isSuccessResponse(nciRespTD) {
-		errMsgTD := "set TOTAL_DURATION response error"
-		if errParseTD != nil {
-			errMsgTD += fmt.Sprintf(": %v", errParseTD)
+
+	// Retry logic for TOTAL_DURATION configuration
+	// The PN7150 may reject this on first attempt after cold boot
+	const maxTotalDurationRetries = 3
+	var tdErr error
+	for retry := 0; retry < maxTotalDurationRetries; retry++ {
+		if retry > 0 {
+			p.logCallback(LogLevelDebug, fmt.Sprintf("Retrying TOTAL_DURATION configuration (attempt %d/%d)", retry+1, maxTotalDurationRetries))
+			time.Sleep(100 * time.Millisecond)
 		}
-		if nciRespTD != nil {
-			errMsgTD += fmt.Sprintf(" (status: %02x)", nciRespTD.Status)
+
+		totalDurationConfigCmd := []byte{
+			(nciMsgTypeCommand << nciMsgTypeBit) | nciGroupCore, // 20
+			nciCoreSetConfig,              // 02
+			0x05,                          // Payload length: 1 (NumItems) + 1 (ID) + 1 (Len) + 2 (Value) = 5
+			0x01,                          // Number of Parameter TLVs = 1
+			byte(nciParamIDTotalDuration), // Parameter ID (0x00 for TOTAL_DURATION)
+			0x02,                          // Parameter Length (2 bytes for uint16)
+			totalDurationPayload[0],       // Value LSB
+			totalDurationPayload[1],       // Value MSB
 		}
-		return fmt.Errorf(errMsgTD)
+		respTotalDuration, errTotalDuration := p.transfer(totalDurationConfigCmd)
+		if errTotalDuration != nil {
+			tdErr = fmt.Errorf("failed to set TOTAL_DURATION: %v", errTotalDuration)
+			continue
+		}
+		nciRespTD, errParseTD := parseNCIResponse(respTotalDuration)
+		if errParseTD != nil || !isSuccessResponse(nciRespTD) {
+			errMsgTD := "set TOTAL_DURATION response error"
+			if errParseTD != nil {
+				errMsgTD += fmt.Sprintf(": %v", errParseTD)
+			}
+			if nciRespTD != nil {
+				errMsgTD += fmt.Sprintf(" (status: %02x)", nciRespTD.Status)
+				// If we get status 0x06 (semantic error) on cold boot, retry
+				if nciRespTD.Status == nciStatusSemanticError && retry < maxTotalDurationRetries-1 {
+					p.logCallback(LogLevelWarning, "TOTAL_DURATION rejected with semantic error, likely cold boot condition")
+				}
+			}
+			tdErr = fmt.Errorf(errMsgTD)
+			continue
+		}
+		// Success
+		p.logCallback(LogLevelDebug, "TOTAL_DURATION set successfully.")
+		tdErr = nil
+		break
 	}
-	p.logCallback(LogLevelDebug, "TOTAL_DURATION set successfully.")
+
+	if tdErr != nil {
+		return tdErr
+	}
 
 	// Start RF discovery
 	discoverCmd := buildRFDiscoverCmd()

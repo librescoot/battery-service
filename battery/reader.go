@@ -2,6 +2,7 @@ package battery
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"battery-service/nfc/hal"
@@ -54,9 +55,20 @@ func (r *BatteryReader) Start() error {
 
 	r.service.logger.Infof("Battery %d: Initializing NFC reader on %s", r.index, r.deviceName)
 	if err := r.hal.Initialize(); err != nil {
-		return fmt.Errorf("failed to initialize NFC HAL for reader %d: %v", r.index, err)
+		// Check if this is a cold boot semantic error
+		if strings.Contains(err.Error(), "status: 06") || strings.Contains(err.Error(), "TOTAL_DURATION") {
+			r.service.logger.Warnf("Battery %d: Initial initialization failed (likely cold boot), attempting reinitialization", r.index)
+			// Try a full reinitialization with power cycle
+			if reinitErr := r.hal.FullReinitialize(); reinitErr != nil {
+				return fmt.Errorf("failed to reinitialize NFC HAL for reader %d after cold boot: %v", r.index, reinitErr)
+			}
+			r.service.logger.Infof("Battery %d: NFC reader reinitialized successfully after cold boot", r.index)
+		} else {
+			return fmt.Errorf("failed to initialize NFC HAL for reader %d: %v", r.index, err)
+		}
+	} else {
+		r.service.logger.Infof("Battery %d: NFC reader initialized successfully", r.index)
 	}
-	r.service.logger.Infof("Battery %d: NFC reader initialized successfully", r.index)
 
 	// Clear NFC reader error fault on successful initialization
 	r.setFault(BMSFaultNFCReaderError, false)
