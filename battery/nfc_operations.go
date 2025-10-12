@@ -24,6 +24,24 @@ func (r *BatteryReader) startDiscovery() bool {
 
 	r.service.logger.Debugf("Battery %d: Starting discovery with poll period %d ms", r.index, pollPeriod)
 	if err := r.hal.StartDiscovery(pollPeriod); err != nil {
+		// Check for semantic error (status 0x06) which indicates cold boot condition
+		if strings.Contains(err.Error(), "status: 06") {
+			r.service.logger.Warnf("Battery %d: Discovery failed with semantic error (cold boot condition), attempting reinitialization", r.index)
+			// Attempt full reinitialization once
+			if reinitErr := r.hal.FullReinitialize(); reinitErr != nil {
+				r.service.logger.Errorf("Battery %d: Reinitialization failed: %v", r.index, reinitErr)
+				r.handleNFCError(reinitErr)
+				return false
+			}
+			// Try starting discovery again after reinitialization
+			if err := r.hal.StartDiscovery(pollPeriod); err != nil {
+				r.service.logger.Errorf("Battery %d: Failed to start discovery after reinitialization: %v", r.index, err)
+				r.handleNFCError(err)
+				return false
+			}
+			r.service.logger.Infof("Battery %d: Discovery started successfully after reinitialization", r.index)
+			return true
+		}
 		r.service.logger.Errorf("Battery %d: Failed to start discovery: %v", r.index, err)
 		r.handleNFCError(err)
 		return false
