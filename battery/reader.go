@@ -277,7 +277,16 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 		r.index, map[bool]string{true: "closed", false: "opened"}[closed], r.role, r.state, r.enabled, r.isIn(StateTagPresent))
 
 	if r.role == BatteryRoleActive {
-		newEnabled := closed
+		var newEnabled bool
+		if r.service.config.DangerouslyIgnoreSeatbox {
+			// When dangerously ignoring seatbox, keep battery enabled
+			newEnabled = true
+			if !closed {
+				r.service.logger.Warnf("Battery %d: Seatbox opened but battery staying active (--dangerously-ignore-seatbox)", r.index)
+			}
+		} else {
+			newEnabled = closed
+		}
 		if r.enabled != newEnabled {
 			r.service.logger.Debugf("Battery %d: Active battery enabled state changing from %t to %t", r.index, r.enabled, newEnabled)
 			r.enabled = newEnabled

@@ -40,6 +40,7 @@ func main() {
 	flag.UintVar(&offUpdateTime, "off-update-time", 1800, "Update time when disabled in seconds (30 minutes)")
 	var debugMode bool
 	flag.BoolVar(&debugMode, "debug", false, "Enable debug logging for detailed NCI/DATA messages")
+	flag.BoolVar(&config.DangerouslyIgnoreSeatbox, "dangerously-ignore-seatbox", false, "Keep active batteries active when seatbox opens (DANGEROUS)")
 
 	var device0, device1 string
 	var logLevel0, logLevel1 int

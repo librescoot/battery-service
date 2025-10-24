@@ -204,11 +204,12 @@ const (
 
 // Configuration types
 type ServiceConfig struct {
-	RedisServerAddress string
-	RedisServerPort    uint16
-	TestMainPower      bool
-	HeartbeatTimeout   time.Duration
-	OffUpdateTime      time.Duration
+	RedisServerAddress       string
+	RedisServerPort          uint16
+	TestMainPower            bool
+	HeartbeatTimeout         time.Duration
+	OffUpdateTime            time.Duration
+	DangerouslyIgnoreSeatbox bool
 }
 
 type BatteryReaderConfig struct {
