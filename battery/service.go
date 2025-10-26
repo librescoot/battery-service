@@ -121,7 +121,7 @@ func (s *Service) runRedisSubscriber() {
 	_, err := pubsub.Receive(s.ctx)
 	if err != nil {
 		s.logger.Errorf("Failed to establish Redis subscription: %v", err)
-		return
+		s.logger.Fatalf("Redis connection failed, exiting to allow systemd restart")
 	}
 	s.logger.Infof("Redis subscription established successfully")
 
@@ -132,8 +132,8 @@ func (s *Service) runRedisSubscriber() {
 		select {
 		case msg := <-ch:
 			if msg == nil {
-				s.logger.Warnf("Redis channel closed")
-				return
+				s.logger.Errorf("Redis channel closed unexpectedly")
+				s.logger.Fatalf("Redis connection lost, exiting to allow systemd restart")
 			}
 			s.logger.Debugf("Received Redis message: channel=%s, payload=%s", msg.Channel, msg.Payload)
 
