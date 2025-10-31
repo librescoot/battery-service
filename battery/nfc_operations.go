@@ -296,6 +296,23 @@ func (r *BatteryReader) handleNFCError(err error) {
 		r.commFailureCount++
 		r.service.logger.Warnf("Battery %d: Communication failure %d: %v", r.index, r.commFailureCount, err)
 		r.setFault(BMSFaultBMSCommsError, true)
+
+		// Trigger automatic HAL reinitialization on any HAL error
+		// This recovers from I2C errors, wedged states, and file descriptor issues
+		r.service.logger.Debugf("Battery %d: Triggering HAL reinitialization", r.index)
+
+		// Brief delay before reinitialization to allow hardware to stabilize
+		time.Sleep(2 * time.Second)
+
+		if reinitErr := r.hal.FullReinitialize(); reinitErr != nil {
+			r.service.logger.Errorf("Battery %d: HAL reinitialization failed: %v", r.index, reinitErr)
+			// Leave fault active, will retry on next error
+		} else {
+			r.service.logger.Infof("Battery %d: HAL reinitialized", r.index)
+			// Reset error state after successful recovery
+			r.commFailureCount = 0
+			r.setFault(BMSFaultBMSCommsError, false)
+		}
 	} else {
 		// Transient errors - no fault, will be retried by caller
 		r.service.logger.Debugf("Battery %d: Transient error, retrying: %v", r.index, err)

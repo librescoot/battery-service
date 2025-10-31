@@ -743,7 +743,7 @@ func (p *PN7150) FullReinitialize() error {
 	}
 
 	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "Performing full HAL reinitialization with power cycle")
+		p.logCallback(LogLevelDebug, "Performing full HAL reinitialization with power cycle")
 	}
 
 	if p.tagEventReaderRunning {
@@ -771,11 +771,11 @@ func (p *PN7150) FullReinitialize() error {
 	p.tagSelected = false
 
 	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "HAL FullReinitialize: sleeping before device reopen")
+		p.logCallback(LogLevelDebug, "Sleeping before device reopen")
 	}
 	time.Sleep(250 * time.Millisecond)
 	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "HAL FullReinitialize: sleep completed, reopening device")
+		p.logCallback(LogLevelDebug, "Reopening device")
 	}
 
 	// Re-open the device.
@@ -798,7 +798,7 @@ func (p *PN7150) FullReinitialize() error {
 	}
 
 	if p.logCallback != nil {
-		p.logCallback(LogLevelInfo, "HAL reinitialization completed successfully with power cycle")
+		p.logCallback(LogLevelInfo, "HAL reinitialized successfully")
 	}
 
 	return nil
@@ -1169,7 +1169,8 @@ func (p *PN7150) handleCreditNotification() ([]byte, error) {
 
 	for {
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timeout waiting for response after credit notification")
+			// Timeout waiting for data after credit notification likely means tag departed
+			return nil, NewError(ErrTagDeparted, "timeout waiting for response after credit notification")
 		}
 
 		resp, err := p.transfer(nil)
@@ -1195,7 +1196,8 @@ func (p *PN7150) awaitNotification(msgID uint16, timeoutMs uint) error {
 			if p.logCallback != nil {
 				p.logCallback(LogLevelWarning, "await notification timeout")
 			}
-			return fmt.Errorf("timeout waiting for notification 0x%04X", msgID)
+			// Timeout waiting for notification likely means tag departed
+			return NewError(ErrTagDeparted, fmt.Sprintf("timeout waiting for notification 0x%04X", msgID))
 		}
 
 		// Calculate remaining timeout
