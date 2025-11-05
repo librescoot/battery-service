@@ -6,12 +6,6 @@ import (
 )
 
 const (
-	cmdBMSInsertedInScooter = 0x0A
-	cmdBMSSeatboxOpened     = 0x0B
-	cmdBMSSeatboxClosed     = 0x0C
-	cmdBMSOn                = 0x0D
-	cmdBMSOff               = 0x0E
-
 	timeCmd                      = 400 * time.Millisecond
 	timeReinit                   = 2 * time.Second
 	timeDeparture                = 500 * time.Millisecond
@@ -195,9 +189,7 @@ func (sm *StateMachine) onExitCondCheckPresence(ctx context.Context) {
 }
 
 func (sm *StateMachine) onEnterCheckPresence(ctx context.Context) {
-	if err := sm.actions.WriteCommand(cmdBMSInsertedInScooter); err != nil {
-		sm.log.Error("failed to write INSERTED command", "error", err)
-	}
+	sm.actions.WriteCommand(BMSCmdInsertedInScooter)
 
 	sm.startTimer("check_presence", timeCheckPresence, func() {
 		sm.SendEvent(CheckPresenceTimeoutEvent{})
@@ -240,9 +232,7 @@ func (sm *StateMachine) onExitHeartbeatActions(ctx context.Context) {
 }
 
 func (sm *StateMachine) onEnterSendClosed(ctx context.Context) {
-	if err := sm.actions.WriteCommand(cmdBMSSeatboxClosed); err != nil {
-		sm.log.Error("failed to write SEATBOX_CLOSED command", "error", err)
-	}
+	sm.actions.WriteCommand(BMSCmdSeatboxClosed)
 
 	sm.startTimer("closed", timeCmd, func() {
 		sm.SendEvent(ClosedTimeoutEvent{})
@@ -250,16 +240,14 @@ func (sm *StateMachine) onEnterSendClosed(ctx context.Context) {
 }
 
 func (sm *StateMachine) onEnterSendOnOff(ctx context.Context) {
-	var cmd byte
+	var cmd BMSCommand
 	if sm.actions.GetEnabled() {
-		cmd = cmdBMSOn
+		cmd = BMSCmdOn
 	} else {
-		cmd = cmdBMSOff
+		cmd = BMSCmdOff
 	}
 
-	if err := sm.actions.WriteCommand(cmd); err != nil {
-		sm.log.Error("failed to write ON/OFF command", "error", err)
-	}
+	sm.actions.WriteCommand(cmd)
 
 	sm.startTimer("on_off", timeCmd, func() {
 		if err := sm.actions.ReadStatus(); err != nil {
@@ -283,9 +271,7 @@ func (sm *StateMachine) onEnterWaitUpdate(ctx context.Context) {
 }
 
 func (sm *StateMachine) onEnterSendInsertedClosed(ctx context.Context) {
-	if err := sm.actions.WriteCommand(cmdBMSInsertedInScooter); err != nil {
-		sm.log.Error("failed to write INSERTED command", "error", err)
-	}
+	sm.actions.WriteCommand(BMSCmdInsertedInScooter)
 
 	sm.startTimer("inserted_closed", timeCmd, func() {
 		sm.SendEvent(InsertedClosedTimeoutEvent{})
@@ -301,9 +287,7 @@ func (sm *StateMachine) onEnterCondOff(ctx context.Context) {
 }
 
 func (sm *StateMachine) onEnterSendOff(ctx context.Context) {
-	if err := sm.actions.WriteCommand(cmdBMSOff); err != nil {
-		sm.log.Error("failed to write OFF command", "error", err)
-	}
+	sm.actions.WriteCommand(BMSCmdOff)
 
 	sm.startTimer("off", timeCmd, func() {
 		if err := sm.actions.ReadStatus(); err != nil {
@@ -314,9 +298,7 @@ func (sm *StateMachine) onEnterSendOff(ctx context.Context) {
 }
 
 func (sm *StateMachine) onEnterSendOpened(ctx context.Context) {
-	if err := sm.actions.WriteCommand(cmdBMSSeatboxOpened); err != nil {
-		sm.log.Error("failed to write SEATBOX_OPENED command", "error", err)
-	}
+	sm.actions.WriteCommand(BMSCmdSeatboxOpened)
 
 	openedTime := sm.actions.GetOpenedTime()
 	sm.startTimer("opened", openedTime, func() {
@@ -326,9 +308,7 @@ func (sm *StateMachine) onEnterSendOpened(ctx context.Context) {
 }
 
 func (sm *StateMachine) onEnterSendInsertedOpen(ctx context.Context) {
-	if err := sm.actions.WriteCommand(cmdBMSInsertedInScooter); err != nil {
-		sm.log.Error("failed to write INSERTED command", "error", err)
-	}
+	sm.actions.WriteCommand(BMSCmdInsertedInScooter)
 
 	insertedTime := sm.actions.GetInsertedTime()
 	sm.startTimer("inserted_open", insertedTime, func() {

@@ -151,7 +151,7 @@ func (r *BatteryReader) sendStatusUpdate() {
 
 	if r.service.debug {
 		r.logger.Debug(fmt.Sprintf("Publishing state=%s, present=%v, voltage=%d, charge=%d",
-			r.index, r.data.State.String(), effectivePresent, r.data.Voltage, r.data.Charge))
+			r.data.State.String(), effectivePresent, r.data.Voltage, r.data.Charge))
 	}
 
 	// Use Redis transaction for atomic updates
@@ -179,7 +179,7 @@ func (r *BatteryReader) sendStatusUpdate() {
 
 	// Execute the transaction
 	if _, err := pipe.Exec(r.ctx); err != nil {
-		r.logger.Error(fmt.Sprintf("Failed to execute Redis transaction: %v",err))
+		r.logger.Error(fmt.Sprintf("Failed to execute Redis transaction: %v", err))
 		return
 	}
 

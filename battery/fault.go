@@ -50,7 +50,7 @@ func (r *BatteryReader) initializeFaultManagement() {
 func (r *BatteryReader) setFault(fault BMSFault, present bool) {
 	config, exists := faultConfigs[fault]
 	if !exists {
-		r.logger.Warn(fmt.Sprintf("Unknown fault %d",fault))
+		r.logger.Warn(fmt.Sprintf("Unknown fault %d", fault))
 		return
 	}
 
@@ -107,11 +107,11 @@ func (r *BatteryReader) setFault(fault BMSFault, present bool) {
 func (r *BatteryReader) activateFault(fault BMSFault, config FaultConfig) {
 	// For communication faults, only activate if battery is expected to be present
 	if fault == BMSFaultBMSCommsError && !r.isInHierarchy(fsm.StateTagPresent) {
-		r.logger.Debug(fmt.Sprintf("Skipping fault %s activation - battery not in StateTagPresent hierarchy",config.Description))
+		r.logger.Debug(fmt.Sprintf("Skipping fault %s activation - battery not in StateTagPresent hierarchy", config.Description))
 		return
 	}
 
-	r.logger.Warn(fmt.Sprintf("Fault %s (%d) activated",config.Description, fault))
+	r.logger.Warn(fmt.Sprintf("Fault %s (%d) activated", config.Description, fault))
 
 	if config.IsCritical {
 		r.clearLesserFaults(fault, false)
@@ -122,7 +122,7 @@ func (r *BatteryReader) activateFault(fault BMSFault, config FaultConfig) {
 }
 
 func (r *BatteryReader) deactivateFault(fault BMSFault, config FaultConfig) {
-	r.logger.Info(fmt.Sprintf("Fault %s (%d) cleared",config.Description, fault))
+	r.logger.Info(fmt.Sprintf("Fault %s (%d) cleared", config.Description, fault))
 
 	r.reportFault(fault, config, false)
 }
@@ -149,7 +149,7 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 
 	if present {
 		if err := r.service.redis.SAdd(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
-			r.logger.Warn(fmt.Sprintf("Failed to add fault to set: %v",err))
+			r.logger.Warn(fmt.Sprintf("Failed to add fault to set: %v", err))
 		}
 
 		if err := r.service.redis.XAdd(r.ctx, &redis.XAddArgs{
@@ -161,15 +161,15 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 				"description": config.Description,
 			},
 		}).Err(); err != nil {
-			r.logger.Warn(fmt.Sprintf("Failed to add fault event to stream: %v",err))
+			r.logger.Warn(fmt.Sprintf("Failed to add fault event to stream: %v", err))
 		}
 
 		if err := r.service.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
-			r.logger.Warn(fmt.Sprintf("Failed to publish fault notification: %v",err))
+			r.logger.Warn(fmt.Sprintf("Failed to publish fault notification: %v", err))
 		}
 	} else {
 		if err := r.service.redis.SRem(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
-			r.logger.Warn(fmt.Sprintf("Failed to remove fault from set: %v",err))
+			r.logger.Warn(fmt.Sprintf("Failed to remove fault from set: %v", err))
 		}
 
 		if err := r.service.redis.XAdd(r.ctx, &redis.XAddArgs{
@@ -180,11 +180,11 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 				"code":  fmt.Sprintf("-%d", fault),
 			},
 		}).Err(); err != nil {
-			r.logger.Warn(fmt.Sprintf("Failed to add fault clear event to stream: %v",err))
+			r.logger.Warn(fmt.Sprintf("Failed to add fault clear event to stream: %v", err))
 		}
 
 		if err := r.service.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
-			r.logger.Warn(fmt.Sprintf("Failed to publish fault clear notification: %v",err))
+			r.logger.Warn(fmt.Sprintf("Failed to publish fault clear notification: %v", err))
 		}
 	}
 }

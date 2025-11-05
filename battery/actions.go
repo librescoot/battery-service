@@ -37,7 +37,7 @@ func (r *BatteryReader) SelectTag() {
 	defer r.nfcMu.Unlock()
 
 	if err := r.hal.SelectTag(0); err != nil {
-		r.logger.Warn(fmt.Sprintf("Failed to select tag: %v",err))
+		r.logger.Warn(fmt.Sprintf("Failed to select tag: %v", err))
 		r.handleNFCError(err)
 	}
 }
@@ -50,16 +50,16 @@ func (r *BatteryReader) Initialize() error {
 	r.nfcMu.Lock()
 	defer r.nfcMu.Unlock()
 
-	r.logger.Info(fmt.Sprintf("Initializing NFC reader on %s",r.deviceName))
+	r.logger.Info(fmt.Sprintf("Initializing NFC reader on %s", r.deviceName))
 	if err := r.hal.Initialize(); err != nil {
-		r.logger.Error(fmt.Sprintf("Initialization failed: %v",err))
+		r.logger.Error(fmt.Sprintf("Initialization failed: %v", err))
 		return err
 	}
 
 	// Do NOT enable async tag event reader
 	// r.hal.SetTagEventReaderEnabled(true)
 
-	r.logger.Info(fmt.Sprintf("NFC reader initialized successfully"))
+	r.logger.Info("NFC reader initialized successfully")
 	return nil
 }
 
@@ -75,27 +75,6 @@ func (r *BatteryReader) ReadStatus() error {
 	if !r.readStatus() {
 		return fmt.Errorf("battery %d: failed to read status", r.index)
 	}
-	return nil
-}
-
-func (r *BatteryReader) WriteCommand(cmd byte) error {
-	var bmsCmd BMSCommand
-	switch cmd {
-	case 0x0A:
-		bmsCmd = BMSCmdInsertedInScooter
-	case 0x0B:
-		bmsCmd = BMSCmdSeatboxOpened
-	case 0x0C:
-		bmsCmd = BMSCmdSeatboxClosed
-	case 0x0D:
-		bmsCmd = BMSCmdOn
-	case 0x0E:
-		bmsCmd = BMSCmdOff
-	default:
-		return fmt.Errorf("battery %d: unknown command byte 0x%02X",cmd)
-	}
-
-	r.writeCommand(bmsCmd)
 	return nil
 }
 
@@ -118,8 +97,7 @@ func (r *BatteryReader) CheckStateCorrect() bool {
 	}
 
 	if r.data.State != expectedState {
-		r.logger.Warn(fmt.Sprintf("State mismatch - expected %s, got %s",
-			r.index, expectedState, r.data.State))
+		r.logger.Warn("State mismatch", "expected", expectedState, "got", r.data.State)
 		return false
 	}
 	return true
@@ -174,7 +152,7 @@ func (r *BatteryReader) StartHeartbeatTimer() {
 	r.heartbeatTimer = time.AfterFunc(interval, func() {
 		if r.fsm != nil {
 			if !r.CheckStateCorrect() {
-				r.logger.Info(fmt.Sprintf("State mismatch detected during heartbeat - triggering departure"))
+				r.logger.Info("State mismatch detected during heartbeat - triggering departure")
 				r.fsm.SendEvent(fsm.TagDepartedEvent{})
 			} else {
 				r.fsm.SendEvent(fsm.HeartbeatTimeoutEvent{})
@@ -189,7 +167,7 @@ func (r *BatteryReader) ClearHeartbeatTimer() {
 
 func (r *BatteryReader) StopTimerIfBatteryEmpty() {
 	if r.data.Charge == 0 {
-		r.logger.Debug(fmt.Sprintf("Battery empty (charge=0), stopping heartbeat timer"))
+		r.logger.Debug("Battery empty (charge=0), stopping heartbeat timer")
 		r.StopHeartbeatTimer()
 	}
 }

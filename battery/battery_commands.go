@@ -82,7 +82,7 @@ func (r *BatteryReader) releaseInhibitor() {
 	r.logger.Debug(fmt.Sprintf("Releasing inhibitor"))
 
 	if err := r.suspendInhibitor.Release(); err != nil {
-		r.logger.Warn(fmt.Sprintf("Failed to release inhibitor: %v",err))
+		r.logger.Warn(fmt.Sprintf("Failed to release inhibitor: %v", err))
 	}
 
 	r.suspendInhibitor = nil

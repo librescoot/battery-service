@@ -129,7 +129,7 @@ func (r *BatteryReader) run() {
 
 func (r *BatteryReader) handleRestart() {
 	currentState := r.fsm.State()
-	r.logger.Debug(fmt.Sprintf("Restart requested - currentState=%s",currentState))
+	r.logger.Debug(fmt.Sprintf("Restart requested - currentState=%s", currentState))
 
 	if r.isInHierarchy(fsm.StateTagPresent) && !r.isInHierarchy(fsm.StateCheckPresence) {
 		r.logger.Debug(fmt.Sprintf("Sending restart event"))
@@ -180,7 +180,7 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 			newEnabled = closed
 		}
 		if r.enabled != newEnabled {
-			r.logger.Debug(fmt.Sprintf("Active battery enabled state changing from %t to %t",r.enabled, newEnabled))
+			r.logger.Debug(fmt.Sprintf("Active battery enabled state changing from %t to %t", r.enabled, newEnabled))
 			r.enabled = newEnabled
 			if r.isInHierarchy(fsm.StateTagPresent) {
 				r.logger.Debug(fmt.Sprintf("Triggering restart due to enabled state change"))
@@ -270,19 +270,19 @@ func (r *BatteryReader) fetchInitialRedisState() {
 
 	vehicleState, err := r.service.redis.HGet(r.ctx, "vehicle", "state").Result()
 	if err == nil {
-		r.logger.Debug(fmt.Sprintf("Found vehicle state: %s",vehicleState))
+		r.logger.Debug(fmt.Sprintf("Found vehicle state: %s", vehicleState))
 		r.handleVehicleStateChange(VehicleState(vehicleState))
 	} else {
-		r.logger.Warn(fmt.Sprintf("No vehicle state in Redis hash: %v",err))
+		r.logger.Warn(fmt.Sprintf("No vehicle state in Redis hash: %v", err))
 	}
 
 	seatboxLock, err := r.service.redis.HGet(r.ctx, "vehicle", "seatbox:lock").Result()
 	if err == nil {
 		closed := (seatboxLock == "closed" || seatboxLock == "true" || seatboxLock == "1")
-		r.logger.Debug(fmt.Sprintf("Found seatbox lock state: %s (closed=%t)",seatboxLock, closed))
+		r.logger.Debug(fmt.Sprintf("Found seatbox lock state: %s (closed=%t)", seatboxLock, closed))
 		r.handleSeatboxLockChange(closed)
 	} else {
-		r.logger.Warn(fmt.Sprintf("No seatbox lock state in Redis hash: %v",err))
+		r.logger.Warn(fmt.Sprintf("No seatbox lock state in Redis hash: %v", err))
 	}
 }
 

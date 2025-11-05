@@ -20,7 +20,7 @@ type BatteryActions interface {
 	Initialize() error
 	Deinitialize()
 	ReadStatus() error
-	WriteCommand(cmd byte) error
+	WriteCommand(cmd BMSCommand)
 	GetEnabled() bool
 	GetSeatboxLockClosed() bool
 	GetVehicleActive() bool
