@@ -98,8 +98,6 @@ func (r *BatteryReader) parseStatusData(status0, status1, status2 []byte) {
 
 	r.data.LowSOC = r.data.Charge <= BMSMinSOC
 
-	r.parseHardwareFaults(r.data.FaultCode)
-
 	r.updateFaultsFromBatteryData()
 }
 
@@ -133,7 +131,7 @@ func (r *BatteryReader) sendStatusUpdate() {
 	channel := fmt.Sprintf("battery:%d", r.index)
 
 	// Build fields map for all data
-	fields := map[string]interface{}{
+	fields := map[string]any{
 		"present":            fmt.Sprintf("%v", effectivePresent),
 		"state":              r.data.State.String(),
 		"voltage":            fmt.Sprintf("%d", r.data.Voltage),
@@ -152,8 +150,8 @@ func (r *BatteryReader) sendStatusUpdate() {
 	}
 
 	if r.service.debug {
-		r.service.logger.Debugf("Battery %d: Publishing state=%s, present=%v, voltage=%d, charge=%d",
-			r.index, r.data.State.String(), effectivePresent, r.data.Voltage, r.data.Charge)
+		r.logger.Debug(fmt.Sprintf("Publishing state=%s, present=%v, voltage=%d, charge=%d",
+			r.index, r.data.State.String(), effectivePresent, r.data.Voltage, r.data.Charge))
 	}
 
 	// Use Redis transaction for atomic updates
@@ -181,7 +179,7 @@ func (r *BatteryReader) sendStatusUpdate() {
 
 	// Execute the transaction
 	if _, err := pipe.Exec(r.ctx); err != nil {
-		r.service.logger.Errorf("Battery %d: Failed to execute Redis transaction: %v", r.index, err)
+		r.logger.Error(fmt.Sprintf("Failed to execute Redis transaction: %v",err))
 		return
 	}
 
@@ -239,4 +237,3 @@ func (r *BatteryReader) updateFaultSetInTransaction(pipe redis.Pipeliner) ([]BMS
 
 	return changedFaults, anyChanges
 }
-

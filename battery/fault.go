@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"battery-service/battery/fsm"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -49,7 +50,7 @@ func (r *BatteryReader) initializeFaultManagement() {
 func (r *BatteryReader) setFault(fault BMSFault, present bool) {
 	config, exists := faultConfigs[fault]
 	if !exists {
-		r.service.logger.Warnf("Battery %d: Unknown fault %d", r.index, fault)
+		r.logger.Warn(fmt.Sprintf("Unknown fault %d",fault))
 		return
 	}
 
@@ -104,7 +105,13 @@ func (r *BatteryReader) setFault(fault BMSFault, present bool) {
 }
 
 func (r *BatteryReader) activateFault(fault BMSFault, config FaultConfig) {
-	r.service.logger.Warnf("Battery %d: Fault %s (%d) activated", r.index, config.Description, fault)
+	// For communication faults, only activate if battery is expected to be present
+	if fault == BMSFaultBMSCommsError && !r.isInHierarchy(fsm.StateTagPresent) {
+		r.logger.Debug(fmt.Sprintf("Skipping fault %s activation - battery not in StateTagPresent hierarchy",config.Description))
+		return
+	}
+
+	r.logger.Warn(fmt.Sprintf("Fault %s (%d) activated",config.Description, fault))
 
 	if config.IsCritical {
 		r.clearLesserFaults(fault, false)
@@ -115,7 +122,7 @@ func (r *BatteryReader) activateFault(fault BMSFault, config FaultConfig) {
 }
 
 func (r *BatteryReader) deactivateFault(fault BMSFault, config FaultConfig) {
-	r.service.logger.Infof("Battery %d: Fault %s (%d) cleared", r.index, config.Description, fault)
+	r.logger.Info(fmt.Sprintf("Fault %s (%d) cleared",config.Description, fault))
 
 	r.reportFault(fault, config, false)
 }
@@ -133,7 +140,7 @@ func (r *BatteryReader) clearLesserFaults(referenceFault BMSFault, includeRefere
 func (r *BatteryReader) sendNotPresent() {
 	r.data = BMSData{}
 	r.sendStatusUpdate()
-	r.service.logger.Warnf("Battery %d: Reported as not present due to critical fault", r.index)
+	r.logger.Warn(fmt.Sprintf("Reported as not present due to critical fault"))
 }
 
 func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present bool) {
@@ -142,59 +149,68 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 
 	if present {
 		if err := r.service.redis.SAdd(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
-			r.service.logger.Warnf("Battery %d: Failed to add fault to set: %v", r.index, err)
+			r.logger.Warn(fmt.Sprintf("Failed to add fault to set: %v",err))
 		}
 
 		if err := r.service.redis.XAdd(r.ctx, &redis.XAddArgs{
 			Stream: "events:faults",
 			MaxLen: 1000,
-			Values: map[string]interface{}{
+			Values: map[string]any{
 				"group":       batteryName,
 				"code":        fmt.Sprintf("%d", fault),
 				"description": config.Description,
 			},
 		}).Err(); err != nil {
-			r.service.logger.Warnf("Battery %d: Failed to add fault event to stream: %v", r.index, err)
+			r.logger.Warn(fmt.Sprintf("Failed to add fault event to stream: %v",err))
 		}
 
 		if err := r.service.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
-			r.service.logger.Warnf("Battery %d: Failed to publish fault notification: %v", r.index, err)
+			r.logger.Warn(fmt.Sprintf("Failed to publish fault notification: %v",err))
 		}
 	} else {
 		if err := r.service.redis.SRem(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
-			r.service.logger.Warnf("Battery %d: Failed to remove fault from set: %v", r.index, err)
+			r.logger.Warn(fmt.Sprintf("Failed to remove fault from set: %v",err))
 		}
 
 		if err := r.service.redis.XAdd(r.ctx, &redis.XAddArgs{
 			Stream: "events:faults",
 			MaxLen: 1000,
-			Values: map[string]interface{}{
+			Values: map[string]any{
 				"group": batteryName,
 				"code":  fmt.Sprintf("-%d", fault),
 			},
 		}).Err(); err != nil {
-			r.service.logger.Warnf("Battery %d: Failed to add fault clear event to stream: %v", r.index, err)
+			r.logger.Warn(fmt.Sprintf("Failed to add fault clear event to stream: %v",err))
 		}
 
 		if err := r.service.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
-			r.service.logger.Warnf("Battery %d: Failed to publish fault clear notification: %v", r.index, err)
+			r.logger.Warn(fmt.Sprintf("Failed to publish fault clear notification: %v",err))
 		}
 	}
 }
 
-func (r *BatteryReader) parseHardwareFaults(faultCode uint) {
+func (r *BatteryReader) parseHardwareFaults(faultCode uint, previousFaultCode uint) {
 	for bit := 0; bit < 16; bit++ {
 		fault := BMSFault(bit + 1)
 		present := (faultCode & (1 << bit)) != 0
-		r.setFault(fault, present)
+		wasPresent := (previousFaultCode & (1 << bit)) != 0
+
+		// Only process faults that changed state
+		if present != wasPresent {
+			r.setFault(fault, present)
+		}
 	}
 }
 
 func (r *BatteryReader) updateFaultsFromBatteryData() {
-	r.parseHardwareFaults(r.data.FaultCode)
+	r.parseHardwareFaults(r.data.FaultCode, r.previousData.FaultCode)
 
+	// Check for changes in zero data state
+	wasZeroData := r.previousData.EmptyOr0Data > 0
 	isZeroData := r.data.EmptyOr0Data > 0
-	r.setFault(BMSFaultBMSZeroData, isZeroData)
+	if wasZeroData != isZeroData {
+		r.setFault(BMSFaultBMSZeroData, isZeroData)
+	}
 }
 
 func (r *BatteryReader) cleanupFaultManagement() {

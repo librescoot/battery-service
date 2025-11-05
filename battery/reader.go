@@ -1,10 +1,12 @@
 package battery
 
 import (
+	"context"
 	"fmt"
-	"strings"
+	"log/slog"
 	"time"
 
+	"battery-service/battery/fsm"
 	"battery-service/nfc/hal"
 )
 
@@ -23,7 +25,6 @@ func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel i
 		seatboxLockChan:  make(chan bool, 1),
 		enabledChan:      make(chan bool, 1),
 
-		state: StateRoot,
 		data: BMSData{
 			Present: false,
 		},
@@ -36,42 +37,31 @@ func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel i
 		enabled: (role == BatteryRoleActive),
 	}
 
+	reader.logger = slog.New(NewFSMHandler(service.stdLogger.Writer(), LogLevel(logLevel), index))
+
 	var err error
 	reader.hal, err = hal.NewPN7150(deviceName, reader.makeLogCallback(), nil, true, false, service.debug)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create NFC HAL for reader %d: %v", index, err)
 	}
 
-	reader.tagEventChan = reader.hal.GetTagEventChannel()
-	reader.hal.SetTagEventReaderEnabled(true)
-
 	reader.initializeFaultManagement()
+
+	fsmLogger := slog.New(NewFSMHandler(service.stdLogger.Writer(), LogLevel(logLevel), index))
+
+	reader.fsmCtx, reader.fsmCancel = context.WithCancel(reader.ctx)
+	reader.fsm = fsm.New(reader, fsmLogger)
+
+	// Do NOT use async tag event channel
+	// reader.tagEventChan = reader.hal.GetTagEventChannel()
 
 	return reader, nil
 }
 
 func (r *BatteryReader) Start() error {
-	r.service.logger.Infof("Starting battery reader %d on device %s", r.index, r.deviceName)
+	r.logger.Info(fmt.Sprintf("Starting battery reader on device %s", r.deviceName))
 
-	r.service.logger.Infof("Battery %d: Initializing NFC reader on %s", r.index, r.deviceName)
-	if err := r.hal.Initialize(); err != nil {
-		// Check if this is a cold boot semantic error
-		if strings.Contains(err.Error(), "status: 06") || strings.Contains(err.Error(), "TOTAL_DURATION") {
-			r.service.logger.Warnf("Battery %d: Initial initialization failed (likely cold boot), attempting reinitialization", r.index)
-			// Try a full reinitialization with power cycle
-			if reinitErr := r.hal.FullReinitialize(); reinitErr != nil {
-				return fmt.Errorf("failed to reinitialize NFC HAL for reader %d after cold boot: %v", r.index, reinitErr)
-			}
-			r.service.logger.Infof("Battery %d: NFC reader reinitialized successfully after cold boot", r.index)
-		} else {
-			return fmt.Errorf("failed to initialize NFC HAL for reader %d: %v", r.index, err)
-		}
-	} else {
-		r.service.logger.Infof("Battery %d: NFC reader initialized successfully", r.index)
-	}
-
-	// Clear NFC reader error fault on successful initialization
-	r.setFault(BMSFaultNFCReaderError, false)
+	go r.fsm.Run(r.fsmCtx)
 
 	go r.run()
 
@@ -79,30 +69,26 @@ func (r *BatteryReader) Start() error {
 }
 
 func (r *BatteryReader) Stop() {
-	r.service.logger.Infof("Stopping battery reader %d", r.index)
-	close(r.stopChan)
+	r.logger.Info(fmt.Sprintf("Stopping battery reader %d", r.index))
 
-	if r.stateTimer != nil {
-		r.stateTimer.Stop()
-	}
-	r.clearHeartbeatTimer()
+	r.fsmCancel()
+
+	close(r.stopChan)
 
 	r.cleanupFaultManagement()
 
 	if r.hal != nil {
-		r.service.logger.Infof("Battery %d: Deinitializing NFC reader", r.index)
+		r.logger.Info(fmt.Sprintf("Deinitializing NFC reader"))
 		r.hal.Deinitialize()
 	}
 
-	r.service.logger.Infof("Battery reader %d stopped", r.index)
+	r.logger.Info(fmt.Sprintf("Battery reader %d stopped", r.index))
 }
 
 func (r *BatteryReader) run() {
-	r.service.logger.Debugf("Battery reader %d event loop started", r.index)
+	r.logger.Debug(fmt.Sprintf("Battery reader %d event loop started", r.index))
 
 	r.sendStatusUpdate()
-
-	r.transitionTo(StateInit)
 
 	r.fetchInitialRedisState()
 
@@ -110,8 +96,8 @@ func (r *BatteryReader) run() {
 
 	go func() {
 		time.Sleep(5 * time.Second)
-		if r.isIn(StateInit) {
-			r.service.logger.Warnf("Battery %d: Initialization timeout, forcing start with defaults", r.index)
+		if r.fsm.State() == fsm.StateInit {
+			r.logger.Warn(fmt.Sprintf("Initialization timeout, forcing start with defaults"))
 			r.initComplete.VehicleState = true
 			r.initComplete.SeatboxLock = true
 			r.vehicleState = VehicleStateStandby
@@ -123,14 +109,11 @@ func (r *BatteryReader) run() {
 	for {
 		select {
 		case <-r.stopChan:
-			r.service.logger.Debugf("Battery reader %d event loop stopping", r.index)
+			r.logger.Debug(fmt.Sprintf("Battery reader %d event loop stopping", r.index))
 			return
 
 		case <-r.restartChan:
 			r.handleRestart()
-
-		case <-r.getStateTimer():
-			r.handleTimeout()
 
 		case vehicleState := <-r.vehicleStateChan:
 			r.handleVehicleStateChange(vehicleState)
@@ -140,108 +123,19 @@ func (r *BatteryReader) run() {
 
 		case enabled := <-r.enabledChan:
 			r.handleEnabledChange(enabled)
-
-		case event := <-r.tagEventChan:
-			r.handleTagEvent(event)
-
 		}
 	}
 }
 
 func (r *BatteryReader) handleRestart() {
-	inTagPresent := r.isIn(StateTagPresent)
-	inCheckPresence := r.isIn(StateCheckPresence)
-	r.service.logger.Debugf("Battery %d: Restart requested - currentState=%s, inStateTagPresent=%t, inStateCheckPresence=%t",
-		r.index, r.state, inTagPresent, inCheckPresence)
+	currentState := r.fsm.State()
+	r.logger.Debug(fmt.Sprintf("Restart requested - currentState=%s",currentState))
 
-	if inTagPresent {
-		r.service.logger.Debugf("Battery %d: Restarting state machine from %s", r.index, r.state)
-		r.transitionTo(StateTagPresent)
+	if r.isInHierarchy(fsm.StateTagPresent) && !r.isInHierarchy(fsm.StateCheckPresence) {
+		r.logger.Debug(fmt.Sprintf("Sending restart event"))
+		r.fsm.SendEvent(fsm.RestartEvent{})
 	} else {
-		r.service.logger.Debugf("Battery %d: Restart skipped - not in StateTagPresent (current: %s)", r.index, r.state)
-	}
-}
-
-func (r *BatteryReader) handleTagEvent(event hal.TagEvent) {
-	switch event.Type {
-	case hal.TagArrival:
-		if event.Tag != nil {
-			r.service.logger.Infof("Battery %d: Tag arrived: %X", r.index, event.Tag.ID)
-		} else {
-			r.service.logger.Infof("Battery %d: Tag arrived", r.index)
-		}
-		r.service.logger.Debugf("Battery %d: Processing tag arrival", r.index)
-		if r.isIn(StateDiscoverTag) {
-			r.justInserted = true
-			r.previousTagPresent = true
-			r.transitionTo(StateTagPresent)
-		}
-
-	case hal.TagDeparture:
-		if event.Tag != nil {
-			r.service.logger.Infof("Battery %d: Tag departed: %X", r.index, event.Tag.ID)
-		} else {
-			r.service.logger.Infof("Battery %d: Tag departed", r.index)
-		}
-		if r.isIn(StateTagPresent) {
-			r.handleDeparture()
-			r.transitionTo(StateDiscoverTag)
-		}
-		r.previousTagPresent = false
-	}
-}
-
-func (r *BatteryReader) handleTimeout() {
-	switch r.state {
-	case StateNFCReaderOff:
-
-	case StateWaitArrival:
-		r.handleDeparture()
-		r.transitionTo(StateTagAbsent)
-
-	case StateTagAbsent:
-		r.setStateTimer(BMSTimeCheckReader)
-
-	case StateCheckPresence:
-		r.transitionTo(StateCondCheckPresence)
-
-	case StateWaitLastCmd:
-		r.transitionTo(StateCondSeatboxLock)
-
-	case StateSendOff:
-		r.readStatus()
-		r.transitionTo(StateCondOff)
-
-	case StateSendOpened:
-		r.justOpened = false
-		r.transitionTo(StateSendInsertedOpen)
-
-	case StateSendInsertedOpen:
-		r.justInserted = false
-		if r.readStatus() {
-			r.transitionTo(StateSendOpened)
-		} else {
-			r.transitionTo(StateCheckPresence)
-		}
-
-	case StateSendClosed:
-		r.transitionTo(StateSendOnOff)
-
-	case StateSendOnOff:
-		if r.readStatus() {
-			r.transitionTo(StateCondStateOK)
-		} else {
-			r.transitionTo(StateCheckPresence)
-		}
-
-	case StateSendInsertedClosed:
-		r.transitionTo(StateSendClosed)
-
-	case StateWaitUpdate:
-		r.transitionTo(StateHeartbeatActions)
-
-	default:
-		r.service.logger.Warnf("Battery %d: Unhandled timeout in state %s", r.index, r.state)
+		r.logger.Debug(fmt.Sprintf("Restart skipped - not in valid state"))
 	}
 }
 
@@ -255,12 +149,11 @@ func (r *BatteryReader) handleVehicleStateChange(newState VehicleState) {
 		!r.seatboxLockClosed &&
 		r.latchedSeatboxLockClosed {
 		r.latchedSeatboxLockClosed = false
-		if r.isIn(StateTagPresent) {
+		if r.isInHierarchy(fsm.StateTagPresent) {
 			r.triggerRestart()
 		}
 	}
 
-	// Reset recovery counter on vehicle state change (except in/out of ready-to-drive)
 	if oldVehicleState != VehicleStateReadyToDrive && newState != VehicleStateReadyToDrive {
 		r.data.EmptyOr0Data = 0
 	}
@@ -270,42 +163,33 @@ func (r *BatteryReader) handleVehicleStateChange(newState VehicleState) {
 
 func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 	r.initComplete.SeatboxLock = true
+	oldSeatboxLockClosed := r.seatboxLockClosed
 	r.seatboxLockClosed = closed
 
-	// Log state machine info on seatbox change
-	r.service.logger.Debugf("Battery %d: Seatbox %s - role=%s, state=%s, enabled=%t, inStateTagPresent=%t",
-		r.index, map[bool]string{true: "closed", false: "opened"}[closed], r.role, r.state, r.enabled, r.isIn(StateTagPresent))
+	r.logger.Debug(fmt.Sprintf("Seatbox %s - role=%s, state=%s, enabled=%t",
+		map[bool]string{true: "closed", false: "opened"}[closed], r.role, r.fsm.State(), r.enabled))
 
 	if r.role == BatteryRoleActive {
 		var newEnabled bool
 		if r.service.config.DangerouslyIgnoreSeatbox {
-			// When dangerously ignoring seatbox, keep battery enabled
 			newEnabled = true
 			if !closed {
-				r.service.logger.Warnf("Battery %d: Seatbox opened but battery staying active (--dangerously-ignore-seatbox)", r.index)
+				r.logger.Warn(fmt.Sprintf("Seatbox opened but battery staying active (--dangerously-ignore-seatbox)"))
 			}
 		} else {
 			newEnabled = closed
 		}
 		if r.enabled != newEnabled {
-			r.service.logger.Debugf("Battery %d: Active battery enabled state changing from %t to %t", r.index, r.enabled, newEnabled)
+			r.logger.Debug(fmt.Sprintf("Active battery enabled state changing from %t to %t",r.enabled, newEnabled))
 			r.enabled = newEnabled
-			if r.isIn(StateTagPresent) {
-				r.service.logger.Debugf("Battery %d: Triggering restart due to enabled state change", r.index)
+			if r.isInHierarchy(fsm.StateTagPresent) {
+				r.logger.Debug(fmt.Sprintf("Triggering restart due to enabled state change"))
 				r.triggerRestart()
-			} else {
-				r.service.logger.Debugf("Battery %d: Not triggering restart - not in StateTagPresent (current state: %s)", r.index, r.state)
 			}
-		} else {
-			r.service.logger.Debugf("Battery %d: Active battery enabled state unchanged (enabled=%t)", r.index, r.enabled)
 		}
-	} else {
-		r.service.logger.Debugf("Battery %d: Inactive battery - skipping enabled state logic", r.index)
 	}
 
 	oldLatch := r.latchedSeatboxLockClosed
-	r.service.logger.Debugf("Battery %d: Latch logic - vehicleState=%s, oldLatch=%t, seatboxClosed=%t",
-		r.index, r.vehicleState, oldLatch, closed)
 	if r.vehicleState == VehicleStateReadyToDrive {
 		r.latchedSeatboxLockClosed = closed
 	} else if closed {
@@ -313,22 +197,21 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 	} else {
 		r.latchedSeatboxLockClosed = false
 	}
-	r.service.logger.Debugf("Battery %d: Latch updated from %t to %t", r.index, oldLatch, r.latchedSeatboxLockClosed)
 
-	if r.latchedSeatboxLockClosed != oldLatch && r.isIn(StateTagPresent) {
-		r.service.logger.Debugf("Battery %d: Latch changed (%t -> %t) and in StateTagPresent - triggering restart",
-			r.index, oldLatch, r.latchedSeatboxLockClosed)
+	if r.latchedSeatboxLockClosed != oldLatch && r.isInHierarchy(fsm.StateTagPresent) {
+		r.logger.Debug(fmt.Sprintf("Latch changed (%t -> %t) and in StateTagPresent - triggering restart",
+			oldLatch, r.latchedSeatboxLockClosed))
 		r.triggerRestart()
-	} else if r.latchedSeatboxLockClosed != oldLatch {
-		r.service.logger.Debugf("Battery %d: Latch changed (%t -> %t) but NOT in StateTagPresent (current state: %s) - restart skipped",
-			r.index, oldLatch, r.latchedSeatboxLockClosed, r.state)
-	} else {
-		r.service.logger.Debugf("Battery %d: Latch unchanged (%t) - no restart needed", r.index, oldLatch)
 	}
 
-	// Reset recovery counter on seatbox change (if not latched in ready-to-drive)
 	if r.vehicleState != VehicleStateReadyToDrive || !r.latchedSeatboxLockClosed {
 		r.data.EmptyOr0Data = 0
+	}
+
+	if !closed && oldSeatboxLockClosed {
+		r.fsm.SendEvent(fsm.SeatboxOpenedEvent{})
+	} else if closed && !oldSeatboxLockClosed {
+		r.fsm.SendEvent(fsm.SeatboxClosedEvent{})
 	}
 
 	r.checkInitComplete()
@@ -337,7 +220,7 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 func (r *BatteryReader) handleEnabledChange(enabled bool) {
 	if r.enabled != enabled {
 		r.enabled = enabled
-		if r.isIn(StateTagPresent) {
+		if r.isInHierarchy(fsm.StateTagPresent) {
 			r.triggerRestart()
 		}
 	}
@@ -346,12 +229,9 @@ func (r *BatteryReader) handleEnabledChange(enabled bool) {
 func (r *BatteryReader) checkInitComplete() {
 	if r.initComplete.VehicleState &&
 		r.initComplete.SeatboxLock &&
-		r.isIn(StateInit) {
-		r.service.logger.Infof("Battery %d: Initialization complete, starting NFC operations", r.index)
-		r.transitionTo(StateNFCReaderOn)
-	} else {
-		r.service.logger.Debugf("Battery %d: Initialization pending - VehicleState: %t, SeatboxLock: %t",
-			r.index, r.initComplete.VehicleState, r.initComplete.SeatboxLock)
+		r.fsm.State() == fsm.StateInit {
+		r.logger.Info(fmt.Sprintf("Initialization complete, starting NFC operations"))
+		r.fsm.SendEvent(fsm.InitCompleteEvent{})
 	}
 }
 
@@ -360,6 +240,17 @@ func (r *BatteryReader) triggerRestart() {
 	case r.restartChan <- struct{}{}:
 	default:
 	}
+}
+
+func (r *BatteryReader) isInHierarchy(target fsm.State) bool {
+	current := r.fsm.State()
+	for current != fsm.StateRoot {
+		if current == target {
+			return true
+		}
+		current = current.Parent()
+	}
+	return target == fsm.StateRoot
 }
 
 func (r *BatteryReader) SetEnabled(enabled bool) {
@@ -375,23 +266,23 @@ func (r *BatteryReader) SendSeatboxLockChange(closed bool) {
 }
 
 func (r *BatteryReader) fetchInitialRedisState() {
-	r.service.logger.Debugf("Battery %d: Fetching initial Redis state from hashes", r.index)
+	r.logger.Debug(fmt.Sprintf("Fetching initial Redis state from hashes"))
 
 	vehicleState, err := r.service.redis.HGet(r.ctx, "vehicle", "state").Result()
 	if err == nil {
-		r.service.logger.Debugf("Battery %d: Found vehicle state: %s", r.index, vehicleState)
+		r.logger.Debug(fmt.Sprintf("Found vehicle state: %s",vehicleState))
 		r.handleVehicleStateChange(VehicleState(vehicleState))
 	} else {
-		r.service.logger.Warnf("Battery %d: No vehicle state in Redis hash: %v", r.index, err)
+		r.logger.Warn(fmt.Sprintf("No vehicle state in Redis hash: %v",err))
 	}
 
 	seatboxLock, err := r.service.redis.HGet(r.ctx, "vehicle", "seatbox:lock").Result()
 	if err == nil {
 		closed := (seatboxLock == "closed" || seatboxLock == "true" || seatboxLock == "1")
-		r.service.logger.Debugf("Battery %d: Found seatbox lock state: %s (closed=%t)", r.index, seatboxLock, closed)
+		r.logger.Debug(fmt.Sprintf("Found seatbox lock state: %s (closed=%t)",seatboxLock, closed))
 		r.handleSeatboxLockChange(closed)
 	} else {
-		r.service.logger.Warnf("Battery %d: No seatbox lock state in Redis hash: %v", r.index, err)
+		r.logger.Warn(fmt.Sprintf("No seatbox lock state in Redis hash: %v",err))
 	}
 }
 
@@ -401,17 +292,55 @@ func (r *BatteryReader) makeLogCallback() hal.LogCallback {
 			return
 		}
 
-		msg := fmt.Sprintf("Battery %d NFC: %s", r.index, message)
-
+		var levelPrefix string
 		switch level {
 		case hal.LogLevelError:
-			r.service.stdLogger.Printf("ERROR: %s", msg)
+			levelPrefix = "ERROR: "
 		case hal.LogLevelWarning:
-			r.service.stdLogger.Printf("WARN: %s", msg)
+			levelPrefix = "WARN: "
 		case hal.LogLevelInfo:
-			r.service.stdLogger.Printf("%s", msg)
+			levelPrefix = ""
 		case hal.LogLevelDebug:
-			r.service.stdLogger.Printf("DEBUG: %s", msg)
+			levelPrefix = "DEBUG: "
+		}
+
+		msg := fmt.Sprintf("Battery %d: NFC: %s%s", r.index, levelPrefix, message)
+		r.service.stdLogger.Printf("%s", msg)
+	}
+}
+
+func (r *BatteryReader) handleDeparture() {
+	r.data.Present = false
+
+	// Cancel any pending fault timers to prevent activation after departure
+	for _, state := range r.faultStates {
+		if state.SetTimer != nil {
+			state.SetTimer.Stop()
+			state.SetTimer = nil
+			state.PendingSet = false
+		}
+	}
+
+	r.sendStatusUpdate()
+}
+
+func (r *BatteryReader) handleTagEvent(event hal.TagEvent) {
+	if event.Type == hal.TagArrival {
+		r.logger.Debug(fmt.Sprintf("Tag arrival event from async reader"))
+		r.tagsDiscovered = true
+		r.previousTagPresent = true
+
+		if !r.isInHierarchy(fsm.StateTagPresent) {
+			r.fsm.SendEvent(fsm.TagArrivedEvent{})
+		}
+	} else if event.Type == hal.TagDeparture {
+		r.logger.Debug(fmt.Sprintf("Tag departure event from async reader"))
+		r.tagsDiscovered = false
+		r.previousTagPresent = false
+
+		if r.isInHierarchy(fsm.StateTagPresent) {
+			r.handleDeparture()
+			r.fsm.SendEvent(fsm.TagDepartedEvent{})
 		}
 	}
 }
