@@ -3,12 +3,17 @@ package battery
 import (
 	"context"
 	"log"
+	"log/slog"
+	"sync"
 	"time"
 
+	"battery-service/battery/fsm"
 	"battery-service/nfc/hal"
 
 	"github.com/redis/go-redis/v9"
 )
+
+type fsmStateMachine = fsm.StateMachine
 
 type BMSState uint32
 
@@ -185,8 +190,8 @@ const (
 
 // Heartbeat intervals
 const (
-	HeartbeatIntervalActiveStandby   = 40 * time.Second
-	HeartbeatIntervalInactive        = 30 * time.Minute
+	HeartbeatIntervalActiveStandby = 40 * time.Second
+	HeartbeatIntervalInactive      = 30 * time.Minute
 )
 
 // Discovery polling intervals (milliseconds)
@@ -234,7 +239,7 @@ type InitComplete struct {
 type Service struct {
 	config        *ServiceConfig
 	batteryConfig *BatteryConfiguration
-	logger        *Logger
+	logger        *slog.Logger
 	stdLogger     *log.Logger
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -251,14 +256,20 @@ type BatteryReader struct {
 	role       BatteryRole
 	deviceName string
 	logLevel   int
+	logger     *slog.Logger
 	service    *Service
 	ctx        context.Context
 
 	// NFC HAL - owned exclusively by this reader's goroutine
 	hal *hal.PN7150
 
-	// State machine
-	state        State
+	// Serializes NFC operations to prevent concurrent access
+	nfcMu sync.Mutex
+
+	// State machine (FSM-based)
+	fsm          *fsmStateMachine
+	fsmCtx       context.Context
+	fsmCancel    context.CancelFunc
 	data         BMSData
 	previousData BMSData
 
