@@ -31,6 +31,7 @@ type BatteryActions interface {
 	IsInactive() bool
 	ZeroRetryCounters()
 	StopHeartbeatTimer()
+	ShouldIgnoreSeatbox() bool
 	StartHeartbeatTimer()
 	ClearHeartbeatTimer()
 	StopTimerIfBatteryEmpty()
@@ -231,6 +232,13 @@ func (sm *StateMachine) evaluateJump(state State) (State, string) {
 			return StateWaitLastCmd, "presence_ok"
 		}
 		return StateCheckPresence, "presence_failed"
+
+	case StateCondIgnoreSeatbox:
+		if sm.actions.ShouldIgnoreSeatbox() {
+			sm.justInserted = false
+			return StateHeartbeat, "ignore_seatbox"
+		}
+		return StateCondSeatboxLock, "check_seatbox"
 
 	case StateCondSeatboxLock:
 		if sm.latchedSeatboxClosed {

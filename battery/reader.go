@@ -204,10 +204,13 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 		r.data.EmptyOr0Data = 0
 	}
 
-	if !closed && oldSeatboxLockClosed {
-		r.fsm.SendEvent(fsm.SeatboxOpenedEvent{})
-	} else if closed && !oldSeatboxLockClosed {
-		r.fsm.SendEvent(fsm.SeatboxClosedEvent{})
+	// Only send seatbox events to FSM if not ignoring seatbox
+	if !r.service.config.DangerouslyIgnoreSeatbox {
+		if !closed && oldSeatboxLockClosed {
+			r.fsm.SendEvent(fsm.SeatboxOpenedEvent{})
+		} else if closed && !oldSeatboxLockClosed {
+			r.fsm.SendEvent(fsm.SeatboxClosedEvent{})
+		}
 	}
 
 	r.checkInitComplete()

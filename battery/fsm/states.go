@@ -117,8 +117,6 @@ func (sm *StateMachine) onEnterWaitArrival(ctx context.Context) {
 		// Don't trigger reinit here - let the system recover naturally
 	}
 
-	// Async tag event reader (continuous IO callback) will detect tag arrivals
-
 	sm.startTimer("departure", timeDeparture, func() {
 		sm.SendEvent(DepartureTimeoutEvent{})
 	})
@@ -172,8 +170,6 @@ func (sm *StateMachine) onExitTagAbsent(ctx context.Context) {
 }
 
 func (sm *StateMachine) onEnterTagPresent(ctx context.Context) {
-	// Discovery is already stopped and tag already selected by async tag event reader's DetectTags() call
-	// HAL is already in Present state, ready for read/write operations
 	// Default child StateCondCheckPresence will be entered automatically
 }
 

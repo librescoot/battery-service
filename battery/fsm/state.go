@@ -14,6 +14,7 @@ const (
 	StateCondCheckPresence
 	StateCheckPresence
 	StateWaitLastCmd
+	StateCondIgnoreSeatbox
 	StateCondSeatboxLock
 	StateHeartbeat
 	StateHeartbeatActions
@@ -53,6 +54,8 @@ func (s State) String() string {
 		return "check_presence"
 	case StateWaitLastCmd:
 		return "wait_last_cmd"
+	case StateCondIgnoreSeatbox:
+		return "cond_ignore_seatbox"
 	case StateCondSeatboxLock:
 		return "cond_seatbox_lock"
 	case StateHeartbeat:
@@ -93,7 +96,7 @@ func (s State) Parent() State {
 	case StateWaitArrival, StateTagAbsent:
 		return StateDiscoverTag
 	case StateCondCheckPresence, StateCheckPresence, StateWaitLastCmd,
-		StateCondSeatboxLock, StateHeartbeat,
+		StateCondIgnoreSeatbox, StateCondSeatboxLock, StateHeartbeat,
 		StateCondJustInserted, StateCondOff, StateSendOff,
 		StateSendOpened, StateSendInsertedOpen:
 		return StateTagPresent
@@ -109,7 +112,7 @@ func (s State) Parent() State {
 
 func (s State) IsCondition() bool {
 	switch s {
-	case StateCondCheckPresence, StateCondSeatboxLock,
+	case StateCondCheckPresence, StateCondIgnoreSeatbox, StateCondSeatboxLock,
 		StateCondStateOK, StateCondJustInserted, StateCondOff:
 		return true
 	default:

@@ -99,7 +99,7 @@ func (sm *StateMachine) getTransition(event Event) Transition {
 			return tr(StateTagPresent)
 		}
 		if _, ok := event.(LastCmdTimeoutEvent); ok {
-			return tr(StateCondSeatboxLock)
+			return tr(StateCondIgnoreSeatbox)
 		}
 
 	case StateHeartbeat:

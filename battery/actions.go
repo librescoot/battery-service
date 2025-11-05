@@ -186,3 +186,7 @@ func (r *BatteryReader) getHeartbeatInterval() time.Duration {
 func (r *BatteryReader) updateLastCmdTime() {
 	r.lastCmdTime = time.Now()
 }
+
+func (r *BatteryReader) ShouldIgnoreSeatbox() bool {
+	return r.service.config.DangerouslyIgnoreSeatbox
+}

@@ -62,6 +62,8 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 func (s *Service) Start() error {
 	s.logger.Info("Starting battery service")
 
+	s.loadIgnoreSeatboxSetting()
+
 	go s.runRedisSubscriber()
 
 	for _, reader := range s.readers {
@@ -112,10 +114,11 @@ func (s *Service) SetBatteryEnabled(index int, enabled bool) error {
 }
 
 func (s *Service) runRedisSubscriber() {
-	s.logger.Info("Starting Redis subscriber for channels: vehicle:state, vehicle:seatbox:lock")
+	s.logger.Info("Starting Redis subscriber for channels: vehicle(state, seatbox:lock), settings")
 
 	pubsub := s.redis.Subscribe(s.ctx,
 		"vehicle",
+		"settings",
 	)
 	defer pubsub.Close()
 
@@ -145,6 +148,10 @@ func (s *Service) runRedisSubscriber() {
 					s.handleVehicleStateMessage()
 				case "seatbox:lock":
 					s.handleSeatboxUpdate()
+				}
+			case "settings":
+				if msg.Payload == "battery.ignore-seatbox" {
+					s.handleIgnoreSeatboxSettingChange()
 				}
 			default:
 				s.logger.Warn(fmt.Sprintf("Unknown Redis channel: %s", msg.Channel))
@@ -189,6 +196,52 @@ func (s *Service) handleSeatboxUpdate() {
 	for _, reader := range s.readers {
 		if reader != nil {
 			reader.SendSeatboxLockChange(closed)
+		}
+	}
+}
+
+func (s *Service) loadIgnoreSeatboxSetting() {
+	setting, err := s.redis.HGet(s.ctx, "settings", "battery.ignore-seatbox").Result()
+	if err != nil {
+		if err != redis.Nil {
+			s.logger.Warn(fmt.Sprintf("Failed to load battery.ignore-seatbox setting: %v", err))
+		}
+		return
+	}
+
+	if setting != "true" && setting != "false" {
+		s.logger.Warn(fmt.Sprintf("Invalid battery.ignore-seatbox value: %q (must be 'true' or 'false')", setting))
+		return
+	}
+
+	enabled := (setting == "true")
+	s.config.DangerouslyIgnoreSeatbox = enabled
+	s.logger.Info(fmt.Sprintf("Loaded battery.ignore-seatbox setting: %t", enabled))
+}
+
+func (s *Service) handleIgnoreSeatboxSettingChange() {
+	setting, err := s.redis.HGet(s.ctx, "settings", "battery.ignore-seatbox").Result()
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to fetch battery.ignore-seatbox setting: %v", err))
+		return
+	}
+
+	if setting != "true" && setting != "false" {
+		s.logger.Warn(fmt.Sprintf("Invalid battery.ignore-seatbox value: %q (must be 'true' or 'false')", setting))
+		return
+	}
+
+	enabled := (setting == "true")
+	oldValue := s.config.DangerouslyIgnoreSeatbox
+	s.config.DangerouslyIgnoreSeatbox = enabled
+
+	s.logger.Info(fmt.Sprintf("Battery ignore-seatbox setting changed: %t -> %t", oldValue, enabled))
+
+	// Notify all active readers to re-evaluate their enabled state
+	for _, reader := range s.readers {
+		if reader != nil && reader.role == BatteryRoleActive {
+			// Trigger a restart to apply the new seatbox ignore setting
+			reader.triggerRestart()
 		}
 	}
 }
