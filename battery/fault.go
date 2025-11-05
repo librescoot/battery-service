@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"battery-service/battery/fsm"
+
 	"github.com/redis/go-redis/v9"
 )
 
@@ -140,7 +141,7 @@ func (r *BatteryReader) clearLesserFaults(referenceFault BMSFault, includeRefere
 func (r *BatteryReader) sendNotPresent() {
 	r.data = BMSData{}
 	r.sendStatusUpdate()
-	r.logger.Warn(fmt.Sprintf("Reported as not present due to critical fault"))
+	r.logger.Warn("Reported as not present due to critical fault")
 }
 
 func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present bool) {

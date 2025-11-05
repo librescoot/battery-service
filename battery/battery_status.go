@@ -79,7 +79,7 @@ func (r *BatteryReader) parseStatusData(status0, status1, status2 []byte) {
 		}
 
 		if len(status2) >= 12 {
-			r.data.ManuDate = fmt.Sprintf("%c%c%c%c-%c%c-%c%c",
+			r.data.ManufacturingDate = fmt.Sprintf("%c%c%c%c-%c%c-%c%c",
 				status2[4], status2[5], status2[6], status2[7],
 				status2[8], status2[9], status2[10], status2[11])
 		}
@@ -145,7 +145,7 @@ func (r *BatteryReader) sendStatusUpdate() {
 		"cycle-count":        fmt.Sprintf("%d", r.data.CycleCount),
 		"state-of-health":    fmt.Sprintf("%d", r.data.StateOfHealth),
 		"serial-number":      r.data.SerialNumber,
-		"manufacturing-date": r.data.ManuDate,
+		"manufacturing-date": r.data.ManufacturingDate,
 		"fw-version":         r.data.FwVersion,
 	}
 

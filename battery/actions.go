@@ -178,9 +178,9 @@ func (r *BatteryReader) IsRoleInactive() bool {
 
 func (r *BatteryReader) getHeartbeatInterval() time.Duration {
 	if r.role == BatteryRoleInactive {
-		return HeartbeatIntervalInactive
+		return r.service.config.OffUpdateTime
 	}
-	return HeartbeatIntervalActiveStandby
+	return r.service.config.HeartbeatTimeout
 }
 
 func (r *BatteryReader) updateLastCmdTime() {

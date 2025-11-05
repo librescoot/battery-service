@@ -1,7 +1,5 @@
 package hal
 
-import "fmt"
-
 // Error codes
 const (
 	// Application error codes
@@ -24,13 +22,6 @@ const (
 	ErrCodeNCIIncompleteRead  = -0x304
 	ErrCodeNCIIncompleteMsg   = -0x305
 	ErrCodeNCIUnexpectedReset = -0x306
-)
-
-// Legacy error code aliases for backward compatibility
-const (
-	ErrTagDeparted  = ErrCodeTagDeparted
-	ErrArbiterBusy  = ErrCodeArbiterBusy
-	ErrMultipleTags = ErrCodeMultipleTags
 )
 
 // NFCError is the base interface for all NFC-related errors
@@ -198,15 +189,6 @@ func NewNCIUnexpectedResetError(message string) error {
 	}
 }
 
-// Legacy NewHALError for backward compatibility - wraps as I2C error
-// Deprecated: Use specific New*Error constructors
-func NewHALError(message string, cause error) error {
-	return &i2cError{
-		baseError: baseError{code: ErrCodeI2CRead, message: message},
-		cause:     cause,
-	}
-}
-
 // transientError represents temporary errors that should be retried
 type transientError struct {
 	baseError
@@ -352,53 +334,4 @@ func IsMultipleTagsError(err error) bool {
 	}
 	_, ok := err.(*MultipleTagsError)
 	return ok
-}
-
-// WrapAsHALError wraps a generic error as a HAL error
-func WrapAsHALError(message string, err error) error {
-	if err == nil {
-		return nil
-	}
-	// If it's already a typed NFC error, preserve it
-	if _, ok := err.(NFCError); ok {
-		return err
-	}
-	return NewHALError(message, err)
-}
-
-// Legacy compatibility - maintain old Error type for gradual migration
-// Deprecated: Use specific error types instead
-
-// Error represents a legacy NFC error with code
-// Deprecated: Use specific error types (TagDepartedError, ArbiterBusyError, etc.)
-type Error struct {
-	Code    int
-	Message string
-}
-
-func (e *Error) Error() string {
-	return fmt.Sprintf("NFC error %d: %s", e.Code, e.Message)
-}
-
-func (e *Error) IsNFCError() bool {
-	return true
-}
-
-// NewError creates a legacy error with code
-// Deprecated: Use New*Error constructors instead
-func NewError(code int, message string) error {
-	switch code {
-	case ErrTagDeparted:
-		return NewTagDepartedError(message)
-	case ErrArbiterBusy:
-		return NewArbiterBusyError(message)
-	case ErrMultipleTags:
-		return NewMultipleTagsError(message)
-	default:
-		// Unknown code, create legacy error
-		return &Error{
-			Code:    code,
-			Message: message,
-		}
-	}
 }

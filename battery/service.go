@@ -60,7 +60,7 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 }
 
 func (s *Service) Start() error {
-	s.logger.Info(fmt.Sprintf("Starting battery service v2"))
+	s.logger.Info("Starting battery service")
 
 	go s.runRedisSubscriber()
 
@@ -73,12 +73,12 @@ func (s *Service) Start() error {
 		}
 	}
 
-	s.logger.Info(fmt.Sprintf("Battery service v2 started successfully"))
+	s.logger.Info("Battery service started successfully")
 	return nil
 }
 
 func (s *Service) Stop() {
-	s.logger.Info(fmt.Sprintf("Stopping battery service v2"))
+	s.logger.Info("Stopping battery service")
 
 	s.cancel()
 
@@ -99,7 +99,7 @@ func (s *Service) Stop() {
 		s.redis.Close()
 	}
 
-	s.logger.Info(fmt.Sprintf("Battery service v2 stopped"))
+	s.logger.Info("Battery service stopped")
 }
 
 func (s *Service) SetBatteryEnabled(index int, enabled bool) error {
@@ -112,7 +112,7 @@ func (s *Service) SetBatteryEnabled(index int, enabled bool) error {
 }
 
 func (s *Service) runRedisSubscriber() {
-	s.logger.Info(fmt.Sprintf("Starting Redis subscriber for channels: vehicle:state, vehicle:seatbox:lock"))
+	s.logger.Info("Starting Redis subscriber for channels: vehicle:state, vehicle:seatbox:lock")
 
 	pubsub := s.redis.Subscribe(s.ctx,
 		"vehicle",
@@ -124,16 +124,16 @@ func (s *Service) runRedisSubscriber() {
 		s.logger.Error(fmt.Sprintf("Failed to establish Redis subscription: %v", err))
 		s.stdLogger.Fatal("Redis connection failed, exiting to allow systemd restart")
 	}
-	s.logger.Info(fmt.Sprintf("Redis subscription established successfully"))
+	s.logger.Info("Redis subscription established successfully")
 
 	ch := pubsub.Channel()
-	s.logger.Debug(fmt.Sprintf("Listening for Redis messages..."))
+	s.logger.Debug("Listening for Redis messages...")
 
 	for {
 		select {
 		case msg := <-ch:
 			if msg == nil {
-				s.logger.Error(fmt.Sprintf("Redis channel closed unexpectedly"))
+				s.logger.Error("Redis channel closed unexpectedly")
 				s.stdLogger.Fatal("Redis connection lost, exiting to allow systemd restart")
 			}
 			s.logger.Debug(fmt.Sprintf("Received Redis message: channel=%s, payload=%s", msg.Channel, msg.Payload))
@@ -151,7 +151,7 @@ func (s *Service) runRedisSubscriber() {
 			}
 
 		case <-s.ctx.Done():
-			s.logger.Info(fmt.Sprintf("Redis subscriber context cancelled"))
+			s.logger.Info("Redis subscriber context cancelled")
 			return
 		}
 	}

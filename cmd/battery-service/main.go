@@ -34,7 +34,6 @@ func main() {
 	var redisPort uint
 	flag.UintVar(&redisPort, "redis-port", 6379, "Redis server port")
 
-	flag.BoolVar(&config.TestMainPower, "test-main-power", false, "Enable main power test mode")
 	var heartbeatTimeout, offUpdateTime uint
 	flag.UintVar(&heartbeatTimeout, "heartbeat-timeout", 40, "Heartbeat timeout for standby mode in seconds")
 	flag.UintVar(&offUpdateTime, "off-update-time", 1800, "Update time when disabled in seconds (30 minutes)")
@@ -95,8 +94,12 @@ func main() {
 		batteryConfig.Readers[1].Role = battery.BatteryRoleActive
 	}
 
+	if disableBattery1 {
+		batteryConfig.Readers[1].Enabled = false
+	}
+
 	// Log version information at startup
-	stdLogger.Printf("Battery service v2 starting (git: %s, built: %s)", gitRevision, buildTime)
+	stdLogger.Printf("Battery service starting (version: %s, built: %s)", gitRevision, buildTime)
 
 	// Create battery service
 	service, err := battery.NewService(config, batteryConfig, stdLogger, battery.LogLevel(serviceLogLevel), debugMode)
@@ -108,13 +111,11 @@ func main() {
 		stdLogger.Fatalf("Failed to start battery service: %v", err)
 	}
 
-	stdLogger.Printf("Battery service v2 started with %d readers", len(batteryConfig.Readers))
-
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	stdLogger.Printf("Shutting down battery service v2...")
+	stdLogger.Printf("Shutting down battery service...")
 
 	service.Stop()
 }

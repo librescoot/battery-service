@@ -116,7 +116,7 @@ type BMSData struct {
 	LowSOC            bool                `json:"low_soc"`
 	State             BMSState            `json:"state"`
 	SerialNumber      string              `json:"serial_number"`
-	ManuDate          string              `json:"manu_date"`
+	ManufacturingDate string              `json:"manufacturing_date"`
 	CycleCount        uint                `json:"cycle_count"`
 	RemainingCapacity uint                `json:"remaining_capacity"`
 	FullCapacity      uint                `json:"full_capacity"`
@@ -143,12 +143,6 @@ const (
 	BMSMinSOC                = 0
 )
 
-// Heartbeat intervals
-const (
-	HeartbeatIntervalActiveStandby = 40 * time.Second
-	HeartbeatIntervalInactive      = 30 * time.Minute
-)
-
 // Discovery polling intervals (milliseconds)
 const (
 	DiscoveryPollFast = 100  // seatbox open
@@ -166,7 +160,6 @@ const (
 type ServiceConfig struct {
 	RedisServerAddress       string
 	RedisServerPort          uint16
-	TestMainPower            bool
 	HeartbeatTimeout         time.Duration
 	OffUpdateTime            time.Duration
 	DangerouslyIgnoreSeatbox bool
@@ -233,7 +226,6 @@ type BatteryReader struct {
 	restartChan chan struct{} // Preemption mechanism
 
 	// Timer management
-	stateTimer       *time.Timer
 	heartbeatTimer   *time.Timer
 	heartbeatRunning bool
 
@@ -241,14 +233,12 @@ type BatteryReader struct {
 	vehicleStateChan chan VehicleState
 	seatboxLockChan  chan bool
 	enabledChan      chan bool
-	tagEventChan     <-chan hal.TagEvent
 
 	// State tracking
 	enabled                  bool
 	vehicleState             VehicleState
 	seatboxLockClosed        bool
 	latchedSeatboxLockClosed bool
-	justInserted             bool
 	justOpened               bool
 	lastCmdTime              time.Time
 	initComplete             InitComplete
@@ -256,8 +246,7 @@ type BatteryReader struct {
 	tagsDiscovered           bool
 
 	// Fault management
-	faultDebounceTimers map[BMSFault]*time.Timer
-	faultStates         map[BMSFault]*FaultState
+	faultStates map[BMSFault]*FaultState
 
 	// Recovery tracking
 	commFailureCount   int

@@ -5,41 +5,9 @@ import (
 	"time"
 )
 
-func (r *BatteryReader) batteryEmpty() bool {
-	return r.data.LowSOC && r.data.Charge <= BMSMinSOC
-}
-
-func (r *BatteryReader) checkInactive() bool {
-	correct := (r.data.State == BMSStateAsleep) || (r.data.State == BMSStateIdle)
-	r.setFault(BMSFaultBMSNotFollowingCmd, !correct)
-	return correct
-}
-
-func (r *BatteryReader) checkStateCorrect(raiseFault bool) bool {
-	var correct bool
-	if r.enabled && !r.batteryEmpty() {
-		correct = (r.data.State == BMSStateActive)
-	} else {
-		correct = (r.data.State == BMSStateAsleep) || (r.data.State == BMSStateIdle)
-	}
-
-	if raiseFault {
-		tryingToSwitchOnWithLowSOCOrFault := r.enabled &&
-			(r.data.LowSOC || r.data.FaultCode != 0)
-
-		faultCriteria := !correct &&
-			!tryingToSwitchOnWithLowSOCOrFault &&
-			r.data.EmptyOr0Data == 0
-
-		r.setFault(BMSFaultBMSNotFollowingCmd, faultCriteria)
-	}
-
-	return correct
-}
-
 func (r *BatteryReader) takeInhibitor() {
 	if r.suspendInhibitor != nil && r.suspendInhibitor.IsActive() {
-		r.logger.Debug(fmt.Sprintf("Inhibitor already acquired"))
+		r.logger.Debug("Inhibitor already acquired")
 		return
 	}
 
@@ -52,7 +20,7 @@ func (r *BatteryReader) takeInhibitor() {
 		)
 		if err == nil {
 			r.suspendInhibitor = inhibitor
-			r.logger.Debug(fmt.Sprintf("Inhibitor acquired"))
+			r.logger.Debug("Inhibitor acquired")
 			return
 		}
 
@@ -79,7 +47,7 @@ func (r *BatteryReader) releaseInhibitor() {
 		return
 	}
 
-	r.logger.Debug(fmt.Sprintf("Releasing inhibitor"))
+	r.logger.Debug("Releasing inhibitor")
 
 	if err := r.suspendInhibitor.Release(); err != nil {
 		r.logger.Warn(fmt.Sprintf("Failed to release inhibitor: %v", err))
