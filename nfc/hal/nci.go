@@ -80,12 +80,6 @@ const (
 	nciRFTechNFCAPassivePoll uint8 = 0x00
 )
 
-// NCI RF deactivation types
-const (
-	nciRFDeactivationTypeIdle  uint8 = 0x00
-	nciRFDeactivationTypeSleep uint8 = 0x01
-)
-
 // NCI Packet Header
 type nciHeader struct {
 	MT_PBF_GID uint8 // Message Type (5 bits) | Packet Boundary Flag (1 bit) | Group ID (2 bits)

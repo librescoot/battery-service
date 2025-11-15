@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/redis/go-redis/v9"
@@ -15,7 +16,7 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 	s := &Service{
 		config:        config,
 		batteryConfig: batteryConfig,
-		logger:        NewLogger(logger, logLevel),
+		logger:        slog.New(NewServiceHandler(logger.Writer(), logLevel)),
 		stdLogger:     logger,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -35,13 +36,13 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 	var activeReadersCreated bool
 	for i, readerConfig := range batteryConfig.Readers {
 		if !readerConfig.Enabled {
-			s.logger.Infof("Reader %d is disabled in configuration", readerConfig.Index)
+			s.logger.Info(fmt.Sprintf("Reader %d is disabled in configuration", readerConfig.Index))
 			continue
 		}
 
 		reader, err := NewBatteryReader(readerConfig.Index, readerConfig.Role, readerConfig.DeviceName, readerConfig.LogLevel, s)
 		if err != nil {
-			s.logger.Errorf("Failed to create reader %d: %v", readerConfig.Index, err)
+			s.logger.Error(fmt.Sprintf("Failed to create reader %d: %v", readerConfig.Index, err))
 			continue
 		}
 		s.readers[i] = reader
@@ -59,25 +60,27 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 }
 
 func (s *Service) Start() error {
-	s.logger.Infof("Starting battery service v2")
+	s.logger.Info("Starting battery service")
+
+	s.loadIgnoreSeatboxSetting()
 
 	go s.runRedisSubscriber()
 
 	for _, reader := range s.readers {
 		if reader != nil {
 			if err := reader.Start(); err != nil {
-				s.logger.Errorf("Failed to start reader %d: %v", reader.index, err)
+				s.logger.Error(fmt.Sprintf("Failed to start reader %d: %v", reader.index, err))
 				continue
 			}
 		}
 	}
 
-	s.logger.Infof("Battery service v2 started successfully")
+	s.logger.Info("Battery service started successfully")
 	return nil
 }
 
 func (s *Service) Stop() {
-	s.logger.Infof("Stopping battery service v2")
+	s.logger.Info("Stopping battery service")
 
 	s.cancel()
 
@@ -98,7 +101,7 @@ func (s *Service) Stop() {
 		s.redis.Close()
 	}
 
-	s.logger.Infof("Battery service v2 stopped")
+	s.logger.Info("Battery service stopped")
 }
 
 func (s *Service) SetBatteryEnabled(index int, enabled bool) error {
@@ -111,31 +114,32 @@ func (s *Service) SetBatteryEnabled(index int, enabled bool) error {
 }
 
 func (s *Service) runRedisSubscriber() {
-	s.logger.Infof("Starting Redis subscriber for channels: vehicle:state, vehicle:seatbox:lock")
+	s.logger.Info("Starting Redis subscriber for channels: vehicle(state, seatbox:lock), settings")
 
 	pubsub := s.redis.Subscribe(s.ctx,
 		"vehicle",
+		"settings",
 	)
 	defer pubsub.Close()
 
 	_, err := pubsub.Receive(s.ctx)
 	if err != nil {
-		s.logger.Errorf("Failed to establish Redis subscription: %v", err)
-		s.logger.Fatalf("Redis connection failed, exiting to allow systemd restart")
+		s.logger.Error(fmt.Sprintf("Failed to establish Redis subscription: %v", err))
+		s.stdLogger.Fatal("Redis connection failed, exiting to allow systemd restart")
 	}
-	s.logger.Infof("Redis subscription established successfully")
+	s.logger.Info("Redis subscription established successfully")
 
 	ch := pubsub.Channel()
-	s.logger.Debugf("Listening for Redis messages...")
+	s.logger.Debug("Listening for Redis messages...")
 
 	for {
 		select {
 		case msg := <-ch:
 			if msg == nil {
-				s.logger.Errorf("Redis channel closed unexpectedly")
-				s.logger.Fatalf("Redis connection lost, exiting to allow systemd restart")
+				s.logger.Error("Redis channel closed unexpectedly")
+				s.stdLogger.Fatal("Redis connection lost, exiting to allow systemd restart")
 			}
-			s.logger.Debugf("Received Redis message: channel=%s, payload=%s", msg.Channel, msg.Payload)
+			s.logger.Debug(fmt.Sprintf("Received Redis message: channel=%s, payload=%s", msg.Channel, msg.Payload))
 
 			switch msg.Channel {
 			case "vehicle":
@@ -145,12 +149,16 @@ func (s *Service) runRedisSubscriber() {
 				case "seatbox:lock":
 					s.handleSeatboxUpdate()
 				}
+			case "settings":
+				if msg.Payload == "battery.ignore-seatbox" {
+					s.handleIgnoreSeatboxSettingChange()
+				}
 			default:
-				s.logger.Warnf("Unknown Redis channel: %s", msg.Channel)
+				s.logger.Warn(fmt.Sprintf("Unknown Redis channel: %s", msg.Channel))
 			}
 
 		case <-s.ctx.Done():
-			s.logger.Infof("Redis subscriber context cancelled")
+			s.logger.Info("Redis subscriber context cancelled")
 			return
 		}
 	}
@@ -159,12 +167,12 @@ func (s *Service) runRedisSubscriber() {
 func (s *Service) handleVehicleStateMessage() {
 	vehicleState, err := s.redis.HGet(s.ctx, "vehicle", "state").Result()
 	if err != nil {
-		s.logger.Errorf("Failed to fetch vehicle state: %v", err)
+		s.logger.Error(fmt.Sprintf("Failed to fetch vehicle state: %v", err))
 		return
 	}
 
 	newState := VehicleState(vehicleState)
-	s.logger.Infof("Vehicle state changed: %s", newState)
+	s.logger.Info(fmt.Sprintf("Vehicle state changed: %s", newState))
 
 	s.vehicleState = newState
 
@@ -178,16 +186,62 @@ func (s *Service) handleVehicleStateMessage() {
 func (s *Service) handleSeatboxUpdate() {
 	seatboxLock, err := s.redis.HGet(s.ctx, "vehicle", "seatbox:lock").Result()
 	if err != nil {
-		s.logger.Errorf("Failed to fetch seatbox lock state: %v", err)
+		s.logger.Error(fmt.Sprintf("Failed to fetch seatbox lock state: %v", err))
 		return
 	}
 
 	closed := (seatboxLock == "closed")
-	s.logger.Infof("Seatbox lock changed: %s (closed=%t)", seatboxLock, closed)
+	s.logger.Info(fmt.Sprintf("Seatbox lock changed: %s (closed=%t)", seatboxLock, closed))
 
 	for _, reader := range s.readers {
 		if reader != nil {
 			reader.SendSeatboxLockChange(closed)
+		}
+	}
+}
+
+func (s *Service) loadIgnoreSeatboxSetting() {
+	setting, err := s.redis.HGet(s.ctx, "settings", "battery.ignore-seatbox").Result()
+	if err != nil {
+		if err != redis.Nil {
+			s.logger.Warn(fmt.Sprintf("Failed to load battery.ignore-seatbox setting: %v", err))
+		}
+		return
+	}
+
+	if setting != "true" && setting != "false" {
+		s.logger.Warn(fmt.Sprintf("Invalid battery.ignore-seatbox value: %q (must be 'true' or 'false')", setting))
+		return
+	}
+
+	enabled := (setting == "true")
+	s.config.DangerouslyIgnoreSeatbox = enabled
+	s.logger.Info(fmt.Sprintf("Loaded battery.ignore-seatbox setting: %t", enabled))
+}
+
+func (s *Service) handleIgnoreSeatboxSettingChange() {
+	setting, err := s.redis.HGet(s.ctx, "settings", "battery.ignore-seatbox").Result()
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to fetch battery.ignore-seatbox setting: %v", err))
+		return
+	}
+
+	if setting != "true" && setting != "false" {
+		s.logger.Warn(fmt.Sprintf("Invalid battery.ignore-seatbox value: %q (must be 'true' or 'false')", setting))
+		return
+	}
+
+	enabled := (setting == "true")
+	oldValue := s.config.DangerouslyIgnoreSeatbox
+	s.config.DangerouslyIgnoreSeatbox = enabled
+
+	s.logger.Info(fmt.Sprintf("Battery ignore-seatbox setting changed: %t -> %t", oldValue, enabled))
+
+	// Notify all active readers to re-evaluate their enabled state
+	for _, reader := range s.readers {
+		if reader != nil && reader.role == BatteryRoleActive {
+			// Trigger a restart to apply the new seatbox ignore setting
+			reader.triggerRestart()
 		}
 	}
 }

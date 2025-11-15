@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"battery-service/battery/fsm"
 	"battery-service/nfc/hal"
 )
 
@@ -13,7 +14,7 @@ func (r *BatteryReader) deinitializeNFC() {
 	if r.hal != nil {
 		r.hal.Deinitialize()
 	}
-	r.service.logger.Infof("Battery %d: NFC deinitialized", r.index)
+	r.logger.Info("NFC deinitialized")
 }
 
 func (r *BatteryReader) startDiscovery() bool {
@@ -22,42 +23,47 @@ func (r *BatteryReader) startDiscovery() bool {
 		pollPeriod = DiscoveryPollSlow
 	}
 
-	r.service.logger.Debugf("Battery %d: Starting discovery with poll period %d ms", r.index, pollPeriod)
+	r.logger.Debug(fmt.Sprintf("Starting discovery with poll period %d ms", pollPeriod))
 	if err := r.hal.StartDiscovery(pollPeriod); err != nil {
 		// Check for semantic error (status 0x06) which indicates cold boot condition
 		if strings.Contains(err.Error(), "status: 06") {
-			r.service.logger.Warnf("Battery %d: Discovery failed with semantic error (cold boot condition), attempting reinitialization", r.index)
+			r.logger.Warn("Discovery failed with semantic error (cold boot condition), attempting reinitialization")
 			// Attempt full reinitialization once
 			if reinitErr := r.hal.FullReinitialize(); reinitErr != nil {
-				r.service.logger.Errorf("Battery %d: Reinitialization failed: %v", r.index, reinitErr)
+				r.logger.Error(fmt.Sprintf("Reinitialization failed: %v", reinitErr))
 				r.handleNFCError(reinitErr)
 				return false
 			}
 			// Try starting discovery again after reinitialization
 			if err := r.hal.StartDiscovery(pollPeriod); err != nil {
-				r.service.logger.Errorf("Battery %d: Failed to start discovery after reinitialization: %v", r.index, err)
+				r.logger.Error(fmt.Sprintf("Failed to start discovery after reinitialization: %v", err))
 				r.handleNFCError(err)
 				return false
 			}
-			r.service.logger.Infof("Battery %d: Discovery started successfully after reinitialization", r.index)
+			r.logger.Info("Discovery started successfully after reinitialization")
 			return true
 		}
-		r.service.logger.Errorf("Battery %d: Failed to start discovery: %v", r.index, err)
+		r.logger.Error(fmt.Sprintf("Failed to start discovery: %v", err))
 		r.handleNFCError(err)
 		return false
 	}
-	r.service.logger.Debugf("Battery %d: Discovery started successfully", r.index)
+	r.logger.Debug("Discovery started successfully")
 	return true
 }
 
 func (r *BatteryReader) stopDiscovery() {
+	r.logger.Debug("Stopping discovery")
 	if err := r.hal.StopDiscovery(); err != nil {
 		if strings.Contains(err.Error(), "invalid state for stopping discovery") {
+			r.logger.Debug("Discovery already stopped")
 			r.tagsDiscovered = false
 			return
 		}
-		r.service.logger.Warnf("Battery %d: Failed to stop discovery: %v", r.index, err)
+		// Handle HAL errors from stop_discovery (triggers reinit if I2C stuck)
+		r.logger.Warn(fmt.Sprintf("Failed to stop discovery: %v", err))
+		r.handleNFCError(err)
 	}
+	r.logger.Debug("Discovery stopped successfully")
 	r.tagsDiscovered = false
 }
 
@@ -70,24 +76,48 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 		return false
 	}
 
-	timeout := time.Now().Add(3 * time.Second)
-	for time.Now().Before(timeout) {
-		tags, err := r.hal.DetectTags()
-		if err != nil {
-			r.service.logger.Warnf("Battery %d: Tag detection error during discovery: %v", r.index, err)
-			r.handleNFCError(err)
-			return false
-		}
-		if len(tags) > 0 {
-			r.service.logger.Debugf("Battery %d: Battery tag discovered", r.index)
-			r.tagsDiscovered = true
-			return true
-		}
-		time.Sleep(50 * time.Millisecond)
+	// Synchronous blocking wait for tag
+	tags, err := r.hal.DetectTags()
+	if err != nil {
+		r.logger.Warn(fmt.Sprintf("Failed to detect tags: %v", err))
+		r.handleNFCError(err)
+		return false
 	}
 
-	r.service.logger.Warnf("Battery %d: Tag discovery timeout", r.index)
-	return false
+	if len(tags) == 0 {
+		r.logger.Warn("DetectTags returned no tags")
+		// If we previously had a tag present and now detect no tags, treat as tag departure
+		if r.previousTagPresent {
+			r.logger.Info("Tag departed (no tags detected)")
+			r.previousTagPresent = false
+			r.tagsDiscovered = false
+			if r.isInHierarchy(fsm.StateTagPresent) {
+				r.handleDeparture()
+				r.fsm.SendEvent(fsm.TagDepartedEvent{})
+			}
+		}
+		return false
+	}
+
+	r.tagsDiscovered = true
+	r.previousTagPresent = true
+	r.logger.Debug(fmt.Sprintf("Tag arrived: %X", tags[0].ID))
+
+	return true
+}
+
+func (r *BatteryReader) pollForTagArrival() {
+	r.nfcMu.Lock()
+	defer r.nfcMu.Unlock()
+
+	// Poll for tag arrival in tag_absent state
+	tags, err := r.hal.DetectTags()
+	if err == nil && len(tags) > 0 {
+		r.tagsDiscovered = true
+		r.previousTagPresent = true
+		r.logger.Debug(fmt.Sprintf("Tag arrived: %X", tags[0].ID))
+		r.fsm.SendEvent(fsm.TagArrivedEvent{})
+	}
 }
 
 func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
@@ -104,7 +134,7 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 					return data, nil
 				}
 				if r.service.debug {
-					r.service.logger.Debugf("Battery %d: Read verification mismatch at 0x%04X, retry %d", r.index, address, retry)
+					r.logger.Debug(fmt.Sprintf("Read verification mismatch at 0x%04X, retry %d", address, retry))
 				}
 			}
 			checkBuffer = make([]byte, len(data))
@@ -122,77 +152,79 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 		// Arbiter busy - retry with SelectTag(0)
 		if isArbiterBusyError(err) {
 			if r.service.debug {
-				r.service.logger.Debugf("Battery %d: Arbiter busy at 0x%04X, calling SelectTag(0) (retry %d)", r.index, address, retry)
+				r.logger.Debug(fmt.Sprintf("Arbiter busy at 0x%04X, calling SelectTag(0) (retry %d)", address, retry))
 			}
 			if err := r.hal.SelectTag(0); err != nil {
-				// Only treat as tag departed if SelectTag explicitly returns ErrTagDeparted
 				if isTagDepartedError(err) {
 					return nil, err
 				}
-				// Other SelectTag errors (e.g., timeout) - log and continue retry
-				r.service.logger.Warnf("Battery %d: SelectTag failed: %v, continuing retry", r.index, err)
-				// Don't continue - this retry failed, try the whole read again
+				r.logger.Warn(fmt.Sprintf("SelectTag failed: %v, continuing retry", err))
 			}
-			// Reset verification state on arbiter busy
 			check = false
 			continue
 		}
 
 		if r.service.debug {
-			r.service.logger.Debugf("Battery %d: Read error at 0x%04X: %v (retry %d)", r.index, address, err, retry)
+			r.logger.Debug(fmt.Sprintf("Read error at 0x%04X: %v (retry %d)", address, err, retry))
 		}
 	}
 
 	if lastErr != nil {
-		return nil, fmt.Errorf("read failed after %d retries: %w", maxRetries, lastErr)
+		return nil, lastErr
 	}
 	return nil, fmt.Errorf("read failed after %d retries", maxRetries)
 }
 
 func (r *BatteryReader) readStatus() bool {
-	if !r.discoverBatteryTag() {
-		r.service.logger.Warnf("Battery %d: Failed to discover tag before reading status", r.index)
-		return false
+	r.nfcMu.Lock()
+	defer r.nfcMu.Unlock()
+
+	// Only start discovery if not already discovered
+	if !r.tagsDiscovered {
+		if !r.discoverBatteryTag() {
+			return false
+		}
 	}
+	// If already discovered, proceed directly to read
 
 	status0, err := r.readWithVerification(0x0300)
 	if err != nil {
-		r.service.logger.Warnf("Battery %d: Failed to read status0: %v", r.index, err)
+		r.logger.Warn(fmt.Sprintf("Failed to read status0: %v", err))
 		r.handleNFCError(err)
 		return false
 	}
 
 	status1, err := r.readWithVerification(0x0310)
 	if err != nil {
-		r.service.logger.Warnf("Battery %d: Failed to read status1: %v", r.index, err)
+		r.logger.Warn(fmt.Sprintf("Failed to read status1: %v", err))
 		r.handleNFCError(err)
 		return false
 	}
 
 	status2, err := r.readWithVerification(0x0320)
 	if err != nil {
-		r.service.logger.Warnf("Battery %d: Failed to read status2: %v", r.index, err)
+		r.logger.Warn(fmt.Sprintf("Failed to read status2: %v", err))
 		r.handleNFCError(err)
 		return false
 	}
 
 	if r.service.debug {
-		r.service.logger.Debugf("Battery %d: STATUS0 raw BEFORE parsing: %x", r.index, status0)
-		r.service.logger.Debugf("Battery %d: STATUS1 raw BEFORE parsing: %x", r.index, status1)
-		r.service.logger.Debugf("Battery %d: STATUS2 raw BEFORE parsing: %x", r.index, status2)
+		r.logger.Debug(fmt.Sprintf("STATUS0 raw: %x", status0))
+		r.logger.Debug(fmt.Sprintf("STATUS1 raw: %x", status1))
+		r.logger.Debug(fmt.Sprintf("STATUS2 raw: %x", status2))
 		if len(status1) >= 4 {
 			state := uint32(status1[0]) | uint32(status1[1])<<8 | uint32(status1[2])<<16 | uint32(status1[3])<<24
-			r.service.logger.Debugf("Battery %d: Raw state bytes STATUS1[0-3]: %02x %02x %02x %02x = 0x%08x (%s)",
-				r.index, status1[0], status1[1], status1[2], status1[3], state, BMSState(state))
+			r.logger.Debug(fmt.Sprintf("Raw state bytes STATUS1[0-3]: %02x %02x %02x %02x = 0x%08x (%s)",
+				status1[0], status1[1], status1[2], status1[3], state, BMSState(state)))
 		}
 	}
 
 	r.parseStatusData(status0, status1, status2)
 
-	r.service.logger.Infof("Battery %d: state=%s, voltage=%dmV, current=%dmA, charge=%d%%, temp=[%d,%d,%d,%d]°C (%s), soh=%d%%, cycles=%d, sn=%s, fw=%s",
-		r.index, r.data.State.String(), r.data.Voltage, r.data.Current, r.data.Charge,
+	r.logger.Info(fmt.Sprintf("Status: state=%s, voltage=%dmV, current=%dmA, charge=%d%%, temp=[%d,%d,%d,%d]°C (%s), soh=%d%%, cycles=%d, sn=%s, fw=%s",
+		r.data.State.String(), r.data.Voltage, r.data.Current, r.data.Charge,
 		r.data.Temperature[0], r.data.Temperature[1], r.data.Temperature[2], r.data.Temperature[3],
-		r.temperatureStateString(), r.data.StateOfHealth, r.data.CycleCount, r.data.SerialNumber, r.data.FwVersion)
+		r.temperatureStateString(), r.data.StateOfHealth, r.data.CycleCount, r.data.SerialNumber, r.data.FwVersion))
 
 	r.setFault(BMSFaultBMSCommsError, false)
 	r.setFault(BMSFaultBMSZeroData, false)
@@ -209,11 +241,18 @@ func (r *BatteryReader) readStatus() bool {
 	return true
 }
 
-func (r *BatteryReader) writeCommand(cmd BMSCommand) {
-	if !r.discoverBatteryTag() {
-		r.service.logger.Warnf("Battery %d: Failed to discover tag before writing command", r.index)
-		return
+func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
+	r.nfcMu.Lock()
+	defer r.nfcMu.Unlock()
+
+	// Only start discovery if not already discovered
+	if !r.tagsDiscovered {
+		if !r.discoverBatteryTag() {
+			r.stopDiscovery()
+			return
+		}
 	}
+	// If already discovered, proceed directly to write
 
 	r.takeInhibitor()
 	defer r.releaseInhibitor()
@@ -233,7 +272,7 @@ func (r *BatteryReader) writeCommand(cmd BMSCommand) {
 			r.updateLastCmdTime()
 			r.commFailureCount = 0
 			r.lastSuccessfulComm = time.Now()
-			r.service.logger.Infof("Battery %d: Sent command %s", r.index, cmd)
+			r.logger.Info(fmt.Sprintf("Sent command: %s", cmd))
 			r.stopDiscovery()
 			return
 		}
@@ -243,118 +282,79 @@ func (r *BatteryReader) writeCommand(cmd BMSCommand) {
 		// Arbiter busy - retry with SelectTag(0)
 		if isArbiterBusyError(err) {
 			if r.service.debug {
-				r.service.logger.Debugf("Battery %d: Arbiter busy writing command %s, calling SelectTag(0) (retry %d)", r.index, cmd, retry)
+				r.logger.Debug(fmt.Sprintf("Arbiter busy writing command %s, calling SelectTag(0) (retry %d)", cmd, retry))
 			}
 			if err := r.hal.SelectTag(0); err != nil {
-				// Only treat as tag departed if SelectTag explicitly returns ErrTagDeparted
 				if isTagDepartedError(err) {
 					lastErr = err
 					break
 				}
-				// Other SelectTag errors (e.g., timeout) - log and continue retry
-				r.service.logger.Warnf("Battery %d: SelectTag failed: %v, continuing retry", r.index, err)
+				r.logger.Warn(fmt.Sprintf("SelectTag failed: %v, continuing retry", err))
 			}
 			continue
 		}
 
-		// Other errors - don't retry
 		break
 	}
 
-	r.service.logger.Errorf("Battery %d: Failed to write command %s after %d retries: %v", r.index, cmd, maxRetries, lastErr)
+	r.logger.Error(fmt.Sprintf("Failed to write command %s after %d retries: %v", cmd, maxRetries, lastErr))
 	r.handleNFCError(lastErr)
 	r.stopDiscovery()
 }
 
-func (r *BatteryReader) writeCommandProtected(cmd BMSCommand) {
-	r.writeCommand(cmd)
-}
-
 func (r *BatteryReader) handleNFCError(err error) {
-	r.service.logger.Errorf("Battery %d: NFC communication error: %v", r.index, err)
+	r.logger.Error(fmt.Sprintf("NFC communication error: %v (type: %T)", err, err))
+	r.logger.Warn(fmt.Sprintf("Error type: isHALError=%t, isI2CError=%t, isNCIError=%t, isTransient=%t, isTagDeparted=%t",
+		isHALError(err), hal.IsI2CError(err), hal.IsNCIError(err), isTransientError(err), isTagDepartedError(err)))
 
 	// Handle tag departure - no fault, clean transition
 	if isTagDepartedError(err) {
-		r.service.logger.Infof("Battery %d: Tag departure detected", r.index)
-		if r.isIn(StateTagPresent) {
+		r.logger.Info("Tag departure detected")
+		if r.isInHierarchy(fsm.StateTagPresent) {
 			r.handleDeparture()
-			r.transitionTo(StateDiscoverTag)
+			r.fsm.SendEvent(fsm.TagDepartedEvent{})
 		}
 		r.previousTagPresent = false
 		return
 	}
 
-	// Handle multiple tags detected
 	if isMultipleTagsError(err) {
-		r.service.logger.Warnf("Battery %d: Multiple tags detected - retrying", r.index)
-		// Treat as transient - will retry on next discovery
+		r.logger.Warn("Multiple tags detected - retrying")
 		return
 	}
 
-	// Only set BMSCommsError and count failures for actual HAL errors
 	if isHALError(err) {
 		r.commFailureCount++
-		r.service.logger.Warnf("Battery %d: Communication failure %d: %v", r.index, r.commFailureCount, err)
-		r.setFault(BMSFaultBMSCommsError, true)
+		r.logger.Warn(fmt.Sprintf("Communication failure %d: %v", r.commFailureCount, err))
+
+		// Only set fault if we expected the battery to be present (in StateTagPresent hierarchy)
+		// Don't set fault during normal removal, absence, or reinit recovery
+		if r.isInHierarchy(fsm.StateTagPresent) {
+			r.setFault(BMSFaultBMSCommsError, true)
+			// Only trigger reinit if we expected battery to be present
+			r.fsm.SendEvent(fsm.ReinitEvent{})
+		}
 	} else {
-		// Transient errors - no fault, will be retried by caller
-		r.service.logger.Debugf("Battery %d: Transient error, retrying: %v", r.index, err)
+		r.logger.Debug(fmt.Sprintf("Transient error, retrying: %v", err))
 	}
 }
 
-// Error helper functions for cleaner error handling
-
 func isTagDepartedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if nfcErr, ok := err.(*hal.Error); ok && nfcErr.Code == hal.ErrTagDeparted {
-		return true
-	}
-	return strings.Contains(err.Error(), "tag departed")
+	return hal.IsTagDepartedError(err)
 }
 
 func isMultipleTagsError(err error) bool {
-	if err == nil {
-		return false
-	}
-	nfcErr, ok := err.(*hal.Error)
-	return ok && nfcErr.Code == hal.ErrMultipleTags
+	return hal.IsMultipleTagsError(err)
 }
 
 func isArbiterBusyError(err error) bool {
-	if err == nil {
-		return false
-	}
-	nfcErr, ok := err.(*hal.Error)
-	return ok && nfcErr.Code == hal.ErrArbiterBusy
+	return hal.IsArbiterBusyError(err)
 }
 
 func isTransientError(err error) bool {
-	return isArbiterBusyError(err)
+	return hal.IsTransientError(err)
 }
 
 func isHALError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// Tag departure is not a HAL error
-	if isTagDepartedError(err) {
-		return false
-	}
-
-	// Multiple tags is not a HAL error
-	if isMultipleTagsError(err) {
-		return false
-	}
-
-	// Transient errors are not HAL errors
-	if isTransientError(err) {
-		return false
-	}
-
-	// Everything else is considered a HAL error
-	return true
+	return hal.IsHALError(err)
 }
-

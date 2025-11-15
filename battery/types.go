@@ -3,12 +3,17 @@ package battery
 import (
 	"context"
 	"log"
+	"log/slog"
+	"sync"
 	"time"
 
+	"battery-service/battery/fsm"
 	"battery-service/nfc/hal"
 
 	"github.com/redis/go-redis/v9"
 )
+
+type fsmStateMachine = fsm.StateMachine
 
 type BMSState uint32
 
@@ -31,51 +36,6 @@ func (s BMSState) String() string {
 		return "active"
 	default:
 		return "unknown"
-	}
-}
-
-type BMSCommand uint32
-
-const (
-	BMSCmdNone              BMSCommand = 0
-	BMSCmdOn                BMSCommand = 0x50505050
-	BMSCmdOff               BMSCommand = 0xCAFEF00D
-	BMSCmdInsertedInScooter BMSCommand = 0x44414E41
-	BMSCmdSeatboxOpened     BMSCommand = 0x48525259
-	BMSCmdSeatboxClosed     BMSCommand = 0x4D4B4D4B
-	BMSCmdHeartbeatScooter  BMSCommand = 0x534E4A41
-	BMSCmdInsertedInCharger BMSCommand = 0x4D415856
-	BMSCmdHeartbeatCharger  BMSCommand = 0x4755494C
-	BMSCmdReadyToCharge     BMSCommand = 0x4D485249
-	BMSCmdReadyToScoot      BMSCommand = 0x4D484D54
-)
-
-func (c BMSCommand) String() string {
-	switch c {
-	case BMSCmdNone:
-		return "NONE"
-	case BMSCmdOn:
-		return "ON"
-	case BMSCmdOff:
-		return "OFF"
-	case BMSCmdInsertedInScooter:
-		return "INSERTED_IN_SCOOTER"
-	case BMSCmdSeatboxOpened:
-		return "SEATBOX_OPENED"
-	case BMSCmdSeatboxClosed:
-		return "SEATBOX_CLOSED"
-	case BMSCmdHeartbeatScooter:
-		return "HEARTBEAT_SCOOTER"
-	case BMSCmdInsertedInCharger:
-		return "INSERTED_IN_CHARGER"
-	case BMSCmdHeartbeatCharger:
-		return "HEARTBEAT_CHARGER"
-	case BMSCmdReadyToCharge:
-		return "READY_TO_CHARGE"
-	case BMSCmdReadyToScoot:
-		return "READY_TO_SCOOT"
-	default:
-		return "UNKNOWN"
 	}
 }
 
@@ -156,7 +116,7 @@ type BMSData struct {
 	LowSOC            bool                `json:"low_soc"`
 	State             BMSState            `json:"state"`
 	SerialNumber      string              `json:"serial_number"`
-	ManuDate          string              `json:"manu_date"`
+	ManufacturingDate string              `json:"manufacturing_date"`
 	CycleCount        uint                `json:"cycle_count"`
 	RemainingCapacity uint                `json:"remaining_capacity"`
 	FullCapacity      uint                `json:"full_capacity"`
@@ -183,12 +143,6 @@ const (
 	BMSMinSOC                = 0
 )
 
-// Heartbeat intervals
-const (
-	HeartbeatIntervalActiveStandby   = 40 * time.Second
-	HeartbeatIntervalInactive        = 30 * time.Minute
-)
-
 // Discovery polling intervals (milliseconds)
 const (
 	DiscoveryPollFast = 100  // seatbox open
@@ -206,7 +160,6 @@ const (
 type ServiceConfig struct {
 	RedisServerAddress       string
 	RedisServerPort          uint16
-	TestMainPower            bool
 	HeartbeatTimeout         time.Duration
 	OffUpdateTime            time.Duration
 	DangerouslyIgnoreSeatbox bool
@@ -234,7 +187,7 @@ type InitComplete struct {
 type Service struct {
 	config        *ServiceConfig
 	batteryConfig *BatteryConfiguration
-	logger        *Logger
+	logger        *slog.Logger
 	stdLogger     *log.Logger
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -251,14 +204,20 @@ type BatteryReader struct {
 	role       BatteryRole
 	deviceName string
 	logLevel   int
+	logger     *slog.Logger
 	service    *Service
 	ctx        context.Context
 
 	// NFC HAL - owned exclusively by this reader's goroutine
 	hal *hal.PN7150
 
-	// State machine
-	state        State
+	// Serializes NFC operations to prevent concurrent access
+	nfcMu sync.Mutex
+
+	// State machine (FSM-based)
+	fsm          *fsmStateMachine
+	fsmCtx       context.Context
+	fsmCancel    context.CancelFunc
 	data         BMSData
 	previousData BMSData
 
@@ -267,7 +226,6 @@ type BatteryReader struct {
 	restartChan chan struct{} // Preemption mechanism
 
 	// Timer management
-	stateTimer       *time.Timer
 	heartbeatTimer   *time.Timer
 	heartbeatRunning bool
 
@@ -275,14 +233,12 @@ type BatteryReader struct {
 	vehicleStateChan chan VehicleState
 	seatboxLockChan  chan bool
 	enabledChan      chan bool
-	tagEventChan     <-chan hal.TagEvent
 
 	// State tracking
 	enabled                  bool
 	vehicleState             VehicleState
 	seatboxLockClosed        bool
 	latchedSeatboxLockClosed bool
-	justInserted             bool
 	justOpened               bool
 	lastCmdTime              time.Time
 	initComplete             InitComplete
@@ -290,8 +246,7 @@ type BatteryReader struct {
 	tagsDiscovered           bool
 
 	// Fault management
-	faultDebounceTimers map[BMSFault]*time.Timer
-	faultStates         map[BMSFault]*FaultState
+	faultStates map[BMSFault]*FaultState
 
 	// Recovery tracking
 	commFailureCount   int

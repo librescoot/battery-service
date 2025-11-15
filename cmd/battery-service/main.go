@@ -34,7 +34,6 @@ func main() {
 	var redisPort uint
 	flag.UintVar(&redisPort, "redis-port", 6379, "Redis server port")
 
-	flag.BoolVar(&config.TestMainPower, "test-main-power", false, "Enable main power test mode")
 	var heartbeatTimeout, offUpdateTime uint
 	flag.UintVar(&heartbeatTimeout, "heartbeat-timeout", 40, "Heartbeat timeout for standby mode in seconds")
 	flag.UintVar(&offUpdateTime, "off-update-time", 1800, "Update time when disabled in seconds (30 minutes)")
@@ -44,12 +43,13 @@ func main() {
 
 	var device0, device1 string
 	var logLevel0, logLevel1 int
-	var battery1Active bool
+	var battery1Active, disableBattery1 bool
 	flag.StringVar(&device0, "device0", "/dev/pn5xx_i2c0", "Battery 0 NFC device")
 	flag.IntVar(&logLevel0, "log0", 3, "Battery 0 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
 	flag.StringVar(&device1, "device1", "/dev/pn5xx_i2c1", "Battery 1 NFC device")
 	flag.IntVar(&logLevel1, "log1", 3, "Battery 1 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG)")
 	flag.BoolVar(&battery1Active, "battery1-active", false, "Enable battery 1 as active in addition to battery 0 (default: inactive)")
+	flag.BoolVar(&disableBattery1, "disable-battery1", false, "Disable battery 1 reader entirely")
 
 	flag.Parse()
 
@@ -70,8 +70,6 @@ func main() {
 	} else {
 		stdLogger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds|log.Lmsgprefix)
 	}
-
-	logger := battery.NewLogger(stdLogger, battery.LogLevel(serviceLogLevel))
 
 	batteryConfig := &battery.BatteryConfiguration{
 		Readers: []battery.BatteryReaderConfig{
@@ -96,26 +94,28 @@ func main() {
 		batteryConfig.Readers[1].Role = battery.BatteryRoleActive
 	}
 
+	if disableBattery1 {
+		batteryConfig.Readers[1].Enabled = false
+	}
+
 	// Log version information at startup
-	logger.Infof("Battery service v2 starting (git: %s, built: %s)", gitRevision, buildTime)
+	stdLogger.Printf("Battery service starting (version: %s, built: %s)", gitRevision, buildTime)
 
 	// Create battery service
 	service, err := battery.NewService(config, batteryConfig, stdLogger, battery.LogLevel(serviceLogLevel), debugMode)
 	if err != nil {
-		logger.Fatalf("Failed to create battery service: %v", err)
+		stdLogger.Fatalf("Failed to create battery service: %v", err)
 	}
 
 	if err := service.Start(); err != nil {
-		logger.Fatalf("Failed to start battery service: %v", err)
+		stdLogger.Fatalf("Failed to start battery service: %v", err)
 	}
-
-	logger.Infof("Battery service v2 started with %d readers", len(batteryConfig.Readers))
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	logger.Infof("Shutting down battery service v2...")
+	stdLogger.Printf("Shutting down battery service...")
 
 	service.Stop()
 }
