@@ -124,6 +124,7 @@ func (sm *StateMachine) onEnterWaitArrival(ctx context.Context) {
 
 func (sm *StateMachine) onExitWaitArrival(ctx context.Context) {
 	sm.stopTimer("departure")
+	sm.actions.ReleaseInhibitor()
 }
 
 func (sm *StateMachine) onEnterTagAbsent(ctx context.Context) {
@@ -160,6 +161,7 @@ func (sm *StateMachine) onEnterTagAbsent(ctx context.Context) {
 
 func (sm *StateMachine) onExitTagAbsent(ctx context.Context) {
 	sm.stopTimer("check_reader")
+	sm.actions.ReleaseInhibitor()
 
 	sm.mu.Lock()
 	if sm.tagAbsentCancel != nil {
