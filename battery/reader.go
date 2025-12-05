@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"battery-service/battery/fsm"
-	"battery-service/nfc/hal"
+	"github.com/librescoot/pn7150"
 )
 
 func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel int, service *Service) (*BatteryReader, error) {
