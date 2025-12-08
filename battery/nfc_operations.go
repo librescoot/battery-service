@@ -91,9 +91,9 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 			r.logger.Info("Tag departed (no tags detected)")
 			r.previousTagPresent = false
 			r.tagsDiscovered = false
-			if r.isInHierarchy(fsm.StateTagPresent) {
+			if r.fsm.IsInState(fsm.StateTagPresent) {
 				r.handleDeparture()
-				r.fsm.SendEvent(fsm.TagDepartedEvent{})
+				r.fsm.SendEvent(fsm.EvTagDeparted)
 			}
 		}
 		return false
@@ -116,7 +116,7 @@ func (r *BatteryReader) pollForTagArrival() {
 		r.tagsDiscovered = true
 		r.previousTagPresent = true
 		r.logger.Debug(fmt.Sprintf("Tag arrived: %X", tags[0].ID))
-		r.fsm.SendEvent(fsm.TagArrivedEvent{})
+		r.fsm.SendEvent(fsm.EvTagArrived)
 	}
 }
 
@@ -310,9 +310,9 @@ func (r *BatteryReader) handleNFCError(err error) {
 	// Handle tag departure - no fault, clean transition
 	if isTagDepartedError(err) {
 		r.logger.Info("Tag departure detected")
-		if r.isInHierarchy(fsm.StateTagPresent) {
+		if r.fsm.IsInState(fsm.StateTagPresent) {
 			r.handleDeparture()
-			r.fsm.SendEvent(fsm.TagDepartedEvent{})
+			r.fsm.SendEvent(fsm.EvTagDeparted)
 		}
 		r.previousTagPresent = false
 		return
@@ -329,10 +329,10 @@ func (r *BatteryReader) handleNFCError(err error) {
 
 		// Only set fault if we expected the battery to be present (in StateTagPresent hierarchy)
 		// Don't set fault during normal removal, absence, or reinit recovery
-		if r.isInHierarchy(fsm.StateTagPresent) {
+		if r.fsm.IsInState(fsm.StateTagPresent) {
 			r.setFault(BMSFaultBMSCommsError, true)
 			// Only trigger reinit if we expected battery to be present
-			r.fsm.SendEvent(fsm.ReinitEvent{})
+			r.fsm.SendEvent(fsm.EvReinit)
 		}
 	} else {
 		r.logger.Debug(fmt.Sprintf("Transient error, retrying: %v", err))

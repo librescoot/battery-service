@@ -8,6 +8,10 @@ github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/r
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
 github.com/godbus/dbus/v5 v5.1.0 h1:4KLkAxT3aOY8Li4FRJe/KvhoNFFxo0m6fNuFUO8QJUk=
 github.com/godbus/dbus/v5 v5.1.0/go.mod h1:xhWf0FNVPg57R7Z0UbKHbJfkEywrmjJnf7w5xrFpKfA=
+github.com/librescoot/librefsm v0.1.0 h1:ugpSZHX4WNxO6ZqhuZYJGHAVg/qviayxEG28MWMzI2U=
+github.com/librescoot/librefsm v0.1.0/go.mod h1:2fZNHRvoQMCPVgGbb31vgawzMaaPyazAPIgQRCiQ+Qw=
+github.com/librescoot/pn7150 v0.1.0 h1:RAgrFhmgHWAJ/eBmB0cMnbU1R1DQj5WjGQtQLE4HnO0=
+github.com/librescoot/pn7150 v0.1.0/go.mod h1:x8ydpbm00u36BWKWfAxUtV87L0pVjuLL2I8rmm9f/jQ=
 github.com/redis/go-redis/v9 v9.7.0 h1:HhLSs+B6O021gwzl+locl0zEDnyNkxMtf/Z3NNBMa9E=
 github.com/redis/go-redis/v9 v9.7.0/go.mod h1:f6zhXITC7JUJIlPEiBOTXxJgPLdZcA93GewI7inzyWw=
 golang.org/x/sys v0.38.0 h1:3yZWxaJjBmCWXqhN1qh02AkOnCQ1poK6oF+a7xWL6Gc=

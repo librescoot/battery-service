@@ -1,146 +1,35 @@
 package fsm
 
-type State int
+import "github.com/librescoot/librefsm"
 
+// State represents a state in the battery FSM
+type State = librefsm.StateID
+
+// State constants
 const (
-	StateRoot State = iota
-	StateInit
-	StateNFCReaderOff
-	StateNFCReaderOn
-	StateDiscoverTag
-	StateWaitArrival
-	StateTagAbsent
-	StateTagPresent
-	StateCondCheckPresence
-	StateCheckPresence
-	StateWaitLastCmd
-	StateCondIgnoreSeatbox
-	StateCondSeatboxLock
-	StateHeartbeat
-	StateHeartbeatActions
-	StateSendClosed
-	StateSendOnOff
-	StateCondStateOK
-	StateWaitUpdate
-	StateSendInsertedClosed
-	StateCondJustInserted
-	StateCondOff
-	StateSendOff
-	StateSendOpened
-	StateSendInsertedOpen
+	StateRoot               State = "root"
+	StateInit               State = "init"
+	StateNFCReaderOff       State = "nfc_reader_off"
+	StateNFCReaderOn        State = "nfc_reader_on"
+	StateDiscoverTag        State = "discover_tag"
+	StateWaitArrival        State = "wait_arrival"
+	StateTagAbsent          State = "tag_absent"
+	StateTagPresent         State = "tag_present"
+	StateCondCheckPresence  State = "cond_check_presence"
+	StateCheckPresence      State = "check_presence"
+	StateWaitLastCmd        State = "wait_last_cmd"
+	StateCondIgnoreSeatbox  State = "cond_ignore_seatbox"
+	StateCondSeatboxLock    State = "cond_seatbox_lock"
+	StateHeartbeat          State = "heartbeat"
+	StateHeartbeatActions   State = "heartbeat_actions"
+	StateSendClosed         State = "send_closed"
+	StateSendOnOff          State = "send_on_off"
+	StateCondStateOK        State = "cond_state_ok"
+	StateWaitUpdate         State = "wait_update"
+	StateSendInsertedClosed State = "send_inserted_closed"
+	StateCondJustInserted   State = "cond_just_inserted"
+	StateCondOff            State = "cond_off"
+	StateSendOff            State = "send_off"
+	StateSendOpened         State = "send_opened"
+	StateSendInsertedOpen   State = "send_inserted_open"
 )
-
-func (s State) String() string {
-	switch s {
-	case StateRoot:
-		return "root"
-	case StateInit:
-		return "init"
-	case StateNFCReaderOff:
-		return "nfc_reader_off"
-	case StateNFCReaderOn:
-		return "nfc_reader_on"
-	case StateDiscoverTag:
-		return "discover_tag"
-	case StateWaitArrival:
-		return "wait_arrival"
-	case StateTagAbsent:
-		return "tag_absent"
-	case StateTagPresent:
-		return "tag_present"
-	case StateCondCheckPresence:
-		return "cond_check_presence"
-	case StateCheckPresence:
-		return "check_presence"
-	case StateWaitLastCmd:
-		return "wait_last_cmd"
-	case StateCondIgnoreSeatbox:
-		return "cond_ignore_seatbox"
-	case StateCondSeatboxLock:
-		return "cond_seatbox_lock"
-	case StateHeartbeat:
-		return "heartbeat"
-	case StateHeartbeatActions:
-		return "heartbeat_actions"
-	case StateSendClosed:
-		return "send_closed"
-	case StateSendOnOff:
-		return "send_on_off"
-	case StateCondStateOK:
-		return "cond_state_ok"
-	case StateWaitUpdate:
-		return "wait_update"
-	case StateSendInsertedClosed:
-		return "send_inserted_closed"
-	case StateCondJustInserted:
-		return "cond_just_inserted"
-	case StateCondOff:
-		return "cond_off"
-	case StateSendOff:
-		return "send_off"
-	case StateSendOpened:
-		return "send_opened"
-	case StateSendInsertedOpen:
-		return "send_inserted_open"
-	default:
-		return "unknown"
-	}
-}
-
-func (s State) Parent() State {
-	switch s {
-	case StateInit, StateNFCReaderOff, StateNFCReaderOn:
-		return StateRoot
-	case StateDiscoverTag, StateTagPresent:
-		return StateNFCReaderOn
-	case StateWaitArrival, StateTagAbsent:
-		return StateDiscoverTag
-	case StateCondCheckPresence, StateCheckPresence, StateWaitLastCmd,
-		StateCondIgnoreSeatbox, StateCondSeatboxLock, StateHeartbeat,
-		StateCondJustInserted, StateCondOff, StateSendOff,
-		StateSendOpened, StateSendInsertedOpen:
-		return StateTagPresent
-	case StateHeartbeatActions:
-		return StateHeartbeat
-	case StateSendClosed, StateSendOnOff, StateCondStateOK,
-		StateWaitUpdate, StateSendInsertedClosed:
-		return StateHeartbeatActions
-	default:
-		return StateRoot
-	}
-}
-
-func (s State) IsCondition() bool {
-	switch s {
-	case StateCondCheckPresence, StateCondIgnoreSeatbox, StateCondSeatboxLock,
-		StateCondStateOK, StateCondJustInserted, StateCondOff:
-		return true
-	default:
-		return false
-	}
-}
-
-type JumpEvaluator interface {
-	EvaluateJump(state State) State
-}
-
-func (s State) HasJump() bool {
-	return s.IsCondition()
-}
-
-func (s State) DefaultChild() State {
-	switch s {
-	case StateNFCReaderOn:
-		return StateDiscoverTag
-	case StateDiscoverTag:
-		return StateWaitArrival
-	case StateTagPresent:
-		return StateCondCheckPresence
-	case StateHeartbeat:
-		return StateHeartbeatActions
-	case StateHeartbeatActions:
-		return StateSendClosed
-	default:
-		return StateRoot
-	}
-}

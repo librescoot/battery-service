@@ -153,9 +153,9 @@ func (r *BatteryReader) StartHeartbeatTimer() {
 		if r.fsm != nil {
 			if !r.CheckStateCorrect() {
 				r.logger.Info("State mismatch detected during heartbeat - triggering departure")
-				r.fsm.SendEvent(fsm.TagDepartedEvent{})
+				r.fsm.SendEvent(fsm.EvTagDeparted)
 			} else {
-				r.fsm.SendEvent(fsm.HeartbeatTimeoutEvent{})
+				r.fsm.SendEvent(fsm.EvHeartbeatTimeout)
 			}
 		}
 	})
