@@ -107,7 +107,7 @@ func (r *BatteryReader) setFault(fault BMSFault, present bool) {
 
 func (r *BatteryReader) activateFault(fault BMSFault, config FaultConfig) {
 	// For communication faults, only activate if battery is expected to be present
-	if fault == BMSFaultBMSCommsError && !r.isInHierarchy(fsm.StateTagPresent) {
+	if fault == BMSFaultBMSCommsError && !r.fsm.IsInState(fsm.StateTagPresent) {
 		r.logger.Debug(fmt.Sprintf("Skipping fault %s activation - battery not in StateTagPresent hierarchy", config.Description))
 		return
 	}
