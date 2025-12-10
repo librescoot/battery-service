@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"battery-service/battery/fsm"
-	"battery-service/nfc/hal"
+	"github.com/librescoot/pn7150"
 )
 
 func (r *BatteryReader) deinitializeNFC() {
