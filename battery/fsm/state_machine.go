@@ -10,13 +10,15 @@ import (
 
 // Timing constants
 const (
-	timeCmd                      = 400 * time.Millisecond
-	timeReinit                   = 2 * time.Second
-	timeDeparture                = 500 * time.Millisecond
-	timeCheckReader              = 10 * time.Second
-	timeCheckPresence            = 10 * time.Second
-	timeHeartbeatIntervalScooter = 30 * time.Second
-	timeMaintPollInterval        = 5 * time.Minute
+	timeCmd           = 400 * time.Millisecond
+	timeReinit        = 2 * time.Second
+	timeDeparture     = 500 * time.Millisecond
+	timeCheckReader   = 10 * time.Second
+	timeCheckPresence = 10 * time.Second
+	// Note: Heartbeat interval is dynamic - see GetHeartbeatInterval()
+	// Active batteries: 40s (configurable via --heartbeat-timeout)
+	// Inactive batteries: 30min (configurable via --off-update-time)
+	timeMaintPollInterval = 5 * time.Minute
 )
 
 // BatteryActions is the interface for battery hardware operations
@@ -38,6 +40,7 @@ type BatteryActions interface {
 	GetRemainingCmdTime() time.Duration
 	GetOpenedTime() time.Duration
 	GetInsertedTime() time.Duration
+	GetHeartbeatInterval() time.Duration
 	IsInactive() bool
 	ZeroRetryCounters()
 	StopHeartbeatTimer()
@@ -373,7 +376,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// Send Closed - send seatbox closed command
 		State(StateSendClosed,
 			librefsm.WithParent(StateHeartbeatActions),
-			librefsm.WithTimeout(timeCmd, EvClosedTimeout, readStatusAction),
+			librefsm.WithTimeout(timeCmd, EvClosedTimeout),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				d.actions.WriteCommand(BMSCmdSeatboxClosed)
@@ -422,9 +425,8 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			librefsm.WithParent(StateHeartbeatActions),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
-				d.actions.StartHeartbeatTimer()
-				d.actions.StopTimerIfBatteryEmpty()
 				d.actions.ReleaseInhibitor()
+				// Timer is managed by parent StateHeartbeat
 				return nil
 			}),
 		).
@@ -432,7 +434,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// Send Inserted Closed - send inserted command when state incorrect
 		State(StateSendInsertedClosed,
 			librefsm.WithParent(StateHeartbeatActions),
-			librefsm.WithTimeout(timeCmd, EvInsertedClosedTimeout, readStatusAction),
+			librefsm.WithTimeout(timeCmd, EvInsertedClosedTimeout),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				d.actions.WriteCommand(BMSCmdInsertedInScooter)
@@ -487,7 +489,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 				d := c.Data.(*fsmData)
 				d.actions.WriteCommand(BMSCmdSeatboxOpened)
 				openedTime := d.actions.GetOpenedTime()
-				c.StartTimer("opened", openedTime, librefsm.Event{ID: EvOpenedTimeout}, readStatusAction)
+				c.StartTimer("opened", openedTime, librefsm.Event{ID: EvOpenedTimeout})
 				return nil
 			}),
 		).
@@ -568,7 +570,8 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateSendOnOff, EvOnOffTimeout, StateCondStateOK).
 
 		// Wait Update transitions
-		Transition(StateWaitUpdate, EvHeartbeatTimeout, StateHeartbeatActions).
+		// Transition to StateHeartbeat (not HeartbeatActions) to restart the timer
+		Transition(StateWaitUpdate, EvHeartbeatTimeout, StateHeartbeat).
 
 		// Send Inserted Closed transitions
 		Transition(StateSendInsertedClosed, EvInsertedClosedTimeout, StateSendClosed).
@@ -590,12 +593,24 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateSendOpened, EvReinit, StateNFCReaderOff).
 		Transition(StateSendOpened, EvTagDeparted, StateDiscoverTag).
 		Transition(StateSendOpened, EvRestart, StateTagPresent).
-		Transition(StateSendOpened, EvOpenedTimeout, StateSendInsertedOpen).
+		Transition(StateSendOpened, EvOpenedTimeout, StateSendInsertedOpen,
+			librefsm.WithAction(func(c *librefsm.Context) error {
+				d := c.Data.(*fsmData)
+				d.justOpened = false
+				return nil
+			}),
+		).
 
 		Transition(StateSendInsertedOpen, EvReinit, StateNFCReaderOff).
 		Transition(StateSendInsertedOpen, EvTagDeparted, StateDiscoverTag).
 		Transition(StateSendInsertedOpen, EvRestart, StateTagPresent).
-		Transition(StateSendInsertedOpen, EvInsertedOpenTimeout, StateSendOpened).
+		Transition(StateSendInsertedOpen, EvInsertedOpenTimeout, StateSendOpened,
+			librefsm.WithAction(func(c *librefsm.Context) error {
+				d := c.Data.(*fsmData)
+				d.justInserted = false
+				return nil
+			}),
+		).
 
 		// Set initial state
 		Initial(StateInit)
