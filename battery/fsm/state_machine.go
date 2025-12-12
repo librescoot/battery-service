@@ -543,6 +543,11 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			}),
 		).
 
+		// Tag Present parent transitions (apply to ALL child states including condition states)
+		Transition(StateTagPresent, EvTagDeparted, StateDiscoverTag).
+		Transition(StateTagPresent, EvReinit, StateNFCReaderOff).
+		Transition(StateTagPresent, EvRestart, StateTagPresent).
+
 		// Check Presence transitions
 		Transition(StateCheckPresence, EvReinit, StateNFCReaderOff).
 		Transition(StateCheckPresence, EvTagDeparted, StateDiscoverTag).
