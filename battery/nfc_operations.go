@@ -91,10 +91,8 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 			r.logger.Info("Tag departed (no tags detected)")
 			r.previousTagPresent = false
 			r.tagsDiscovered = false
-			if r.fsm.IsInState(fsm.StateTagPresent) {
-				r.handleDeparture()
-				r.fsm.SendEvent(fsm.EvTagDeparted)
-			}
+			r.handleDeparture()
+			r.fsm.SendEvent(fsm.EvTagDeparted) // Always send, let FSM decide what to do
 		}
 		return false
 	}
@@ -190,6 +188,7 @@ func (r *BatteryReader) readStatus() bool {
 	status0, err := r.readWithVerification(0x0300)
 	if err != nil {
 		r.logger.Warn(fmt.Sprintf("Failed to read status0: %v", err))
+		r.setFault(BMSFaultBMSCommsError, true)
 		r.handleNFCError(err)
 		return false
 	}
@@ -197,6 +196,7 @@ func (r *BatteryReader) readStatus() bool {
 	status1, err := r.readWithVerification(0x0310)
 	if err != nil {
 		r.logger.Warn(fmt.Sprintf("Failed to read status1: %v", err))
+		r.setFault(BMSFaultBMSCommsError, true)
 		r.handleNFCError(err)
 		return false
 	}
@@ -204,6 +204,7 @@ func (r *BatteryReader) readStatus() bool {
 	status2, err := r.readWithVerification(0x0320)
 	if err != nil {
 		r.logger.Warn(fmt.Sprintf("Failed to read status2: %v", err))
+		r.setFault(BMSFaultBMSCommsError, true)
 		r.handleNFCError(err)
 		return false
 	}
@@ -298,6 +299,7 @@ func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
 	}
 
 	r.logger.Error(fmt.Sprintf("Failed to write command %s after %d retries: %v", cmd, maxRetries, lastErr))
+	r.setFault(BMSFaultBMSCommsError, true)
 	r.handleNFCError(lastErr)
 	r.stopDiscovery()
 }
@@ -310,11 +312,9 @@ func (r *BatteryReader) handleNFCError(err error) {
 	// Handle tag departure - no fault, clean transition
 	if isTagDepartedError(err) {
 		r.logger.Info("Tag departure detected")
-		if r.fsm.IsInState(fsm.StateTagPresent) {
-			r.handleDeparture()
-			r.fsm.SendEvent(fsm.EvTagDeparted)
-		}
 		r.previousTagPresent = false
+		r.handleDeparture()
+		r.fsm.SendEvent(fsm.EvTagDeparted) // Always send, let FSM decide what to do
 		return
 	}
 
@@ -326,14 +326,8 @@ func (r *BatteryReader) handleNFCError(err error) {
 	if isHALError(err) {
 		r.commFailureCount++
 		r.logger.Warn(fmt.Sprintf("Communication failure %d: %v", r.commFailureCount, err))
-
-		// Only set fault if we expected the battery to be present (in StateTagPresent hierarchy)
-		// Don't set fault during normal removal, absence, or reinit recovery
-		if r.fsm.IsInState(fsm.StateTagPresent) {
-			r.setFault(BMSFaultBMSCommsError, true)
-			// Only trigger reinit if we expected battery to be present
-			r.fsm.SendEvent(fsm.EvReinit)
-		}
+		// Always send EvReinit - let FSM decide what to do based on current state
+		r.fsm.SendEvent(fsm.EvReinit)
 	} else {
 		r.logger.Debug(fmt.Sprintf("Transient error, retrying: %v", err))
 	}

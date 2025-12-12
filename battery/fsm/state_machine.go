@@ -523,6 +523,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// Discover Tag transitions
 		Transition(StateDiscoverTag, EvReinit, StateNFCReaderOff).
 		Transition(StateDiscoverTag, EvTagArrived, StateTagPresent).
+		Transition(StateDiscoverTag, EvTagDeparted, StateTagAbsent).
 
 		// Wait Arrival transitions
 		Transition(StateWaitArrival, EvReinit, StateNFCReaderOff).
@@ -549,20 +550,12 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateTagPresent, EvRestart, StateTagPresent).
 
 		// Check Presence transitions
-		Transition(StateCheckPresence, EvReinit, StateNFCReaderOff).
-		Transition(StateCheckPresence, EvTagDeparted, StateDiscoverTag).
 		Transition(StateCheckPresence, EvCheckPresenceTimeout, StateCondCheckPresence).
 
 		// Wait Last Cmd transitions
-		Transition(StateWaitLastCmd, EvReinit, StateNFCReaderOff).
-		Transition(StateWaitLastCmd, EvTagDeparted, StateDiscoverTag).
-		Transition(StateWaitLastCmd, EvRestart, StateTagPresent).
 		Transition(StateWaitLastCmd, EvLastCmdTimeout, StateCondIgnoreSeatbox).
 
 		// Heartbeat transitions (apply to all heartbeat substates via hierarchy)
-		Transition(StateHeartbeat, EvReinit, StateNFCReaderOff).
-		Transition(StateHeartbeat, EvTagDeparted, StateDiscoverTag).
-		Transition(StateHeartbeat, EvRestart, StateTagPresent).
 		Transition(StateHeartbeat, EvSeatboxOpened, StateCondJustInserted).
 
 		// HeartbeatActions transitions
@@ -581,23 +574,9 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// Send Inserted Closed transitions
 		Transition(StateSendInsertedClosed, EvInsertedClosedTimeout, StateSendClosed).
 
-		// Seatbox open state transitions
-		Transition(StateCondJustInserted, EvReinit, StateNFCReaderOff).
-		Transition(StateCondJustInserted, EvTagDeparted, StateDiscoverTag).
-		Transition(StateCondJustInserted, EvRestart, StateTagPresent).
-
-		Transition(StateCondOff, EvReinit, StateNFCReaderOff).
-		Transition(StateCondOff, EvTagDeparted, StateDiscoverTag).
-		Transition(StateCondOff, EvRestart, StateTagPresent).
-
-		Transition(StateSendOff, EvReinit, StateNFCReaderOff).
-		Transition(StateSendOff, EvTagDeparted, StateDiscoverTag).
-		Transition(StateSendOff, EvRestart, StateTagPresent).
+		// Seatbox open state transitions and timeouts
 		Transition(StateSendOff, EvOffTimeout, StateCondOff).
 
-		Transition(StateSendOpened, EvReinit, StateNFCReaderOff).
-		Transition(StateSendOpened, EvTagDeparted, StateDiscoverTag).
-		Transition(StateSendOpened, EvRestart, StateTagPresent).
 		Transition(StateSendOpened, EvOpenedTimeout, StateSendInsertedOpen,
 			librefsm.WithAction(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
@@ -606,9 +585,6 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			}),
 		).
 
-		Transition(StateSendInsertedOpen, EvReinit, StateNFCReaderOff).
-		Transition(StateSendInsertedOpen, EvTagDeparted, StateDiscoverTag).
-		Transition(StateSendInsertedOpen, EvRestart, StateTagPresent).
 		Transition(StateSendInsertedOpen, EvInsertedOpenTimeout, StateSendOpened,
 			librefsm.WithAction(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
