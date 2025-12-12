@@ -4,7 +4,7 @@ go 1.22
 
 require (
 	github.com/godbus/dbus/v5 v5.1.0
-	github.com/librescoot/librefsm v0.3.1
+	github.com/librescoot/librefsm v0.3.2
 	github.com/librescoot/pn7150 v0.1.2
 	github.com/redis/go-redis/v9 v9.7.0
 )
