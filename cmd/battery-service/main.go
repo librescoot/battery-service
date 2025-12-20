@@ -12,11 +12,7 @@ import (
 	"battery-service/battery"
 )
 
-// Build-time variables set by linker
-var (
-	gitRevision = "unknown"
-	buildTime   = "unknown"
-)
+var version = "dev"
 
 func main() {
 	config := &battery.ServiceConfig{}
@@ -55,7 +51,7 @@ func main() {
 
 	// Show version and exit if requested
 	if showVersion {
-		fmt.Printf("battery-service version %s (built %s)\n", gitRevision, buildTime)
+		fmt.Printf("battery-service version %s\n", version)
 		os.Exit(0)
 	}
 
@@ -98,8 +94,7 @@ func main() {
 		batteryConfig.Readers[1].Enabled = false
 	}
 
-	// Log version information at startup
-	stdLogger.Printf("Battery service starting (version: %s, built: %s)", gitRevision, buildTime)
+	stdLogger.Printf("librescoot-battery %s starting", version)
 
 	// Create battery service
 	service, err := battery.NewService(config, batteryConfig, stdLogger, battery.LogLevel(serviceLogLevel), debugMode)

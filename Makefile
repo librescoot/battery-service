@@ -1,11 +1,12 @@
-.PHONY: build clean build-arm build-amd64 lint test
+.PHONY: build clean build-arm build-amd64 build-host dist fmt deps lint test
 
 BINARY_NAME=battery-service
 BUILD_DIR=bin
+VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 GIT_REVISION=$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_DIRTY=$(shell git diff --quiet || echo "-dirty")
 VERSION_FLAGS=-X main.gitRevision=$(GIT_REVISION)$(GIT_DIRTY) -X main.buildTime=$(shell date -u +%Y%m%d-%H%M%S)
-LDFLAGS=-ldflags "-w -s -extldflags '-static' $(VERSION_FLAGS)"
+LDFLAGS=-ldflags "-w -s -X main.version=$(VERSION) -extldflags '-static' $(VERSION_FLAGS)"
 CMD_DIR=cmd/battery-service
 
 build:
@@ -38,4 +39,22 @@ dev-build:
 # Build for the current platform (useful for testing)
 build-native:
 	mkdir -p $(BUILD_DIR)
-	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR) 
+	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR)
+
+# Build for local architecture (development)
+build-host:
+	mkdir -p $(BUILD_DIR)
+	go build -o $(BUILD_DIR)/$(BINARY_NAME)-host ./$(CMD_DIR)
+
+# Build stripped ARM binary for distribution
+dist:
+	mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR)
+
+# Format code
+fmt:
+	go fmt ./...
+
+# Download and tidy dependencies
+deps:
+	go mod download && go mod tidy 
