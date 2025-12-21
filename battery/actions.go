@@ -143,7 +143,7 @@ func (r *BatteryReader) StopHeartbeatTimer() {
 
 func (r *BatteryReader) StartHeartbeatTimer() {
 	r.heartbeatRunning = true
-	interval := r.getHeartbeatInterval()
+	interval := r.GetHeartbeatInterval()
 
 	if r.heartbeatTimer != nil {
 		r.heartbeatTimer.Stop()
@@ -152,10 +152,9 @@ func (r *BatteryReader) StartHeartbeatTimer() {
 	r.heartbeatTimer = time.AfterFunc(interval, func() {
 		if r.fsm != nil {
 			if !r.CheckStateCorrect() {
-				r.logger.Info("State mismatch detected during heartbeat - triggering departure")
-				r.fsm.SendEvent(fsm.TagDepartedEvent{})
+				r.fsm.SendEvent(fsm.EvTagDeparted)
 			} else {
-				r.fsm.SendEvent(fsm.HeartbeatTimeoutEvent{})
+				r.fsm.SendEvent(fsm.EvHeartbeatTimeout)
 			}
 		}
 	})
@@ -176,7 +175,7 @@ func (r *BatteryReader) IsRoleInactive() bool {
 	return r.role == BatteryRoleInactive
 }
 
-func (r *BatteryReader) getHeartbeatInterval() time.Duration {
+func (r *BatteryReader) GetHeartbeatInterval() time.Duration {
 	if r.role == BatteryRoleInactive {
 		return r.service.config.OffUpdateTime
 	}

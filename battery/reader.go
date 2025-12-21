@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"battery-service/battery/fsm"
-	"battery-service/nfc/hal"
+	"github.com/librescoot/pn7150"
 )
 
 func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel int, service *Service) (*BatteryReader, error) {
@@ -127,9 +127,9 @@ func (r *BatteryReader) handleRestart() {
 	currentState := r.fsm.State()
 	r.logger.Debug(fmt.Sprintf("Restart requested - currentState=%s", currentState))
 
-	if r.isInHierarchy(fsm.StateTagPresent) && !r.isInHierarchy(fsm.StateCheckPresence) {
+	if r.fsm.IsInState(fsm.StateTagPresent) && !r.fsm.IsInState(fsm.StateCheckPresence) {
 		r.logger.Debug("Sending restart event")
-		r.fsm.SendEvent(fsm.RestartEvent{})
+		r.fsm.SendEvent(fsm.EvRestart)
 	} else {
 		r.logger.Debug("Restart skipped - not in valid state")
 	}
@@ -145,7 +145,7 @@ func (r *BatteryReader) handleVehicleStateChange(newState VehicleState) {
 		!r.seatboxLockClosed &&
 		r.latchedSeatboxLockClosed {
 		r.latchedSeatboxLockClosed = false
-		if r.isInHierarchy(fsm.StateTagPresent) {
+		if r.fsm.IsInState(fsm.StateTagPresent) {
 			r.triggerRestart()
 		}
 	}
@@ -178,7 +178,7 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 		if r.enabled != newEnabled {
 			r.logger.Debug(fmt.Sprintf("Active battery enabled state changing from %t to %t", r.enabled, newEnabled))
 			r.enabled = newEnabled
-			if r.isInHierarchy(fsm.StateTagPresent) {
+			if r.fsm.IsInState(fsm.StateTagPresent) {
 				r.logger.Debug("Triggering restart due to enabled state change")
 				r.triggerRestart()
 			}
@@ -194,7 +194,7 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 		r.latchedSeatboxLockClosed = false
 	}
 
-	if r.latchedSeatboxLockClosed != oldLatch && r.isInHierarchy(fsm.StateTagPresent) {
+	if r.latchedSeatboxLockClosed != oldLatch && r.fsm.IsInState(fsm.StateTagPresent) {
 		r.logger.Debug(fmt.Sprintf("Latch changed (%t -> %t) and in StateTagPresent - triggering restart",
 			oldLatch, r.latchedSeatboxLockClosed))
 		r.triggerRestart()
@@ -207,9 +207,9 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 	// Only send seatbox events to FSM if not ignoring seatbox
 	if !r.service.config.DangerouslyIgnoreSeatbox {
 		if !closed && oldSeatboxLockClosed {
-			r.fsm.SendEvent(fsm.SeatboxOpenedEvent{})
+			r.fsm.SendEvent(fsm.EvSeatboxOpened)
 		} else if closed && !oldSeatboxLockClosed {
-			r.fsm.SendEvent(fsm.SeatboxClosedEvent{})
+			r.fsm.SendEvent(fsm.EvSeatboxClosed)
 		}
 	}
 
@@ -219,7 +219,7 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 func (r *BatteryReader) handleEnabledChange(enabled bool) {
 	if r.enabled != enabled {
 		r.enabled = enabled
-		if r.isInHierarchy(fsm.StateTagPresent) {
+		if r.fsm.IsInState(fsm.StateTagPresent) {
 			r.triggerRestart()
 		}
 	}
@@ -230,7 +230,7 @@ func (r *BatteryReader) checkInitComplete() {
 		r.initComplete.SeatboxLock &&
 		r.fsm.State() == fsm.StateInit {
 		r.logger.Info("Initialization complete, starting NFC operations")
-		r.fsm.SendEvent(fsm.InitCompleteEvent{})
+		r.fsm.SendEvent(fsm.EvInitComplete)
 	}
 }
 
@@ -239,17 +239,6 @@ func (r *BatteryReader) triggerRestart() {
 	case r.restartChan <- struct{}{}:
 	default:
 	}
-}
-
-func (r *BatteryReader) isInHierarchy(target fsm.State) bool {
-	current := r.fsm.State()
-	for current != fsm.StateRoot {
-		if current == target {
-			return true
-		}
-		current = current.Parent()
-	}
-	return target == fsm.StateRoot
 }
 
 func (r *BatteryReader) SetEnabled(enabled bool) {

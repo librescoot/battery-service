@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"battery-service/battery/fsm"
-	"battery-service/nfc/hal"
+	"github.com/librescoot/pn7150"
 
 	"github.com/redis/go-redis/v9"
 )
