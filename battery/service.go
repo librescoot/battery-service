@@ -151,7 +151,7 @@ func (s *Service) runRedisSubscriber() {
 					s.handleSeatboxUpdate()
 				}
 			case "settings":
-				if msg.Payload == "battery.ignore-seatbox" {
+				if msg.Payload == "scooter.battery-ignores-seatbox" {
 					s.handleIgnoreSeatboxSettingChange()
 				} else if msg.Payload == "scooter.dual-battery" {
 					s.handleDualBatterySettingChange()
@@ -204,33 +204,33 @@ func (s *Service) handleSeatboxUpdate() {
 }
 
 func (s *Service) loadIgnoreSeatboxSetting() {
-	setting, err := s.redis.HGet(s.ctx, "settings", "battery.ignore-seatbox").Result()
+	setting, err := s.redis.HGet(s.ctx, "settings", "scooter.battery-ignores-seatbox").Result()
 	if err != nil {
 		if err != redis.Nil {
-			s.logger.Warn(fmt.Sprintf("Failed to load battery.ignore-seatbox setting: %v", err))
+			s.logger.Warn(fmt.Sprintf("Failed to load scooter.battery-ignores-seatbox setting: %v", err))
 		}
 		return
 	}
 
 	if setting != "true" && setting != "false" {
-		s.logger.Warn(fmt.Sprintf("Invalid battery.ignore-seatbox value: %q (must be 'true' or 'false')", setting))
+		s.logger.Warn(fmt.Sprintf("Invalid scooter.battery-ignores-seatbox value: %q (must be 'true' or 'false')", setting))
 		return
 	}
 
 	enabled := (setting == "true")
 	s.config.DangerouslyIgnoreSeatbox = enabled
-	s.logger.Info(fmt.Sprintf("Loaded battery.ignore-seatbox setting: %t", enabled))
+	s.logger.Info(fmt.Sprintf("Loaded scooter.battery-ignores-seatbox setting: %t", enabled))
 }
 
 func (s *Service) handleIgnoreSeatboxSettingChange() {
-	setting, err := s.redis.HGet(s.ctx, "settings", "battery.ignore-seatbox").Result()
+	setting, err := s.redis.HGet(s.ctx, "settings", "scooter.battery-ignores-seatbox").Result()
 	if err != nil {
-		s.logger.Error(fmt.Sprintf("Failed to fetch battery.ignore-seatbox setting: %v", err))
+		s.logger.Error(fmt.Sprintf("Failed to fetch scooter.battery-ignores-seatbox setting: %v", err))
 		return
 	}
 
 	if setting != "true" && setting != "false" {
-		s.logger.Warn(fmt.Sprintf("Invalid battery.ignore-seatbox value: %q (must be 'true' or 'false')", setting))
+		s.logger.Warn(fmt.Sprintf("Invalid scooter.battery-ignores-seatbox value: %q (must be 'true' or 'false')", setting))
 		return
 	}
 
@@ -238,7 +238,7 @@ func (s *Service) handleIgnoreSeatboxSettingChange() {
 	oldValue := s.config.DangerouslyIgnoreSeatbox
 	s.config.DangerouslyIgnoreSeatbox = enabled
 
-	s.logger.Info(fmt.Sprintf("Battery ignore-seatbox setting changed: %t -> %t", oldValue, enabled))
+	s.logger.Info(fmt.Sprintf("Scooter battery-ignores-seatbox setting changed: %t -> %t", oldValue, enabled))
 
 	// Notify all active readers to re-evaluate their enabled state
 	for _, reader := range s.readers {
