@@ -63,6 +63,7 @@ func (s *Service) Start() error {
 	s.logger.Info("Starting battery service")
 
 	s.loadIgnoreSeatboxSetting()
+	s.loadDualBatterySetting()
 
 	go s.runRedisSubscriber()
 
@@ -152,6 +153,8 @@ func (s *Service) runRedisSubscriber() {
 			case "settings":
 				if msg.Payload == "battery.ignore-seatbox" {
 					s.handleIgnoreSeatboxSettingChange()
+				} else if msg.Payload == "scooter.dual-battery" {
+					s.handleDualBatterySettingChange()
 				}
 			default:
 				s.logger.Warn(fmt.Sprintf("Unknown Redis channel: %s", msg.Channel))
@@ -244,4 +247,89 @@ func (s *Service) handleIgnoreSeatboxSettingChange() {
 			reader.triggerRestart()
 		}
 	}
+}
+
+func (s *Service) loadDualBatterySetting() {
+	setting, err := s.redis.HGet(s.ctx, "settings", "scooter.dual-battery").Result()
+	if err != nil {
+		if err != redis.Nil {
+			s.logger.Warn(fmt.Sprintf("Failed to load scooter.dual-battery setting: %v", err))
+		}
+		return
+	}
+
+	if setting != "true" && setting != "false" {
+		s.logger.Warn(fmt.Sprintf("Invalid scooter.dual-battery value: %q (must be 'true' or 'false')", setting))
+		return
+	}
+
+	dualBattery := (setting == "true")
+
+	// Update battery 1 role based on setting
+	if len(s.batteryConfig.Readers) > 1 {
+		if dualBattery {
+			s.batteryConfig.Readers[1].Role = BatteryRoleActive
+		} else {
+			s.batteryConfig.Readers[1].Role = BatteryRoleInactive
+		}
+		s.logger.Info(fmt.Sprintf("Loaded scooter.dual-battery setting: %t (battery 1 role: %v)", dualBattery, s.batteryConfig.Readers[1].Role))
+	}
+}
+
+func (s *Service) handleDualBatterySettingChange() {
+	setting, err := s.redis.HGet(s.ctx, "settings", "scooter.dual-battery").Result()
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to fetch scooter.dual-battery setting: %v", err))
+		return
+	}
+
+	if setting != "true" && setting != "false" {
+		s.logger.Warn(fmt.Sprintf("Invalid scooter.dual-battery value: %q (must be 'true' or 'false')", setting))
+		return
+	}
+
+	dualBattery := (setting == "true")
+
+	// Check if battery 1 exists
+	if len(s.readers) <= 1 || s.readers[1] == nil {
+		s.logger.Warn("Battery 1 reader not available, cannot change dual-battery setting")
+		return
+	}
+
+	reader := s.readers[1]
+	oldRole := reader.role
+	newRole := BatteryRoleInactive
+	if dualBattery {
+		newRole = BatteryRoleActive
+	}
+
+	if oldRole == newRole {
+		s.logger.Debug(fmt.Sprintf("Battery dual-battery setting unchanged: %t (role: %v)", dualBattery, newRole))
+		return
+	}
+
+	reader.role = newRole
+	s.batteryConfig.Readers[1].Role = newRole
+
+	s.logger.Info(fmt.Sprintf("Scooter dual-battery setting changed: %v -> %v", oldRole, newRole))
+
+	// Update enabled state based on new role
+	if newRole == BatteryRoleInactive {
+		// Inactive batteries are always disabled
+		reader.SetEnabled(false)
+	} else {
+		// Active batteries follow seatbox state (unless ignoring seatbox)
+		if s.config.DangerouslyIgnoreSeatbox {
+			reader.SetEnabled(true)
+		} else {
+			seatboxLock, err := s.redis.HGet(s.ctx, "vehicle", "seatbox:lock").Result()
+			if err == nil {
+				closed := (seatboxLock == "closed")
+				reader.SetEnabled(closed)
+			}
+		}
+	}
+
+	// Trigger restart to apply the new role
+	reader.triggerRestart()
 }
