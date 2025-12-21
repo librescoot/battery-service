@@ -90,6 +90,10 @@ func (r *BatteryReader) setFault(fault BMSFault, present bool) {
 			})
 		}
 	} else {
+		// Only start reset process if fault was actually active
+		if !state.Present {
+			return
+		}
 		if config.DebounceTimeReset == 0 {
 			r.deactivateFault(fault, config)
 			state.Present = false
