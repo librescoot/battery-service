@@ -58,7 +58,6 @@ type fsmData struct {
 	justInserted         bool
 	justOpened           bool
 	latchedSeatboxClosed bool
-	lastOperationSuccess bool
 	tagAbsentCancel      context.CancelFunc
 }
 
@@ -127,11 +126,13 @@ func (sm *StateMachine) IsInState(id State) bool {
 	return sm.machine.IsInState(id)
 }
 
-// readStatusAction is a shared callback for reading battery status before timeout events
+// readStatusAction is a shared callback for reading battery status before timeout events.
+// Returns error to trigger retry (timer restarts), nil to proceed with transition.
 func readStatusAction(c *librefsm.Context) error {
 	d := c.Data.(*fsmData)
 	if err := d.actions.ReadStatus(); err != nil {
 		d.log.Debug("failed to read status", "error", err)
+		return err
 	}
 	return nil
 }
@@ -260,19 +261,14 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		ConditionState(StateCondCheckPresence,
 			func(c *librefsm.Context) librefsm.StateID {
 				d := c.Data.(*fsmData)
-				if d.lastOperationSuccess {
+				d.actions.TakeInhibitor()
+				d.actions.ZeroRetryCounters()
+				if d.actions.ReadStatus() == nil {
 					return StateWaitLastCmd
 				}
 				return StateCheckPresence
 			},
 			librefsm.WithParent(StateTagPresent),
-			librefsm.WithOnEnter(func(c *librefsm.Context) error {
-				d := c.Data.(*fsmData)
-				d.actions.TakeInhibitor()
-				d.actions.ZeroRetryCounters()
-				d.lastOperationSuccess = (d.actions.ReadStatus() == nil)
-				return nil
-			}),
 			librefsm.WithOnExit(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				d.actions.ReleaseInhibitor()
@@ -387,6 +383,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// Send On/Off - send on or off command based on enabled state
 		State(StateSendOnOff,
 			librefsm.WithParent(StateHeartbeatActions),
+			librefsm.WithTimeout(timeCmd, EvOnOffTimeout, readStatusAction),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				var cmd BMSCommand
@@ -396,7 +393,6 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 					cmd = BMSCmdOff
 				}
 				d.actions.WriteCommand(cmd)
-				c.StartTimer("on_off", timeCmd, librefsm.Event{ID: EvOnOffTimeout}, readStatusAction)
 				return nil
 			}),
 		).
@@ -565,6 +561,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateSendClosed, EvClosedTimeout, StateSendOnOff).
 
 		// Send OnOff transitions
+		// Callback returns error on read failure, which restarts timer (retry)
 		Transition(StateSendOnOff, EvOnOffTimeout, StateCondStateOK).
 
 		// Wait Update transitions
@@ -575,6 +572,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateSendInsertedClosed, EvInsertedClosedTimeout, StateSendClosed).
 
 		// Seatbox open state transitions and timeouts
+		// Callback returns error on read failure, which restarts timer (retry)
 		Transition(StateSendOff, EvOffTimeout, StateCondOff).
 
 		Transition(StateSendOpened, EvOpenedTimeout, StateSendInsertedOpen,
