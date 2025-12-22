@@ -127,11 +127,12 @@ func (sm *StateMachine) IsInState(id State) bool {
 }
 
 // readStatusAction is a shared callback for reading battery status before timeout events.
-// Returns error to trigger retry (timer restarts), nil to proceed with transition.
+// Returns error to block transition (EvRestart triggered as side-effect), nil to proceed.
 func readStatusAction(c *librefsm.Context) error {
 	d := c.Data.(*fsmData)
 	if err := d.actions.ReadStatus(); err != nil {
 		d.log.Debug("failed to read status", "error", err)
+		c.FSM.Send(librefsm.Event{ID: EvRestart})
 		return err
 	}
 	return nil
@@ -561,7 +562,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateSendClosed, EvClosedTimeout, StateSendOnOff).
 
 		// Send OnOff transitions
-		// Callback returns error on read failure, which restarts timer (retry)
+		// Callback returns error on read failure, which blocks transition and triggers restart
 		Transition(StateSendOnOff, EvOnOffTimeout, StateCondStateOK).
 
 		// Wait Update transitions
@@ -572,7 +573,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateSendInsertedClosed, EvInsertedClosedTimeout, StateSendClosed).
 
 		// Seatbox open state transitions and timeouts
-		// Callback returns error on read failure, which restarts timer (retry)
+		// Callback returns error on read failure, which blocks transition and triggers restart
 		Transition(StateSendOff, EvOffTimeout, StateCondOff).
 
 		Transition(StateSendOpened, EvOpenedTimeout, StateSendInsertedOpen,
