@@ -240,7 +240,6 @@ func (r *BatteryReader) checkInitComplete() {
 	if r.initComplete.VehicleState &&
 		r.initComplete.SeatboxLock &&
 		r.fsm.State() == fsm.StateInit {
-		r.logger.Info("Initialization complete, starting NFC operations")
 		r.fsm.SendEvent(fsm.EvInitComplete)
 	}
 }

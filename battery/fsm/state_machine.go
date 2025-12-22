@@ -508,7 +508,13 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// ================================================================
 
 		// Init transitions
-		Transition(StateInit, EvInitComplete, StateNFCReaderOn).
+		Transition(StateInit, EvInitComplete, StateNFCReaderOn,
+			librefsm.WithAction(func(c *librefsm.Context) error {
+				d := c.Data.(*fsmData)
+				d.log.Info("Initialization complete, starting NFC operations")
+				return nil
+			}),
+		).
 
 		// NFC Reader Off transitions
 		Transition(StateNFCReaderOff, EvReinit, StateNFCReaderOn).
