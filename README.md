@@ -1,8 +1,8 @@
-# MDB Battery Service
+# LibreScoot Battery Service
 
 [![CC BY-NC-SA 4.0][cc-by-nc-sa-shield]][cc-by-nc-sa]
 
-The MDB Battery Service is a critical component responsible for managing and monitoring battery systems through NFC communication. This service handles real-time battery state management, safety monitoring, and communication with the Redis messaging system.
+The LibreScoot Battery Service is a critical component responsible for managing and monitoring battery systems through NFC communication. This service handles real-time battery state management, safety monitoring, and communication with the Redis messaging system.
 
 ## Features
 
@@ -62,6 +62,10 @@ To run the service:
 - `--log`: Service-wide log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG, default: 3)
 - `--log0`: Battery 0 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG). Defaults to `--log` if not set.
 - `--log1`: Battery 1 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG). Defaults to `--log` if not set.
+- `--debug`: Enable debug logging for detailed NCI/DATA messages
+- `--battery1-active`: Enable battery 1 as active in addition to battery 0 (default: inactive)
+- `--disable-battery1`: Disable battery 1 reader entirely
+- `--dangerously-ignore-seatbox`: Keep active batteries active when seatbox opens (DANGEROUS)
 
 ## Logging
 
