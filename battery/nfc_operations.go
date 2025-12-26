@@ -119,7 +119,7 @@ func (r *BatteryReader) pollForTagArrival() {
 }
 
 func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
-	const maxRetries = 4
+	const maxRetries = 5
 	var checkBuffer []byte
 	check := false
 	var lastErr error
@@ -265,7 +265,7 @@ func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
 	cmdBytes[3] = byte(cmd >> 24)
 
 	// Retry logic for arbiter busy
-	const maxRetries = 3
+	const maxRetries = 5
 	var lastErr error
 	for retry := 0; retry < maxRetries; retry++ {
 		err := r.hal.WriteBinary(0x0330, cmdBytes)
