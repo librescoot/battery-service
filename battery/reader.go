@@ -8,6 +8,7 @@ import (
 
 	"battery-service/battery/fsm"
 	"github.com/librescoot/pn7150"
+	ipc "github.com/librescoot/redis-ipc"
 )
 
 func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel int, service *Service) (*BatteryReader, error) {
@@ -45,6 +46,16 @@ func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel i
 	}
 
 	reader.initializeFaultManagement()
+
+	// Initialize redis-ipc publishers and sets
+	channel := fmt.Sprintf("battery:%d", index)
+	reader.batteryPub = service.ipcClient.NewHashPublisher(channel)
+	reader.faultSet = service.ipcClient.NewFaultSet(
+		fmt.Sprintf("%s:fault", channel), // set key
+		channel,                           // publish channel
+		"fault",                           // publish payload
+	)
+	reader.faultStream = service.ipcClient.NewStreamPublisher("events:faults", ipc.WithMaxLen(1000))
 
 	fsmLogger := slog.New(NewFSMHandler(service.stdLogger.Writer(), LogLevel(logLevel), index))
 
@@ -255,7 +266,7 @@ func (r *BatteryReader) SendSeatboxLockChange(closed bool) {
 func (r *BatteryReader) fetchInitialRedisState() {
 	r.logger.Debug("Fetching initial Redis state from hashes")
 
-	vehicleState, err := r.service.redis.HGet(r.ctx, "vehicle", "state").Result()
+	vehicleState, err := r.service.ipcClient.HGet("vehicle", "state")
 	if err == nil {
 		r.logger.Debug(fmt.Sprintf("Found vehicle state: %s", vehicleState))
 		r.handleVehicleStateChange(VehicleState(vehicleState))
@@ -263,7 +274,7 @@ func (r *BatteryReader) fetchInitialRedisState() {
 		r.logger.Warn(fmt.Sprintf("No vehicle state in Redis hash: %v", err))
 	}
 
-	seatboxLock, err := r.service.redis.HGet(r.ctx, "vehicle", "seatbox:lock").Result()
+	seatboxLock, err := r.service.ipcClient.HGet("vehicle", "seatbox:lock")
 	if err == nil {
 		closed := (seatboxLock == "closed")
 		r.logger.Debug(fmt.Sprintf("Found seatbox lock state: %s (closed=%t)", seatboxLock, closed))
