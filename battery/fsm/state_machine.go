@@ -579,7 +579,18 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 
 		// Wait Update transitions
 		// Transition to StateHeartbeat (not HeartbeatActions) to restart the timer
-		Transition(StateWaitUpdate, EvHeartbeatTimeout, StateHeartbeat).
+		// State check moved here from timer callback to avoid race conditions
+		Transition(StateWaitUpdate, EvHeartbeatTimeout, StateHeartbeat,
+			librefsm.WithAction(func(c *librefsm.Context) error {
+				d := c.Data.(*fsmData)
+				if !d.actions.CheckStateCorrect() {
+					// BMS state doesn't match expected - trigger tag departure
+					d.log.Warn("State mismatch on heartbeat, triggering departure")
+					c.Send(librefsm.Event{ID: EvTagDeparted})
+				}
+				return nil
+			}),
+		).
 
 		// Send Inserted Closed transitions
 		Transition(StateSendInsertedClosed, EvInsertedClosedTimeout, StateSendClosed).

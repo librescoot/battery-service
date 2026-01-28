@@ -149,13 +149,11 @@ func (r *BatteryReader) StartHeartbeatTimer() {
 		r.heartbeatTimer.Stop()
 	}
 
+	// Timer callback only sends event - state check happens in FSM goroutine
+	// This avoids race conditions between timer goroutine and FSM/event loop
 	r.heartbeatTimer = time.AfterFunc(interval, func() {
 		if r.fsm != nil {
-			if !r.CheckStateCorrect() {
-				r.fsm.SendEvent(fsm.EvTagDeparted)
-			} else {
-				r.fsm.SendEvent(fsm.EvHeartbeatTimeout)
-			}
+			r.fsm.SendEvent(fsm.EvHeartbeatTimeout)
 		}
 	})
 }
