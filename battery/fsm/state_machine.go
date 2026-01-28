@@ -55,6 +55,7 @@ type BatteryActions interface {
 type fsmData struct {
 	actions              BatteryActions
 	log                  *slog.Logger
+	ctx                  context.Context // FSM context for cancellation
 	justInserted         bool
 	justOpened           bool
 	latchedSeatboxClosed bool
@@ -100,6 +101,10 @@ func New(actions BatteryActions, log *slog.Logger) *StateMachine {
 // Run starts the FSM event loop
 func (sm *StateMachine) Run(ctx context.Context) {
 	sm.log.Info("state machine started", "initial_state", StateInit)
+
+	// Store context in fsmData so state handlers can use it for cancellation
+	sm.data.ctx = ctx
+
 	if err := sm.machine.Start(ctx); err != nil {
 		sm.log.Error("Failed to start FSM", "error", err)
 		return
@@ -218,7 +223,8 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 				}
 
 				// Start polling goroutine for tag arrivals
-				pollCtx, cancel := context.WithCancel(context.Background())
+				// Derive from FSM context so goroutine stops when FSM stops
+				pollCtx, cancel := context.WithCancel(d.ctx)
 				d.tagAbsentCancel = cancel
 
 				go func() {
