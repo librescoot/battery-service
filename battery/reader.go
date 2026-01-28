@@ -300,6 +300,7 @@ func (r *BatteryReader) handleDeparture() {
 	r.data.Present = false
 
 	// Cancel any pending fault timers to prevent activation after departure
+	r.faultMu.Lock()
 	for _, state := range r.faultStates {
 		if state.SetTimer != nil {
 			state.SetTimer.Stop()
@@ -307,6 +308,7 @@ func (r *BatteryReader) handleDeparture() {
 			state.PendingSet = false
 		}
 	}
+	r.faultMu.Unlock()
 
 	r.sendStatusUpdate()
 }

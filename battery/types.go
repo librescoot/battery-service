@@ -246,6 +246,7 @@ type BatteryReader struct {
 	tagsDiscovered           bool
 
 	// Fault management
+	faultMu     sync.Mutex
 	faultStates map[BMSFault]*FaultState
 
 	// Recovery tracking

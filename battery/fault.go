@@ -49,6 +49,14 @@ func (r *BatteryReader) initializeFaultManagement() {
 }
 
 func (r *BatteryReader) setFault(fault BMSFault, present bool) {
+	r.faultMu.Lock()
+	defer r.faultMu.Unlock()
+	r.setFaultLocked(fault, present)
+}
+
+// setFaultLocked implements fault state changes. Must be called with faultMu held.
+// Timer callbacks and clearLesserFaults use this to avoid recursive locking.
+func (r *BatteryReader) setFaultLocked(fault BMSFault, present bool) {
 	config, exists := faultConfigs[fault]
 	if !exists {
 		r.logger.Warn(fmt.Sprintf("Unknown fault %d", fault))
@@ -78,29 +86,32 @@ func (r *BatteryReader) setFault(fault BMSFault, present bool) {
 
 	if present {
 		if config.DebounceTimeSet == 0 {
-			r.activateFault(fault, config)
+			r.activateFaultLocked(fault, config)
 			state.Present = true
 		} else {
 			state.PendingSet = true
 			state.SetTimer = time.AfterFunc(config.DebounceTimeSet, func() {
-				r.activateFault(fault, config)
+				r.faultMu.Lock()
+				defer r.faultMu.Unlock()
+				r.activateFaultLocked(fault, config)
 				state.Present = true
 				state.PendingSet = false
 				state.SetTimer = nil
 			})
 		}
 	} else {
-		// Only start reset process if fault was actually active
 		if !state.Present {
 			return
 		}
 		if config.DebounceTimeReset == 0 {
-			r.deactivateFault(fault, config)
+			r.deactivateFaultLocked(fault, config)
 			state.Present = false
 		} else {
 			state.PendingReset = true
 			state.ResetTimer = time.AfterFunc(config.DebounceTimeReset, func() {
-				r.deactivateFault(fault, config)
+				r.faultMu.Lock()
+				defer r.faultMu.Unlock()
+				r.deactivateFaultLocked(fault, config)
 				state.Present = false
 				state.PendingReset = false
 				state.ResetTimer = nil
@@ -109,7 +120,8 @@ func (r *BatteryReader) setFault(fault BMSFault, present bool) {
 	}
 }
 
-func (r *BatteryReader) activateFault(fault BMSFault, config FaultConfig) {
+// activateFaultLocked must be called with faultMu held.
+func (r *BatteryReader) activateFaultLocked(fault BMSFault, config FaultConfig) {
 	// For communication faults, only activate if battery is expected to be present
 	if fault == BMSFaultBMSCommsError && !r.fsm.IsInState(fsm.StateTagPresent) {
 		r.logger.Debug(fmt.Sprintf("Skipping fault %s activation - battery not in StateTagPresent hierarchy", config.Description))
@@ -119,24 +131,26 @@ func (r *BatteryReader) activateFault(fault BMSFault, config FaultConfig) {
 	r.logger.Warn(fmt.Sprintf("Fault %s (%d) activated", config.Description, fault))
 
 	if config.IsCritical {
-		r.clearLesserFaults(fault, false)
+		r.clearLesserFaultsLocked(fault, false)
 		r.sendNotPresent()
 	}
 
 	r.reportFault(fault, config, true)
 }
 
-func (r *BatteryReader) deactivateFault(fault BMSFault, config FaultConfig) {
+// deactivateFaultLocked must be called with faultMu held.
+func (r *BatteryReader) deactivateFaultLocked(fault BMSFault, config FaultConfig) {
 	r.logger.Info(fmt.Sprintf("Fault %s (%d) cleared", config.Description, fault))
 
 	r.reportFault(fault, config, false)
 }
 
-func (r *BatteryReader) clearLesserFaults(referenceFault BMSFault, includeReference bool) {
+// clearLesserFaultsLocked must be called with faultMu held.
+func (r *BatteryReader) clearLesserFaultsLocked(referenceFault BMSFault, includeReference bool) {
 	for fault, state := range r.faultStates {
 		if fault < referenceFault || (includeReference && fault == referenceFault) {
 			if state.Present {
-				r.setFault(fault, false)
+				r.setFaultLocked(fault, false)
 			}
 		}
 	}
@@ -219,6 +233,8 @@ func (r *BatteryReader) updateFaultsFromBatteryData() {
 }
 
 func (r *BatteryReader) cleanupFaultManagement() {
+	r.faultMu.Lock()
+	defer r.faultMu.Unlock()
 	for _, state := range r.faultStates {
 		if state.SetTimer != nil {
 			state.SetTimer.Stop()
