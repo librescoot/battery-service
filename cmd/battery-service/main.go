@@ -61,7 +61,7 @@ func main() {
 	config.OffUpdateTime = time.Duration(offUpdateTime) * time.Second
 
 	var stdLogger *log.Logger
-	if os.Getenv("INVOCATION_ID") != "" {
+	if os.Getenv("JOURNAL_STREAM") != "" {
 		stdLogger = log.New(os.Stdout, "", 0)
 	} else {
 		stdLogger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds|log.Lmsgprefix)
