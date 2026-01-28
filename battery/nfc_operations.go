@@ -273,6 +273,7 @@ func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
 			r.updateLastCmdTime()
 			r.commFailureCount = 0
 			r.lastSuccessfulComm = time.Now()
+			r.setFault(BMSFaultBMSCommsError, false)
 			r.logger.Info(fmt.Sprintf("Sent command: %s", cmd))
 			r.stopDiscovery()
 			return
