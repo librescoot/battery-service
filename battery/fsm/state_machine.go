@@ -131,14 +131,15 @@ func (sm *StateMachine) IsInState(id State) bool {
 	return sm.machine.IsInState(id)
 }
 
-// readStatusAction is a shared callback for reading battery status before timeout events.
-// Returns error to block transition (EvRestart triggered as side-effect), nil to proceed.
+// readStatusAction reads battery status before a timeout event fires.
+// On failure, it queues EvRestart to restart the tag_present cycle.
+// The subsequent timeout event will be dropped since the restart exits
+// the current state before it's processed.
 func readStatusAction(c *librefsm.Context) error {
 	d := c.Data.(*fsmData)
 	if err := d.actions.ReadStatus(); err != nil {
-		d.log.Debug("failed to read status", "error", err)
-		c.FSM.Send(librefsm.Event{ID: EvRestart})
-		return err
+		d.log.Warn("status read failed, restarting", "error", err)
+		c.Send(librefsm.Event{ID: EvRestart})
 	}
 	return nil
 }
@@ -390,7 +391,6 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// Send On/Off - send on or off command based on enabled state
 		State(StateSendOnOff,
 			librefsm.WithParent(StateHeartbeatActions),
-			librefsm.WithTimeout(timeCmd, EvOnOffTimeout, readStatusAction),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				var cmd BMSCommand
@@ -400,6 +400,8 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 					cmd = BMSCmdOff
 				}
 				d.actions.WriteCommand(cmd)
+				// Timer starts AFTER write so the BMS has the full delay to process
+				c.StartTimer("on_off", timeCmd, librefsm.Event{ID: EvOnOffTimeout}, readStatusAction)
 				return nil
 			}),
 		).
@@ -477,10 +479,11 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// Send Off - send off command
 		State(StateSendOff,
 			librefsm.WithParent(StateTagPresent),
-			librefsm.WithTimeout(timeCmd, EvOffTimeout, readStatusAction),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				d.actions.WriteCommand(BMSCmdOff)
+				// Timer starts AFTER write so the BMS has the full delay to process
+				c.StartTimer("off", timeCmd, librefsm.Event{ID: EvOffTimeout}, readStatusAction)
 				return nil
 			}),
 		).
@@ -559,6 +562,9 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateTagPresent, EvRestart, StateTagPresent).
 
 		// Check Presence transitions
+		// Absorb EvRestart during check_presence - prevents restart loops while
+		// already verifying tag presence. Self-transition is a no-op (LCA = self).
+		Transition(StateCheckPresence, EvRestart, StateCheckPresence).
 		Transition(StateCheckPresence, EvCheckPresenceTimeout, StateCondCheckPresence).
 
 		// Wait Last Cmd transitions
@@ -574,7 +580,6 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateSendClosed, EvClosedTimeout, StateSendOnOff).
 
 		// Send OnOff transitions
-		// Callback returns error on read failure, which blocks transition and triggers restart
 		Transition(StateSendOnOff, EvOnOffTimeout, StateCondStateOK).
 
 		// Wait Update transitions
@@ -595,8 +600,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// Send Inserted Closed transitions
 		Transition(StateSendInsertedClosed, EvInsertedClosedTimeout, StateSendClosed).
 
-		// Seatbox open state transitions and timeouts
-		// Callback returns error on read failure, which blocks transition and triggers restart
+		// Seatbox open state transitions
 		Transition(StateSendOff, EvOffTimeout, StateCondOff).
 
 		Transition(StateSendOpened, EvOpenedTimeout, StateSendInsertedOpen,
