@@ -16,6 +16,8 @@ github.com/librescoot/librefsm v0.4.0 h1:jZ65DBemEkw7ru6U+skDraAFW1Bzn17CXmZv76B
 github.com/librescoot/librefsm v0.4.0/go.mod h1:2fZNHRvoQMCPVgGbb31vgawzMaaPyazAPIgQRCiQ+Qw=
 github.com/librescoot/pn7150 v0.1.6 h1:VULFf2Y5YagHsd/9mVFssV3tmsnpxcKysxFYwAWmSl0=
 github.com/librescoot/pn7150 v0.1.6/go.mod h1:TO2zEBaw4rBSRx5exx+EFPpl9Gg3jKbc+gZEflfbPlM=
+github.com/librescoot/pn7150 v0.1.7-0.20260306200419-da17f13e4919 h1:cobK/NRznsdb4E5UwlQXi3Ikdmn1IwgjG4MBxcHL3NY=
+github.com/librescoot/pn7150 v0.1.7-0.20260306200419-da17f13e4919/go.mod h1:YoZ6YMwk1BE0f2SS2jB8ZX7zW5K6mAJ75t2MI2eZlak=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/redis/go-redis/v9 v9.18.0 h1:pMkxYPkEbMPwRdenAzUNyFNrDgHx9U+DrBabWNfSRQs=
