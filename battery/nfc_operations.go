@@ -162,6 +162,12 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 			continue
 		}
 
+		// NCI errors (e.g. "invalid state for reading: Discovering") mean the PN7150 is in
+		// the wrong internal state — retrying will not help.
+		if hal.IsNCIError(err) {
+			break
+		}
+
 		if r.service.debug {
 			r.logger.Debug(fmt.Sprintf("Read error at 0x%04X: %v (retry %d)", address, err, retry))
 		}
@@ -327,6 +333,9 @@ func (r *BatteryReader) handleNFCError(err error) {
 	if isHALError(err) {
 		r.commFailureCount++
 		r.logger.Warn(fmt.Sprintf("Communication failure %d: %v", r.commFailureCount, err))
+		// Clear discovered flag so the next read/write attempt restarts discovery
+		// rather than hitting the same invalid-state error while reinit is pending.
+		r.tagsDiscovered = false
 		// Always send EvReinit - let FSM decide what to do based on current state
 		r.fsm.SendEvent(fsm.EvReinit)
 	} else {
