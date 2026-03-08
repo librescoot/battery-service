@@ -267,12 +267,23 @@ func (s *Service) loadDualBatterySetting() {
 
 	// Update battery 1 role based on setting
 	if len(s.batteryConfig.Readers) > 1 {
+		newRole := BatteryRoleInactive
 		if dualBattery {
-			s.batteryConfig.Readers[1].Role = BatteryRoleActive
-		} else {
-			s.batteryConfig.Readers[1].Role = BatteryRoleInactive
+			newRole = BatteryRoleActive
 		}
-		s.logger.Info(fmt.Sprintf("Loaded scooter.dual-battery setting: %t (battery 1 role: %v)", dualBattery, s.batteryConfig.Readers[1].Role))
+		s.batteryConfig.Readers[1].Role = newRole
+
+		// Also update the reader if it was already created
+		if len(s.readers) > 1 && s.readers[1] != nil {
+			s.readers[1].role = newRole
+			if newRole == BatteryRoleActive {
+				s.readers[1].enabled = true
+			} else {
+				s.readers[1].enabled = false
+			}
+		}
+
+		s.logger.Info(fmt.Sprintf("Loaded scooter.dual-battery setting: %t (battery 1 role: %v)", dualBattery, newRole))
 	}
 }
 
