@@ -249,6 +249,27 @@ func (s *Service) handleIgnoreSeatboxSettingChange() {
 	}
 }
 
+// checkVoltageDelta reads both battery voltages from Redis and checks if the
+// difference is within acceptable limits. Returns true if the delta is OK or
+// if voltage data is unavailable (can't check).
+func (s *Service) checkVoltageDelta() (ok bool, delta uint64) {
+	v0, err := s.redis.HGet(s.ctx, "battery:0", "voltage").Uint64()
+	if err != nil || v0 == 0 {
+		return true, 0
+	}
+	v1, err := s.redis.HGet(s.ctx, "battery:1", "voltage").Uint64()
+	if err != nil || v1 == 0 {
+		return true, 0
+	}
+
+	if v0 > v1 {
+		delta = v0 - v1
+	} else {
+		delta = v1 - v0
+	}
+	return delta <= MaxVoltageDeltaMV, delta
+}
+
 func (s *Service) loadDualBatterySetting() {
 	setting, err := s.redis.HGet(s.ctx, "settings", "scooter.dual-battery").Result()
 	if err != nil {
@@ -270,6 +291,12 @@ func (s *Service) loadDualBatterySetting() {
 		newRole := BatteryRoleInactive
 		if dualBattery {
 			newRole = BatteryRoleActive
+
+			// Check voltage delta before activating
+			if ok, delta := s.checkVoltageDelta(); !ok {
+				s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, MaxVoltageDeltaMV))
+				newRole = BatteryRoleInactive
+			}
 		}
 		s.batteryConfig.Readers[1].Role = newRole
 
@@ -317,6 +344,15 @@ func (s *Service) handleDualBatterySettingChange() {
 	if oldRole == newRole {
 		s.logger.Debug(fmt.Sprintf("Battery dual-battery setting unchanged: %t (role: %v)", dualBattery, newRole))
 		return
+	}
+
+	// Check voltage delta before activating
+	if newRole == BatteryRoleActive {
+		if ok, delta := s.checkVoltageDelta(); !ok {
+			s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, MaxVoltageDeltaMV))
+			return
+		}
+		reader.voltageDeltaBlocked = false
 	}
 
 	reader.role = newRole

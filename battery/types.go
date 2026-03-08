@@ -143,6 +143,9 @@ const (
 	BMSMinSOC                = 0
 )
 
+// Dual battery protection
+const MaxVoltageDeltaMV = 1000 // Maximum voltage delta (mV) for dual battery activation
+
 // Discovery polling intervals (milliseconds)
 const (
 	DiscoveryPollFast = 100  // seatbox open
@@ -236,6 +239,7 @@ type BatteryReader struct {
 
 	// State tracking
 	enabled                  bool
+	voltageDeltaBlocked      bool // blocks activation when voltage delta is too large
 	vehicleState             VehicleState
 	seatboxLockClosed        bool
 	latchedSeatboxLockClosed bool

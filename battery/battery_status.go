@@ -124,6 +124,36 @@ func (r *BatteryReader) updateTemperatureState() {
 }
 
 func (r *BatteryReader) sendStatusUpdate() {
+	// Voltage delta protection: when battery 1 just became present (new insertion
+	// or battery swap) and has an active role, check voltage delta against battery 0.
+	// If the delta exceeds the threshold, block activation to prevent damage.
+	// The block is cleared automatically when a new battery with acceptable delta is inserted.
+	if r.index > 0 && r.role == BatteryRoleActive && r.data.Present && !r.previousData.Present {
+		if r.data.Voltage > 0 {
+			v0, err := r.service.redis.HGet(r.ctx, "battery:0", "voltage").Uint64()
+			if err == nil && v0 > 0 {
+				v1 := uint64(r.data.Voltage)
+				var delta uint64
+				if v0 > v1 {
+					delta = v0 - v1
+				} else {
+					delta = v1 - v0
+				}
+				if delta > MaxVoltageDeltaMV {
+					r.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV, battery0=%dmV, battery1=%dmV) - blocking battery 1 activation",
+						delta, MaxVoltageDeltaMV, v0, v1))
+					r.voltageDeltaBlocked = true
+					r.enabled = false
+				} else if r.voltageDeltaBlocked {
+					r.logger.Info(fmt.Sprintf("Voltage delta OK (%dmV <= %dmV) - unblocking battery 1",
+						delta, MaxVoltageDeltaMV))
+					r.voltageDeltaBlocked = false
+					r.enabled = true
+				}
+			}
+		}
+	}
+
 	effectivePresent := r.data.Present
 	previousEffectivePresent := r.previousData.Present
 
