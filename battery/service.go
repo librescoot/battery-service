@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"strconv"
 	"sync"
 
 	"github.com/redis/go-redis/v9"
@@ -63,6 +64,7 @@ func (s *Service) Start() error {
 	s.logger.Info("Starting battery service")
 
 	s.loadIgnoreSeatboxSetting()
+	s.loadMaxVoltageDeltaSetting()
 	s.loadDualBatterySetting()
 
 	go s.runRedisSubscriber()
@@ -155,6 +157,8 @@ func (s *Service) runRedisSubscriber() {
 					s.handleIgnoreSeatboxSettingChange()
 				} else if msg.Payload == "scooter.dual-battery" {
 					s.handleDualBatterySettingChange()
+				} else if msg.Payload == "scooter.max-voltage-delta" {
+					s.handleMaxVoltageDeltaSettingChange()
 				}
 			default:
 				s.logger.Warn(fmt.Sprintf("Unknown Redis channel: %s", msg.Channel))
@@ -249,10 +253,53 @@ func (s *Service) handleIgnoreSeatboxSettingChange() {
 	}
 }
 
+func (s *Service) loadMaxVoltageDeltaSetting() {
+	setting, err := s.redis.HGet(s.ctx, "settings", "scooter.max-voltage-delta").Result()
+	if err != nil {
+		if err != redis.Nil {
+			s.logger.Warn(fmt.Sprintf("Failed to load scooter.max-voltage-delta setting: %v", err))
+		}
+		return
+	}
+
+	value, err := strconv.ParseUint(setting, 10, 64)
+	if err != nil {
+		s.logger.Warn(fmt.Sprintf("Invalid scooter.max-voltage-delta value: %q (must be a number in mV, 0 to disable)", setting))
+		return
+	}
+
+	s.config.MaxVoltageDelta = value
+	s.logger.Info(fmt.Sprintf("Loaded scooter.max-voltage-delta setting: %d mV", value))
+}
+
+func (s *Service) handleMaxVoltageDeltaSettingChange() {
+	setting, err := s.redis.HGet(s.ctx, "settings", "scooter.max-voltage-delta").Result()
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Failed to fetch scooter.max-voltage-delta setting: %v", err))
+		return
+	}
+
+	value, err := strconv.ParseUint(setting, 10, 64)
+	if err != nil {
+		s.logger.Warn(fmt.Sprintf("Invalid scooter.max-voltage-delta value: %q (must be a number in mV, 0 to disable)", setting))
+		return
+	}
+
+	oldValue := s.config.MaxVoltageDelta
+	s.config.MaxVoltageDelta = value
+	s.logger.Info(fmt.Sprintf("Scooter max-voltage-delta setting changed: %d mV -> %d mV", oldValue, value))
+}
+
 // checkVoltageDelta reads both battery voltages from Redis and checks if the
 // difference is within acceptable limits. Returns true if the delta is OK or
-// if voltage data is unavailable (can't check).
+// if voltage data is unavailable (can't check). Also returns true if the
+// threshold is set to 0 (disabled).
 func (s *Service) checkVoltageDelta() (ok bool, delta uint64) {
+	maxDelta := s.config.MaxVoltageDelta
+	if maxDelta == 0 {
+		return true, 0
+	}
+
 	v0, err := s.redis.HGet(s.ctx, "battery:0", "voltage").Uint64()
 	if err != nil || v0 == 0 {
 		return true, 0
@@ -267,7 +314,7 @@ func (s *Service) checkVoltageDelta() (ok bool, delta uint64) {
 	} else {
 		delta = v1 - v0
 	}
-	return delta <= MaxVoltageDeltaMV, delta
+	return delta <= maxDelta, delta
 }
 
 func (s *Service) loadDualBatterySetting() {
@@ -294,7 +341,7 @@ func (s *Service) loadDualBatterySetting() {
 
 			// Check voltage delta before activating
 			if ok, delta := s.checkVoltageDelta(); !ok {
-				s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, MaxVoltageDeltaMV))
+				s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, s.config.MaxVoltageDelta))
 				newRole = BatteryRoleInactive
 			}
 		}
@@ -349,7 +396,7 @@ func (s *Service) handleDualBatterySettingChange() {
 	// Check voltage delta before activating
 	if newRole == BatteryRoleActive {
 		if ok, delta := s.checkVoltageDelta(); !ok {
-			s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, MaxVoltageDeltaMV))
+			s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, s.config.MaxVoltageDelta))
 			return
 		}
 		reader.voltageDeltaBlocked = false

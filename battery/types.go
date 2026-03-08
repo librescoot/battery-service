@@ -144,7 +144,7 @@ const (
 )
 
 // Dual battery protection
-const MaxVoltageDeltaMV = 1000 // Maximum voltage delta (mV) for dual battery activation
+const DefaultMaxVoltageDeltaMV = 1000 // Default maximum voltage delta (mV) for dual battery activation
 
 // Discovery polling intervals (milliseconds)
 const (
@@ -166,6 +166,7 @@ type ServiceConfig struct {
 	HeartbeatTimeout         time.Duration
 	OffUpdateTime            time.Duration
 	DangerouslyIgnoreSeatbox bool
+	MaxVoltageDelta          uint64 // mV, 0 = disabled
 }
 
 type BatteryReaderConfig struct {

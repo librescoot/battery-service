@@ -59,6 +59,7 @@ func main() {
 	config.RedisServerPort = uint16(redisPort)
 	config.HeartbeatTimeout = time.Duration(heartbeatTimeout) * time.Second
 	config.OffUpdateTime = time.Duration(offUpdateTime) * time.Second
+	config.MaxVoltageDelta = battery.DefaultMaxVoltageDeltaMV
 
 	var stdLogger *log.Logger
 	if os.Getenv("JOURNAL_STREAM") != "" {
