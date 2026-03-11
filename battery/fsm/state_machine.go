@@ -18,7 +18,7 @@ const (
 	// Note: Heartbeat interval is dynamic - see GetHeartbeatInterval()
 	// Active batteries: 40s (configurable via --heartbeat-timeout)
 	// Inactive batteries: 30min (configurable via --off-update-time)
-	timeMaintPollInterval = 5 * time.Minute
+	timeMaintPollInterval = 30 * time.Minute
 )
 
 // BatteryActions is the interface for battery hardware operations
