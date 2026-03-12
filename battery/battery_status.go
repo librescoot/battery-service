@@ -156,7 +156,6 @@ func (r *BatteryReader) sendStatusUpdate() {
 	}
 
 	effectivePresent := r.data.Present
-	previousEffectivePresent := r.previousData.Present
 
 	hashKey := fmt.Sprintf("battery:%d", r.index)
 	channel := fmt.Sprintf("battery:%d", r.index)
@@ -194,18 +193,11 @@ func (r *BatteryReader) sendStatusUpdate() {
 	// Update fault set within transaction
 	changedFaults, faultChanges := r.updateFaultSetInTransaction(pipe)
 
-	// Publish notifications only for changed fields
-	if effectivePresent != previousEffectivePresent {
-		pipe.Publish(r.ctx, channel, "present")
-	}
-	if r.data.State != r.previousData.State {
-		pipe.Publish(r.ctx, channel, "state")
-	}
-	if r.data.Charge != r.previousData.Charge {
-		pipe.Publish(r.ctx, channel, "charge")
-	}
-	if r.data.TemperatureState != r.previousData.TemperatureState {
-		pipe.Publish(r.ctx, channel, "temperature-state")
+	// Publish notifications for all changed fields
+	for field, value := range fields {
+		if value != r.previousFields[field] {
+			pipe.Publish(r.ctx, channel, field)
+		}
 	}
 
 	// Execute the transaction
@@ -224,6 +216,7 @@ func (r *BatteryReader) sendStatusUpdate() {
 	}
 
 	// Update previous data for next comparison
+	r.previousFields = fields
 	r.previousData = r.data
 }
 

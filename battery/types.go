@@ -222,8 +222,9 @@ type BatteryReader struct {
 	fsm          *fsmStateMachine
 	fsmCtx       context.Context
 	fsmCancel    context.CancelFunc
-	data         BMSData
-	previousData BMSData
+	data           BMSData
+	previousData   BMSData
+	previousFields map[string]any
 
 	// Event loop control
 	stopChan    chan struct{}
