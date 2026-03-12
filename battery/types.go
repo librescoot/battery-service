@@ -9,8 +9,7 @@ import (
 
 	"battery-service/battery/fsm"
 	"github.com/librescoot/pn7150"
-
-	"github.com/redis/go-redis/v9"
+	ipc "github.com/librescoot/redis-ipc"
 )
 
 type fsmStateMachine = fsm.StateMachine
@@ -196,7 +195,7 @@ type Service struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	debug         bool
-	redis         *redis.Client
+	ipc           *ipc.Client
 	vehicleState  VehicleState
 	readers       []*BatteryReader
 }
@@ -222,9 +221,13 @@ type BatteryReader struct {
 	fsm          *fsmStateMachine
 	fsmCtx       context.Context
 	fsmCancel    context.CancelFunc
-	data           BMSData
-	previousData   BMSData
-	previousFields map[string]any
+	data         BMSData
+	previousData BMSData
+
+	// Redis IPC publishers
+	hashPub    *ipc.HashPublisher
+	faultSet   *ipc.FaultSet
+	faultStream *ipc.StreamPublisher
 
 	// Event loop control
 	stopChan    chan struct{}

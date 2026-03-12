@@ -5,8 +5,6 @@ import (
 	"time"
 
 	"battery-service/battery/fsm"
-
-	"github.com/redis/go-redis/v9"
 )
 
 type FaultConfig struct {
@@ -164,46 +162,29 @@ func (r *BatteryReader) sendNotPresent() {
 
 func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present bool) {
 	batteryName := fmt.Sprintf("battery:%d", r.index)
-	faultSetKey := fmt.Sprintf("battery:%d:fault", r.index)
 
 	if present {
-		if err := r.service.redis.SAdd(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
+		if err := r.faultSet.Add(int(fault)); err != nil {
 			r.logger.Warn(fmt.Sprintf("Failed to add fault to set: %v", err))
 		}
 
-		if err := r.service.redis.XAdd(r.ctx, &redis.XAddArgs{
-			Stream: "events:faults",
-			MaxLen: 1000,
-			Values: map[string]any{
-				"group":       batteryName,
-				"code":        fmt.Sprintf("%d", fault),
-				"description": config.Description,
-			},
-		}).Err(); err != nil {
+		if _, err := r.faultStream.Add(map[string]any{
+			"group":       batteryName,
+			"code":        fmt.Sprintf("%d", fault),
+			"description": config.Description,
+		}); err != nil {
 			r.logger.Warn(fmt.Sprintf("Failed to add fault event to stream: %v", err))
 		}
-
-		if err := r.service.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
-			r.logger.Warn(fmt.Sprintf("Failed to publish fault notification: %v", err))
-		}
 	} else {
-		if err := r.service.redis.SRem(r.ctx, faultSetKey, fmt.Sprintf("%d", fault)).Err(); err != nil {
+		if err := r.faultSet.Remove(int(fault)); err != nil {
 			r.logger.Warn(fmt.Sprintf("Failed to remove fault from set: %v", err))
 		}
 
-		if err := r.service.redis.XAdd(r.ctx, &redis.XAddArgs{
-			Stream: "events:faults",
-			MaxLen: 1000,
-			Values: map[string]any{
-				"group": batteryName,
-				"code":  fmt.Sprintf("-%d", fault),
-			},
-		}).Err(); err != nil {
+		if _, err := r.faultStream.Add(map[string]any{
+			"group": batteryName,
+			"code":  fmt.Sprintf("-%d", fault),
+		}); err != nil {
 			r.logger.Warn(fmt.Sprintf("Failed to add fault clear event to stream: %v", err))
-		}
-
-		if err := r.service.redis.Publish(r.ctx, batteryName, "fault").Err(); err != nil {
-			r.logger.Warn(fmt.Sprintf("Failed to publish fault clear notification: %v", err))
 		}
 	}
 }

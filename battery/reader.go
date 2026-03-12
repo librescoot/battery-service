@@ -38,6 +38,11 @@ func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel i
 
 	reader.logger = slog.New(NewFSMHandler(service.stdLogger.Writer(), LogLevel(logLevel), index))
 
+	batteryKey := fmt.Sprintf("battery:%d", index)
+	reader.hashPub = service.ipc.NewHashPublisher(batteryKey)
+	reader.faultSet = service.ipc.NewFaultSet(batteryKey+":fault", batteryKey, "fault")
+	reader.faultStream = service.ipc.NewStreamPublisher("events:faults")
+
 	var err error
 	reader.hal, err = hal.NewPN7150(deviceName, reader.makeLogCallback(), nil, true, false, service.debug)
 	if err != nil {
@@ -257,7 +262,7 @@ func (r *BatteryReader) SendSeatboxLockChange(closed bool) {
 func (r *BatteryReader) fetchInitialRedisState() {
 	r.logger.Debug("Fetching initial Redis state from hashes")
 
-	vehicleState, err := r.service.redis.HGet(r.ctx, "vehicle", "state").Result()
+	vehicleState, err := r.service.ipc.HGet("vehicle", "state")
 	if err == nil {
 		r.logger.Debug(fmt.Sprintf("Found vehicle state: %s", vehicleState))
 		r.handleVehicleStateChange(VehicleState(vehicleState))
@@ -265,7 +270,7 @@ func (r *BatteryReader) fetchInitialRedisState() {
 		r.logger.Warn(fmt.Sprintf("No vehicle state in Redis hash: %v", err))
 	}
 
-	seatboxLock, err := r.service.redis.HGet(r.ctx, "vehicle", "seatbox:lock").Result()
+	seatboxLock, err := r.service.ipc.HGet("vehicle", "seatbox:lock")
 	if err == nil {
 		closed := (seatboxLock == "closed")
 		r.logger.Debug(fmt.Sprintf("Found seatbox lock state: %s (closed=%t)", seatboxLock, closed))
