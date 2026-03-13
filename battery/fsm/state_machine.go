@@ -574,7 +574,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateHeartbeat, EvSeatboxOpened, StateCondJustInserted).
 
 		// HeartbeatActions transitions
-		Transition(StateHeartbeatActions, EvHeartbeatTimeout, StateHeartbeatActions).
+		Transition(StateHeartbeatActions, EvHeartbeatTimeout, StateHeartbeat).
 
 		// Send Closed transitions
 		Transition(StateSendClosed, EvClosedTimeout, StateSendOnOff).
