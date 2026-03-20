@@ -299,7 +299,7 @@ func (r *BatteryReader) makeLogCallback() hal.LogCallback {
 }
 
 func (r *BatteryReader) handleDeparture() {
-	r.data.Present = false
+	r.data = BMSData{Present: false}
 
 	// Cancel any pending fault timers to prevent activation after departure
 	r.faultMu.Lock()
