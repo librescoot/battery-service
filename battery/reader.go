@@ -308,6 +308,7 @@ func (r *BatteryReader) makeLogCallback() hal.LogCallback {
 }
 
 func (r *BatteryReader) handleDeparture() {
+	r.logger.Debug(fmt.Sprintf("Tag departure on reader %d, last serial=%s", r.index, r.data.SerialNumber))
 	r.data = BMSData{Present: false}
 
 	// Cancel any pending fault timers to prevent activation after departure

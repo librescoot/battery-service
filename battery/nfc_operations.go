@@ -89,6 +89,7 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 
 	if len(tags) == 0 {
 		r.logger.Warn("DetectTags returned no tags")
+		r.logger.Debug(fmt.Sprintf("No tags on reader %d (previousTagPresent=%v)", r.index, r.previousTagPresent))
 		// If we previously had a tag present and now detect no tags, treat as tag departure
 		if r.previousTagPresent {
 			r.logger.Info("Tag departed (no tags detected)")
@@ -102,7 +103,7 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 
 	r.previousTagPresent = true
 	r.tagsDiscovered = true
-	r.logger.Debug(fmt.Sprintf("Tag discovered: %X", tags[0].ID))
+	r.logger.Debug(fmt.Sprintf("Tag discovered: UID=%X on reader %d", tags[0].ID, r.index))
 
 	return true
 }
@@ -223,6 +224,8 @@ func (r *BatteryReader) readStatus() bool {
 	}
 
 	r.parseStatusData(status0, status1, status2)
+
+	r.logger.Debug(fmt.Sprintf("Status read on reader %d: serial=%s charge=%d%% state=%s", r.index, r.data.SerialNumber, r.data.Charge, r.data.State))
 
 	r.logger.Info(fmt.Sprintf("Status: state=%s, voltage=%dmV, current=%dmA, charge=%d%%, temp=[%d,%d,%d,%d]°C (%s), soh=%d%%, cycles=%d, sn=%s, fw=%s",
 		r.data.State.String(), r.data.Voltage, r.data.Current, r.data.Charge,
