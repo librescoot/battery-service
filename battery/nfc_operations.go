@@ -18,6 +18,9 @@ func (r *BatteryReader) deinitializeNFC() {
 }
 
 func (r *BatteryReader) startDiscovery() bool {
+	// Starting discovery invalidates any previous tag selection
+	r.tagsDiscovered = false
+
 	pollPeriod := uint(DiscoveryPollFast)
 	if r.seatboxLockClosed {
 		pollPeriod = DiscoveryPollSlow
