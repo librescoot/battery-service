@@ -121,9 +121,16 @@ func (r *BatteryReader) pollForTagArrival() {
 	// Poll for tag arrival in tag_absent state
 	tags, err := r.hal.DetectTags()
 	if err == nil && len(tags) > 0 {
-		r.tagsDiscovered = true
 		r.previousTagPresent = true
-		r.logger.Debug(fmt.Sprintf("Tag arrived: %X", tags[0].ID))
+
+		if err := r.hal.SelectTag(0); err != nil {
+			r.logger.Warn(fmt.Sprintf("Failed to select tag after poll arrival: %v", err))
+			r.handleNFCError(err)
+			return
+		}
+
+		r.tagsDiscovered = true
+		r.logger.Debug(fmt.Sprintf("Tag arrived and selected: UID=%X on reader %d", tags[0].ID, r.index))
 		r.fsm.SendEvent(fsm.EvTagArrived)
 	}
 }
