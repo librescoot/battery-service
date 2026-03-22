@@ -97,9 +97,19 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 		return false
 	}
 
-	r.tagsDiscovered = true
 	r.previousTagPresent = true
-	r.logger.Debug(fmt.Sprintf("Tag arrived: %X", tags[0].ID))
+
+	// Select the tag to transition PN7150 from Discovering → Present.
+	// Without this, ReadBinary fails or returns garbage because the tag's
+	// NFC interface isn't properly activated.
+	if err := r.hal.SelectTag(0); err != nil {
+		r.logger.Warn(fmt.Sprintf("Failed to select tag after discovery: %v", err))
+		r.handleNFCError(err)
+		return false
+	}
+
+	r.tagsDiscovered = true
+	r.logger.Debug(fmt.Sprintf("Tag discovered and selected: %X", tags[0].ID))
 
 	return true
 }
@@ -183,7 +193,6 @@ func (r *BatteryReader) readStatus() bool {
 			return false
 		}
 	}
-	// If already discovered, proceed directly to read
 
 	status0, err := r.readWithVerification(0x0300)
 	if err != nil {
