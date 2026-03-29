@@ -2,8 +2,7 @@ package battery
 
 import (
 	"fmt"
-
-	"github.com/redis/go-redis/v9"
+	"strconv"
 )
 
 func (r *BatteryReader) parseStatusData(status0, status1, status2 []byte) {
@@ -131,38 +130,35 @@ func (r *BatteryReader) sendStatusUpdate() {
 	maxDelta := r.service.config.MaxVoltageDelta
 	if r.index > 0 && maxDelta > 0 && r.role == BatteryRoleActive && r.data.Present && !r.previousData.Present {
 		if r.data.Voltage > 0 {
-			v0, err := r.service.redis.HGet(r.ctx, "battery:0", "voltage").Uint64()
-			if err == nil && v0 > 0 {
-				v1 := uint64(r.data.Voltage)
-				var delta uint64
-				if v0 > v1 {
-					delta = v0 - v1
-				} else {
-					delta = v1 - v0
-				}
-				if delta > maxDelta {
-					r.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV, battery0=%dmV, battery1=%dmV) - blocking battery 1 activation",
-						delta, maxDelta, v0, v1))
-					r.voltageDeltaBlocked = true
-					r.enabled = false
-				} else if r.voltageDeltaBlocked {
-					r.logger.Info(fmt.Sprintf("Voltage delta OK (%dmV <= %dmV) - unblocking battery 1",
-						delta, maxDelta))
-					r.voltageDeltaBlocked = false
-					r.enabled = true
+			v0str, err := r.service.ipc.HGet("battery:0", "voltage")
+			if err == nil {
+				v0, err := strconv.ParseUint(v0str, 10, 64)
+				if err == nil && v0 > 0 {
+					v1 := uint64(r.data.Voltage)
+					var delta uint64
+					if v0 > v1 {
+						delta = v0 - v1
+					} else {
+						delta = v1 - v0
+					}
+					if delta > maxDelta {
+						r.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV, battery0=%dmV, battery1=%dmV) - blocking battery 1 activation",
+							delta, maxDelta, v0, v1))
+						r.voltageDeltaBlocked = true
+						r.enabled = false
+					} else if r.voltageDeltaBlocked {
+						r.logger.Info(fmt.Sprintf("Voltage delta OK (%dmV <= %dmV) - unblocking battery 1",
+							delta, maxDelta))
+						r.voltageDeltaBlocked = false
+						r.enabled = true
+					}
 				}
 			}
 		}
 	}
 
-	effectivePresent := r.data.Present
-
-	hashKey := fmt.Sprintf("battery:%d", r.index)
-	channel := fmt.Sprintf("battery:%d", r.index)
-
-	// Build fields map for all data
 	fields := map[string]any{
-		"present":            fmt.Sprintf("%v", effectivePresent),
+		"present":            fmt.Sprintf("%v", r.data.Present),
 		"state":              r.data.State.String(),
 		"voltage":            fmt.Sprintf("%d", r.data.Voltage),
 		"current":            fmt.Sprintf("%d", r.data.Current),
@@ -181,42 +177,15 @@ func (r *BatteryReader) sendStatusUpdate() {
 
 	if r.service.debug {
 		r.logger.Debug(fmt.Sprintf("Publishing state=%s, present=%v, voltage=%d, charge=%d",
-			r.data.State.String(), effectivePresent, r.data.Voltage, r.data.Charge))
+			r.data.State.String(), r.data.Present, r.data.Voltage, r.data.Charge))
 	}
 
-	// Use Redis transaction for atomic updates
-	pipe := r.service.redis.TxPipeline()
-
-	// Update all fields in Redis hash
-	pipe.HMSet(r.ctx, hashKey, fields)
-
-	// Update fault set within transaction
-	changedFaults, faultChanges := r.updateFaultSetInTransaction(pipe)
-
-	// Publish notifications for all changed fields
-	for field, value := range fields {
-		if value != r.previousFields[field] {
-			pipe.Publish(r.ctx, channel, field)
-		}
-	}
-
-	// Execute the transaction
-	if _, err := pipe.Exec(r.ctx); err != nil {
-		r.logger.Error(fmt.Sprintf("Failed to execute Redis transaction: %v", err))
+	// Publish hash fields (SetManyIfChanged handles change detection + PUBLISH)
+	if _, err := r.hashPub.SetManyIfChanged(fields); err != nil {
+		r.logger.Error(fmt.Sprintf("Failed to publish battery status: %v", err))
 		return
 	}
 
-	// Update fault tracking flags only after successful transaction
-	if faultChanges {
-		for _, fault := range changedFaults {
-			if state, exists := r.faultStates[fault]; exists {
-				state.PublishedToRedis = state.Present
-			}
-		}
-	}
-
-	// Update previous data for next comparison
-	r.previousFields = fields
 	r.previousData = r.data
 }
 
@@ -233,31 +202,3 @@ func (r *BatteryReader) temperatureStateString() string {
 	}
 }
 
-func (r *BatteryReader) updateFaultSetInTransaction(pipe redis.Pipeliner) ([]BMSFault, bool) {
-	faultKey := fmt.Sprintf("battery:%d:fault", r.index)
-	var changedFaults []BMSFault
-	anyChanges := false
-
-	for fault, state := range r.faultStates {
-		// Only update Redis if the fault state changed
-		if state.Present != state.PublishedToRedis {
-			if state.Present {
-				// Add fault to set
-				pipe.SAdd(r.ctx, faultKey, fmt.Sprintf("%d", fault))
-			} else {
-				// Remove fault from set
-				pipe.SRem(r.ctx, faultKey, fmt.Sprintf("%d", fault))
-			}
-			changedFaults = append(changedFaults, fault)
-			anyChanges = true
-		}
-	}
-
-	// Only publish fault notification if there were changes
-	if anyChanges {
-		faultChannel := fmt.Sprintf("battery:%d", r.index)
-		pipe.Publish(r.ctx, faultChannel, "fault")
-	}
-
-	return changedFaults, anyChanges
-}
