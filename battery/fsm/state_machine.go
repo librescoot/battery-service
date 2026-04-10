@@ -72,9 +72,8 @@ type StateMachine struct {
 // New creates a new StateMachine
 func New(actions BatteryActions, log *slog.Logger) *StateMachine {
 	data := &fsmData{
-		actions:      actions,
-		log:          log,
-		justInserted: true,
+		actions: actions,
+		log:     log,
 	}
 
 	def := buildDefinition(data)
@@ -141,6 +140,15 @@ func readStatusAction(c *librefsm.Context) error {
 		d.log.Warn("status read failed, restarting", "error", err)
 		c.Send(librefsm.Event{ID: EvRestart})
 	}
+	return nil
+}
+
+// markJustInsertedAction sets justInserted on any EvTagArrived transition
+// into StateTagPresent, so StateCondJustInserted reflects the real insertion
+// state and not just a sticky FSM-lifetime flag from first startup.
+func markJustInsertedAction(c *librefsm.Context) error {
+	d := c.Data.(*fsmData)
+	d.justInserted = true
 	return nil
 }
 
@@ -534,17 +542,23 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 
 		// Discover Tag transitions
 		Transition(StateDiscoverTag, EvReinit, StateNFCReaderOff).
-		Transition(StateDiscoverTag, EvTagArrived, StateTagPresent).
+		Transition(StateDiscoverTag, EvTagArrived, StateTagPresent,
+			librefsm.WithAction(markJustInsertedAction),
+		).
 		Transition(StateDiscoverTag, EvTagDeparted, StateTagAbsent).
 
 		// Wait Arrival transitions
 		Transition(StateWaitArrival, EvReinit, StateNFCReaderOff).
-		Transition(StateWaitArrival, EvTagArrived, StateTagPresent).
+		Transition(StateWaitArrival, EvTagArrived, StateTagPresent,
+			librefsm.WithAction(markJustInsertedAction),
+		).
 		Transition(StateWaitArrival, EvDepartureTimeout, StateTagAbsent).
 
 		// Tag Absent transitions
 		Transition(StateTagAbsent, EvReinit, StateNFCReaderOff).
-		Transition(StateTagAbsent, EvTagArrived, StateTagPresent).
+		Transition(StateTagAbsent, EvTagArrived, StateTagPresent,
+			librefsm.WithAction(markJustInsertedAction),
+		).
 		Transition(StateTagAbsent, EvRestart, StateTagAbsent,
 			librefsm.WithAction(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
