@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -63,8 +64,8 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 func (s *Service) Start() error {
 	s.logger.Info("Starting battery service")
 
-	s.loadIgnoreSeatboxSetting()
-	s.loadMaxVoltageDeltaSetting()
+	s.loadBoolSetting(s.ignoreSeatboxSettingSpec())
+	s.loadUint64Setting(s.maxVoltageDeltaSettingSpec())
 	s.loadDualBatterySetting()
 
 	go s.runRedisSubscriber()
@@ -153,12 +154,13 @@ func (s *Service) runRedisSubscriber() {
 					s.handleSeatboxUpdate()
 				}
 			case "settings":
-				if msg.Payload == "scooter.battery-ignores-seatbox" {
-					s.handleIgnoreSeatboxSettingChange()
-				} else if msg.Payload == "scooter.dual-battery" {
+				switch msg.Payload {
+				case "scooter.battery-ignores-seatbox":
+					s.reloadBoolSetting(s.ignoreSeatboxSettingSpec())
+				case "scooter.max-voltage-delta":
+					s.reloadUint64Setting(s.maxVoltageDeltaSettingSpec())
+				case "scooter.dual-battery":
 					s.handleDualBatterySettingChange()
-				} else if msg.Payload == "scooter.max-voltage-delta" {
-					s.handleMaxVoltageDeltaSettingChange()
 				}
 			default:
 				s.logger.Warn(fmt.Sprintf("Unknown Redis channel: %s", msg.Channel))
@@ -207,87 +209,141 @@ func (s *Service) handleSeatboxUpdate() {
 	}
 }
 
-func (s *Service) loadIgnoreSeatboxSetting() {
-	setting, err := s.redis.HGet(s.ctx, "settings", "scooter.battery-ignores-seatbox").Result()
+// ----- Hot-reloaded settings plumbing -----
+
+// redisBoolSetting describes a bool Redis setting that can be loaded at
+// startup and hot-reloaded from a Redis "settings" pub/sub notification.
+type redisBoolSetting struct {
+	key      string
+	target   *atomic.Bool
+	onChange func(oldValue, newValue bool) // optional; called on reload only
+}
+
+// redisUint64Setting is the uint64-valued counterpart to redisBoolSetting.
+// valueSuffix is appended to the value when logging, e.g. " mV".
+type redisUint64Setting struct {
+	key         string
+	target      *atomic.Uint64
+	valueSuffix string
+	onChange    func(oldValue, newValue uint64)
+}
+
+func parseBoolSetting(raw string) (bool, bool) {
+	switch raw {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	}
+	return false, false
+}
+
+func (s *Service) loadBoolSetting(spec redisBoolSetting) {
+	raw, err := s.redis.HGet(s.ctx, "settings", spec.key).Result()
 	if err != nil {
 		if err != redis.Nil {
-			s.logger.Warn(fmt.Sprintf("Failed to load scooter.battery-ignores-seatbox setting: %v", err))
+			s.logger.Warn(fmt.Sprintf("Failed to load %s setting: %v", spec.key, err))
 		}
 		return
 	}
-
-	if setting != "true" && setting != "false" {
-		s.logger.Warn(fmt.Sprintf("Invalid scooter.battery-ignores-seatbox value: %q (must be 'true' or 'false')", setting))
+	value, ok := parseBoolSetting(raw)
+	if !ok {
+		s.logger.Warn(fmt.Sprintf("Invalid %s value: %q (must be 'true' or 'false')", spec.key, raw))
 		return
 	}
-
-	enabled := (setting == "true")
-	s.config.DangerouslyIgnoreSeatbox = enabled
-	s.logger.Info(fmt.Sprintf("Loaded scooter.battery-ignores-seatbox setting: %t", enabled))
+	spec.target.Store(value)
+	s.logger.Info(fmt.Sprintf("Loaded %s setting: %t", spec.key, value))
 }
 
-func (s *Service) handleIgnoreSeatboxSettingChange() {
-	setting, err := s.redis.HGet(s.ctx, "settings", "scooter.battery-ignores-seatbox").Result()
+func (s *Service) reloadBoolSetting(spec redisBoolSetting) {
+	raw, err := s.redis.HGet(s.ctx, "settings", spec.key).Result()
 	if err != nil {
-		s.logger.Error(fmt.Sprintf("Failed to fetch scooter.battery-ignores-seatbox setting: %v", err))
+		s.logger.Error(fmt.Sprintf("Failed to fetch %s setting: %v", spec.key, err))
 		return
 	}
-
-	if setting != "true" && setting != "false" {
-		s.logger.Warn(fmt.Sprintf("Invalid scooter.battery-ignores-seatbox value: %q (must be 'true' or 'false')", setting))
+	value, ok := parseBoolSetting(raw)
+	if !ok {
+		s.logger.Warn(fmt.Sprintf("Invalid %s value: %q (must be 'true' or 'false')", spec.key, raw))
 		return
 	}
-
-	enabled := (setting == "true")
-	oldValue := s.config.DangerouslyIgnoreSeatbox
-	s.config.DangerouslyIgnoreSeatbox = enabled
-
-	s.logger.Info(fmt.Sprintf("Scooter battery-ignores-seatbox setting changed: %t -> %t", oldValue, enabled))
-
-	// Notify all active readers to re-evaluate their enabled state
-	for _, reader := range s.readers {
-		if reader != nil && reader.role == BatteryRoleActive {
-			// Trigger a restart to apply the new seatbox ignore setting
-			reader.triggerRestart()
-		}
+	oldValue := spec.target.Swap(value)
+	if oldValue == value {
+		return
+	}
+	s.logger.Info(fmt.Sprintf("%s setting changed: %t -> %t", spec.key, oldValue, value))
+	if spec.onChange != nil {
+		spec.onChange(oldValue, value)
 	}
 }
 
-func (s *Service) loadMaxVoltageDeltaSetting() {
-	setting, err := s.redis.HGet(s.ctx, "settings", "scooter.max-voltage-delta").Result()
+func formatValueSuffix(suffix string) string {
+	if suffix == "" {
+		return ""
+	}
+	return " " + suffix
+}
+
+func (s *Service) loadUint64Setting(spec redisUint64Setting) {
+	raw, err := s.redis.HGet(s.ctx, "settings", spec.key).Result()
 	if err != nil {
 		if err != redis.Nil {
-			s.logger.Warn(fmt.Sprintf("Failed to load scooter.max-voltage-delta setting: %v", err))
+			s.logger.Warn(fmt.Sprintf("Failed to load %s setting: %v", spec.key, err))
 		}
 		return
 	}
-
-	value, err := strconv.ParseUint(setting, 10, 64)
+	value, err := strconv.ParseUint(raw, 10, 64)
 	if err != nil {
-		s.logger.Warn(fmt.Sprintf("Invalid scooter.max-voltage-delta value: %q (must be a number in mV, 0 to disable)", setting))
+		s.logger.Warn(fmt.Sprintf("Invalid %s value: %q (must be a non-negative integer)", spec.key, raw))
 		return
 	}
-
-	s.config.MaxVoltageDelta = value
-	s.logger.Info(fmt.Sprintf("Loaded scooter.max-voltage-delta setting: %d mV", value))
+	spec.target.Store(value)
+	s.logger.Info(fmt.Sprintf("Loaded %s setting: %d%s", spec.key, value, formatValueSuffix(spec.valueSuffix)))
 }
 
-func (s *Service) handleMaxVoltageDeltaSettingChange() {
-	setting, err := s.redis.HGet(s.ctx, "settings", "scooter.max-voltage-delta").Result()
+func (s *Service) reloadUint64Setting(spec redisUint64Setting) {
+	raw, err := s.redis.HGet(s.ctx, "settings", spec.key).Result()
 	if err != nil {
-		s.logger.Error(fmt.Sprintf("Failed to fetch scooter.max-voltage-delta setting: %v", err))
+		s.logger.Error(fmt.Sprintf("Failed to fetch %s setting: %v", spec.key, err))
 		return
 	}
-
-	value, err := strconv.ParseUint(setting, 10, 64)
+	value, err := strconv.ParseUint(raw, 10, 64)
 	if err != nil {
-		s.logger.Warn(fmt.Sprintf("Invalid scooter.max-voltage-delta value: %q (must be a number in mV, 0 to disable)", setting))
+		s.logger.Warn(fmt.Sprintf("Invalid %s value: %q (must be a non-negative integer)", spec.key, raw))
 		return
 	}
+	oldValue := spec.target.Swap(value)
+	if oldValue == value {
+		return
+	}
+	suffix := formatValueSuffix(spec.valueSuffix)
+	s.logger.Info(fmt.Sprintf("%s setting changed: %d%s -> %d%s", spec.key, oldValue, suffix, value, suffix))
+	if spec.onChange != nil {
+		spec.onChange(oldValue, value)
+	}
+}
 
-	oldValue := s.config.MaxVoltageDelta
-	s.config.MaxVoltageDelta = value
-	s.logger.Info(fmt.Sprintf("Scooter max-voltage-delta setting changed: %d mV -> %d mV", oldValue, value))
+// ----- Setting specs -----
+
+func (s *Service) ignoreSeatboxSettingSpec() redisBoolSetting {
+	return redisBoolSetting{
+		key:    "scooter.battery-ignores-seatbox",
+		target: &s.config.DangerouslyIgnoreSeatbox,
+		onChange: func(_, _ bool) {
+			for _, reader := range s.readers {
+				if reader != nil && reader.role == BatteryRoleActive {
+					reader.triggerRestart()
+				}
+			}
+		},
+	}
+}
+
+func (s *Service) maxVoltageDeltaSettingSpec() redisUint64Setting {
+	return redisUint64Setting{
+		key:         "scooter.max-voltage-delta",
+		target:      &s.config.MaxVoltageDelta,
+		valueSuffix: "mV",
+	}
 }
 
 // checkVoltageDelta reads both battery voltages from Redis and checks if the
@@ -295,7 +351,7 @@ func (s *Service) handleMaxVoltageDeltaSettingChange() {
 // if voltage data is unavailable (can't check). Also returns true if the
 // threshold is set to 0 (disabled).
 func (s *Service) checkVoltageDelta() (ok bool, delta uint64) {
-	maxDelta := s.config.MaxVoltageDelta
+	maxDelta := s.config.MaxVoltageDelta.Load()
 	if maxDelta == 0 {
 		return true, 0
 	}
@@ -341,7 +397,7 @@ func (s *Service) loadDualBatterySetting() {
 
 			// Check voltage delta before activating
 			if ok, delta := s.checkVoltageDelta(); !ok {
-				s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, s.config.MaxVoltageDelta))
+				s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, s.config.MaxVoltageDelta.Load()))
 				newRole = BatteryRoleInactive
 			}
 		}
@@ -396,7 +452,7 @@ func (s *Service) handleDualBatterySettingChange() {
 	// Check voltage delta before activating
 	if newRole == BatteryRoleActive {
 		if ok, delta := s.checkVoltageDelta(); !ok {
-			s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, s.config.MaxVoltageDelta))
+			s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, s.config.MaxVoltageDelta.Load()))
 			return
 		}
 		reader.voltageDeltaBlocked = false
@@ -413,7 +469,7 @@ func (s *Service) handleDualBatterySettingChange() {
 		reader.SetEnabled(false)
 	} else {
 		// Active batteries follow seatbox state (unless ignoring seatbox)
-		if s.config.DangerouslyIgnoreSeatbox {
+		if s.config.DangerouslyIgnoreSeatbox.Load() {
 			reader.SetEnabled(true)
 		} else {
 			seatboxLock, err := s.redis.HGet(s.ctx, "vehicle", "seatbox:lock").Result()

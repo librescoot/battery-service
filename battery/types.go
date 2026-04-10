@@ -5,6 +5,7 @@ import (
 	"log"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"battery-service/battery/fsm"
@@ -159,14 +160,16 @@ const (
 	BatteryRoleInactive BatteryRole = "inactive"
 )
 
-// Configuration types
+// ServiceConfig holds runtime configuration. Fields that can be reloaded
+// live (via Redis setting pub/sub) are atomic so reader goroutines see
+// consistent values without a lock.
 type ServiceConfig struct {
 	RedisServerAddress       string
 	RedisServerPort          uint16
 	HeartbeatTimeout         time.Duration
 	OffUpdateTime            time.Duration
-	DangerouslyIgnoreSeatbox bool
-	MaxVoltageDelta          uint64 // mV, 0 = disabled
+	DangerouslyIgnoreSeatbox atomic.Bool
+	MaxVoltageDelta          atomic.Uint64 // mV, 0 = disabled
 }
 
 type BatteryReaderConfig struct {

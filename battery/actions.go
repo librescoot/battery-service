@@ -185,5 +185,5 @@ func (r *BatteryReader) updateLastCmdTime() {
 }
 
 func (r *BatteryReader) ShouldIgnoreSeatbox() bool {
-	return r.service.config.DangerouslyIgnoreSeatbox
+	return r.service.config.DangerouslyIgnoreSeatbox.Load()
 }

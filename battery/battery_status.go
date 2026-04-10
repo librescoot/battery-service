@@ -128,7 +128,7 @@ func (r *BatteryReader) sendStatusUpdate() {
 	// or battery swap) and has an active role, check voltage delta against battery 0.
 	// If the delta exceeds the threshold, block activation to prevent damage.
 	// The block is cleared automatically when a new battery with acceptable delta is inserted.
-	maxDelta := r.service.config.MaxVoltageDelta
+	maxDelta := r.service.config.MaxVoltageDelta.Load()
 	if r.index > 0 && maxDelta > 0 && r.role == BatteryRoleActive && r.data.Present && !r.previousData.Present {
 		if r.data.Voltage > 0 {
 			v0, err := r.service.redis.HGet(r.ctx, "battery:0", "voltage").Uint64()
