@@ -169,6 +169,7 @@ type ServiceConfig struct {
 	HeartbeatTimeout         time.Duration
 	OffUpdateTime            time.Duration
 	DangerouslyIgnoreSeatbox atomic.Bool
+	KeepActiveOnSeatboxOpen  atomic.Bool
 	MaxVoltageDelta          atomic.Uint64 // mV, 0 = disabled
 }
 

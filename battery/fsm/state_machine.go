@@ -45,6 +45,7 @@ type BatteryActions interface {
 	ZeroRetryCounters()
 	StopHeartbeatTimer()
 	ShouldIgnoreSeatbox() bool
+	ShouldKeepActiveOnSeatboxOpen() bool
 	StartHeartbeatTimer()
 	ClearHeartbeatTimer()
 	StopTimerIfBatteryEmpty()
@@ -479,6 +480,12 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 					d.justOpened = true
 					return StateSendOpened
 				}
+				// With keep-active-on-seatbox-open, a running battery skips
+				// StateSendOff (which would deactivate it) and goes to heartbeat.
+				if d.actions.ShouldKeepActiveOnSeatboxOpen() {
+					d.justInserted = false
+					return StateHeartbeat
+				}
 				return StateSendOff
 			},
 			librefsm.WithParent(StateTagPresent),
@@ -585,7 +592,14 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateWaitLastCmd, EvLastCmdTimeout, StateCondIgnoreSeatbox).
 
 		// Heartbeat transitions (apply to all heartbeat substates via hierarchy)
-		Transition(StateHeartbeat, EvSeatboxOpened, StateCondJustInserted).
+		// Guarded: with keep-active-on-seatbox-open, the event is absorbed and
+		// the battery keeps heartbeating across the seatbox open.
+		Transition(StateHeartbeat, EvSeatboxOpened, StateCondJustInserted,
+			librefsm.WithGuard(func(c *librefsm.Context) bool {
+				d := c.Data.(*fsmData)
+				return !d.actions.ShouldKeepActiveOnSeatboxOpen()
+			}),
+		).
 
 		// HeartbeatActions transitions
 		Transition(StateHeartbeatActions, EvHeartbeatTimeout, StateHeartbeat).
@@ -625,6 +639,21 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			}),
 		).
 
+		// With keep-active-on-seatbox-open, break out of the seatbox-open
+		// maintenance loop into heartbeat after the wake-up cycle completes.
+		// The battery has now seen OFF -> OPENED -> INSERTED_IN_SCOOTER and
+		// is awake, so heartbeat can take over and send ON.
+		Transition(StateSendInsertedOpen, EvInsertedOpenTimeout, StateHeartbeat,
+			librefsm.WithGuard(func(c *librefsm.Context) bool {
+				d := c.Data.(*fsmData)
+				return d.actions.ShouldKeepActiveOnSeatboxOpen()
+			}),
+			librefsm.WithAction(func(c *librefsm.Context) error {
+				d := c.Data.(*fsmData)
+				d.justInserted = false
+				return nil
+			}),
+		).
 		Transition(StateSendInsertedOpen, EvInsertedOpenTimeout, StateSendOpened,
 			librefsm.WithAction(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)

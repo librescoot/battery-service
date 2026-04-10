@@ -65,8 +65,13 @@ func (s *Service) Start() error {
 	s.logger.Info("Starting battery service")
 
 	s.loadBoolSetting(s.ignoreSeatboxSettingSpec())
+	s.loadBoolSetting(s.keepActiveOnSeatboxOpenSettingSpec())
 	s.loadUint64Setting(s.maxVoltageDeltaSettingSpec())
 	s.loadDualBatterySetting()
+
+	if s.config.DangerouslyIgnoreSeatbox.Load() && s.config.KeepActiveOnSeatboxOpen.Load() {
+		s.logger.Warn("Both dangerously-ignore-seatbox and keep-active-on-seatbox-open are set; dangerously-ignore-seatbox wins (superset)")
+	}
 
 	go s.runRedisSubscriber()
 
@@ -157,6 +162,8 @@ func (s *Service) runRedisSubscriber() {
 				switch msg.Payload {
 				case "scooter.battery-ignores-seatbox":
 					s.reloadBoolSetting(s.ignoreSeatboxSettingSpec())
+				case "scooter.battery-keep-active-on-seatbox-open":
+					s.reloadBoolSetting(s.keepActiveOnSeatboxOpenSettingSpec())
 				case "scooter.max-voltage-delta":
 					s.reloadUint64Setting(s.maxVoltageDeltaSettingSpec())
 				case "scooter.dual-battery":
@@ -329,12 +336,31 @@ func (s *Service) ignoreSeatboxSettingSpec() redisBoolSetting {
 		key:    "scooter.battery-ignores-seatbox",
 		target: &s.config.DangerouslyIgnoreSeatbox,
 		onChange: func(_, _ bool) {
-			for _, reader := range s.readers {
-				if reader != nil && reader.role == BatteryRoleActive {
-					reader.triggerRestart()
-				}
-			}
+			s.restartActiveReaders()
 		},
+	}
+}
+
+// keepActiveOnSeatboxOpenSettingSpec is the opt-in safer sibling of the
+// dangerously-ignore-seatbox flag. Reloading it deliberately restarts any
+// mid-cycle active reader so the new value takes effect at once, unlike the
+// latch-change restart suppression over in reader.go which protects a
+// running battery from being bounced through StateSendOff.
+func (s *Service) keepActiveOnSeatboxOpenSettingSpec() redisBoolSetting {
+	return redisBoolSetting{
+		key:    "scooter.battery-keep-active-on-seatbox-open",
+		target: &s.config.KeepActiveOnSeatboxOpen,
+		onChange: func(_, _ bool) {
+			s.restartActiveReaders()
+		},
+	}
+}
+
+func (s *Service) restartActiveReaders() {
+	for _, reader := range s.readers {
+		if reader != nil && reader.role == BatteryRoleActive {
+			reader.triggerRestart()
+		}
 	}
 }
 
