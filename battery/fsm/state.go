@@ -18,7 +18,6 @@ const (
 	StateCondCheckPresence  State = "cond_check_presence"
 	StateCheckPresence      State = "check_presence"
 	StateWaitLastCmd        State = "wait_last_cmd"
-	StateCondIgnoreSeatbox  State = "cond_ignore_seatbox"
 	StateCondSeatboxLock    State = "cond_seatbox_lock"
 	StateHeartbeat          State = "heartbeat"
 	StateHeartbeatActions   State = "heartbeat_actions"

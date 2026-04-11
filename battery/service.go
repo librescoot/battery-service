@@ -64,14 +64,9 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 func (s *Service) Start() error {
 	s.logger.Info("Starting battery service")
 
-	s.loadBoolSetting(s.ignoreSeatboxSettingSpec())
 	s.loadBoolSetting(s.keepActiveOnSeatboxOpenSettingSpec())
 	s.loadUint64Setting(s.maxVoltageDeltaSettingSpec())
 	s.loadDualBatterySetting()
-
-	if s.config.DangerouslyIgnoreSeatbox.Load() && s.config.KeepActiveOnSeatboxOpen.Load() {
-		s.logger.Warn("Both dangerously-ignore-seatbox and keep-active-on-seatbox-open are set; dangerously-ignore-seatbox wins (superset)")
-	}
 
 	s.loadInitialVehicleState()
 
@@ -162,8 +157,6 @@ func (s *Service) runRedisSubscriber() {
 				}
 			case "settings":
 				switch msg.Payload {
-				case "scooter.battery-ignores-seatbox":
-					s.reloadBoolSetting(s.ignoreSeatboxSettingSpec())
 				case "scooter.battery-keep-active-on-seatbox-open":
 					s.reloadBoolSetting(s.keepActiveOnSeatboxOpenSettingSpec())
 				case "scooter.max-voltage-delta":
@@ -367,21 +360,11 @@ func (s *Service) reloadUint64Setting(spec redisUint64Setting) {
 
 // ----- Setting specs -----
 
-func (s *Service) ignoreSeatboxSettingSpec() redisBoolSetting {
-	return redisBoolSetting{
-		key:    "scooter.battery-ignores-seatbox",
-		target: &s.config.DangerouslyIgnoreSeatbox,
-		onChange: func(_, _ bool) {
-			s.restartActiveReaders()
-		},
-	}
-}
-
-// keepActiveOnSeatboxOpenSettingSpec is the opt-in safer sibling of the
-// dangerously-ignore-seatbox flag. Reloading it deliberately restarts any
-// mid-cycle active reader so the new value takes effect at once, unlike the
-// latch-change restart suppression over in reader.go which protects a
-// running battery from being bounced through StateSendOff.
+// keepActiveOnSeatboxOpenSettingSpec keeps a running battery powered across
+// a seatbox open. Reloading deliberately restarts any mid-cycle active reader
+// so the new value takes effect at once, unlike the latch-change restart
+// suppression over in reader.go which protects a running battery from being
+// bounced through StateSendOff.
 func (s *Service) keepActiveOnSeatboxOpenSettingSpec() redisBoolSetting {
 	return redisBoolSetting{
 		key:    "scooter.battery-keep-active-on-seatbox-open",
@@ -529,16 +512,14 @@ func (s *Service) handleDualBatterySettingChange() {
 	if newRole == BatteryRoleInactive {
 		// Inactive batteries are always disabled
 		reader.SetEnabled(false)
+	} else if s.config.KeepActiveOnSeatboxOpen.Load() {
+		reader.SetEnabled(true)
 	} else {
-		// Active batteries follow seatbox state (unless ignoring seatbox)
-		if s.config.DangerouslyIgnoreSeatbox.Load() {
-			reader.SetEnabled(true)
-		} else {
-			seatboxLock, err := s.redis.HGet(s.ctx, "vehicle", "seatbox:lock").Result()
-			if err == nil {
-				closed := (seatboxLock == "closed")
-				reader.SetEnabled(closed)
-			}
+		// Active batteries follow seatbox state
+		seatboxLock, err := s.redis.HGet(s.ctx, "vehicle", "seatbox:lock").Result()
+		if err == nil {
+			closed := (seatboxLock == "closed")
+			reader.SetEnabled(closed)
 		}
 	}
 

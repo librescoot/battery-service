@@ -170,11 +170,6 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 		switch {
 		case r.voltageDeltaBlocked:
 			newEnabled = false
-		case r.service.config.DangerouslyIgnoreSeatbox.Load():
-			newEnabled = true
-			if !closed {
-				r.logger.Warn("Seatbox opened but battery staying active (--dangerously-ignore-seatbox)")
-			}
 		case r.service.config.KeepActiveOnSeatboxOpen.Load():
 			newEnabled = true
 			if !closed {
@@ -215,13 +210,10 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 		r.data.EmptyOr0Data = 0
 	}
 
-	// Only send seatbox events to FSM if not ignoring seatbox
-	if !r.service.config.DangerouslyIgnoreSeatbox.Load() {
-		if !closed && oldSeatboxLockClosed {
-			r.fsm.SendEvent(fsm.EvSeatboxOpened)
-		} else if closed && !oldSeatboxLockClosed {
-			r.fsm.SendEvent(fsm.EvSeatboxClosed)
-		}
+	if !closed && oldSeatboxLockClosed {
+		r.fsm.SendEvent(fsm.EvSeatboxOpened)
+	} else if closed && !oldSeatboxLockClosed {
+		r.fsm.SendEvent(fsm.EvSeatboxClosed)
 	}
 
 	r.checkInitComplete()

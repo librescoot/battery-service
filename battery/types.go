@@ -168,9 +168,8 @@ type ServiceConfig struct {
 	RedisServerPort          uint16
 	HeartbeatTimeout         time.Duration
 	OffUpdateTime            time.Duration
-	DangerouslyIgnoreSeatbox atomic.Bool
-	KeepActiveOnSeatboxOpen  atomic.Bool
-	MaxVoltageDelta          atomic.Uint64 // mV, 0 = disabled
+	KeepActiveOnSeatboxOpen atomic.Bool
+	MaxVoltageDelta         atomic.Uint64 // mV, 0 = disabled
 }
 
 type BatteryReaderConfig struct {

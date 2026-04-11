@@ -35,8 +35,6 @@ func main() {
 	flag.UintVar(&offUpdateTime, "off-update-time", 1800, "Update time when disabled in seconds (30 minutes)")
 	var debugMode bool
 	flag.BoolVar(&debugMode, "debug", false, "Enable debug logging for detailed NCI/DATA messages")
-	var dangerouslyIgnoreSeatbox bool
-	flag.BoolVar(&dangerouslyIgnoreSeatbox, "dangerously-ignore-seatbox", false, "Keep active batteries active when seatbox opens, suppress all seatbox events (DANGEROUS, legacy)")
 	var keepActiveOnSeatboxOpen bool
 	flag.BoolVar(&keepActiveOnSeatboxOpen, "keep-active-on-seatbox-open", false, "Keep a running battery active across a seatbox open, but let seatbox events flow normally so asleep batteries go through the wake-up cycle and newly inserted batteries are detected without delay")
 
@@ -62,7 +60,6 @@ func main() {
 	config.RedisServerPort = uint16(redisPort)
 	config.HeartbeatTimeout = time.Duration(heartbeatTimeout) * time.Second
 	config.OffUpdateTime = time.Duration(offUpdateTime) * time.Second
-	config.DangerouslyIgnoreSeatbox.Store(dangerouslyIgnoreSeatbox)
 	config.KeepActiveOnSeatboxOpen.Store(keepActiveOnSeatboxOpen)
 	config.MaxVoltageDelta.Store(battery.DefaultMaxVoltageDeltaMV)
 
