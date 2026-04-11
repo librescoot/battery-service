@@ -73,6 +73,8 @@ func (s *Service) Start() error {
 		s.logger.Warn("Both dangerously-ignore-seatbox and keep-active-on-seatbox-open are set; dangerously-ignore-seatbox wins (superset)")
 	}
 
+	s.loadInitialVehicleState()
+
 	go s.runRedisSubscriber()
 
 	for _, reader := range s.readers {
@@ -176,6 +178,40 @@ func (s *Service) runRedisSubscriber() {
 		case <-s.ctx.Done():
 			s.logger.Info("Redis subscriber context cancelled")
 			return
+		}
+	}
+}
+
+// loadInitialVehicleState reads the vehicle state and seatbox lock from Redis
+// before the readers start, so each reader's init completes against real
+// values instead of the 5-second timeout fallback. Without this, a reader
+// waking up between vehicle-service publishes would default to
+// seatboxLockClosed=false, which is the "seatbox open" path and walks a fresh
+// tag through StateSendOff/StateSendOpened instead of straight to heartbeat.
+func (s *Service) loadInitialVehicleState() {
+	vehicleState := VehicleStateStandby
+	if raw, err := s.redis.HGet(s.ctx, "vehicle", "state").Result(); err == nil {
+		vehicleState = VehicleState(raw)
+	} else if err != redis.Nil {
+		s.logger.Warn(fmt.Sprintf("Failed to read initial vehicle state: %v", err))
+	}
+	s.vehicleState = vehicleState
+	s.logger.Info(fmt.Sprintf("Initial vehicle state: %s", vehicleState))
+
+	// Default to open (false) when the key is missing, matching the old
+	// 5-second init timeout behaviour so we stay on the conservative path.
+	seatboxClosed := false
+	if raw, err := s.redis.HGet(s.ctx, "vehicle", "seatbox:lock").Result(); err == nil {
+		seatboxClosed = (raw == "closed")
+	} else if err != redis.Nil {
+		s.logger.Warn(fmt.Sprintf("Failed to read initial seatbox lock state: %v", err))
+	}
+	s.logger.Info(fmt.Sprintf("Initial seatbox lock: closed=%t", seatboxClosed))
+
+	for _, reader := range s.readers {
+		if reader != nil {
+			reader.SendVehicleStateChange(vehicleState)
+			reader.SendSeatboxLockChange(seatboxClosed)
 		}
 	}
 }
