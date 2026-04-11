@@ -187,3 +187,12 @@ func (r *BatteryReader) updateLastCmdTime() {
 func (r *BatteryReader) ShouldIgnoreSeatbox() bool {
 	return r.service.config.DangerouslyIgnoreSeatbox.Load()
 }
+
+func (r *BatteryReader) ShouldKeepActiveOnSeatboxOpen() bool {
+	// Inactive-role slots never run the keep-active path: the wake-up cycle
+	// lights the battery LED, which we don't want on a slot we're not driving.
+	if r.role != BatteryRoleActive {
+		return false
+	}
+	return r.service.config.KeepActiveOnSeatboxOpen.Load()
+}

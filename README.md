@@ -65,7 +65,8 @@ To run the service:
 - `--debug`: Enable debug logging for detailed NCI/DATA messages
 - `--battery1-active`: Enable battery 1 as active in addition to battery 0 (default: inactive)
 - `--disable-battery1`: Disable battery 1 reader entirely
-- `--dangerously-ignore-seatbox`: Keep active batteries active when seatbox opens (DANGEROUS)
+- `--dangerously-ignore-seatbox`: Keep active batteries active when seatbox opens, suppress all seatbox events (DANGEROUS, legacy)
+- `--keep-active-on-seatbox-open`: Keep a running battery active across a seatbox open, but let seatbox events flow normally so asleep batteries go through the wake-up cycle and newly inserted batteries are detected without delay. Also settable at runtime via `settings.scooter.battery-keep-active-on-seatbox-open`.
 
 ## Logging
 

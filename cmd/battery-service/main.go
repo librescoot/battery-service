@@ -36,7 +36,9 @@ func main() {
 	var debugMode bool
 	flag.BoolVar(&debugMode, "debug", false, "Enable debug logging for detailed NCI/DATA messages")
 	var dangerouslyIgnoreSeatbox bool
-	flag.BoolVar(&dangerouslyIgnoreSeatbox, "dangerously-ignore-seatbox", false, "Keep active batteries active when seatbox opens (DANGEROUS)")
+	flag.BoolVar(&dangerouslyIgnoreSeatbox, "dangerously-ignore-seatbox", false, "Keep active batteries active when seatbox opens, suppress all seatbox events (DANGEROUS, legacy)")
+	var keepActiveOnSeatboxOpen bool
+	flag.BoolVar(&keepActiveOnSeatboxOpen, "keep-active-on-seatbox-open", false, "Keep a running battery active across a seatbox open, but let seatbox events flow normally so asleep batteries go through the wake-up cycle and newly inserted batteries are detected without delay")
 
 	var device0, device1 string
 	var logLevel0, logLevel1 int
@@ -61,6 +63,7 @@ func main() {
 	config.HeartbeatTimeout = time.Duration(heartbeatTimeout) * time.Second
 	config.OffUpdateTime = time.Duration(offUpdateTime) * time.Second
 	config.DangerouslyIgnoreSeatbox.Store(dangerouslyIgnoreSeatbox)
+	config.KeepActiveOnSeatboxOpen.Store(keepActiveOnSeatboxOpen)
 	config.MaxVoltageDelta.Store(battery.DefaultMaxVoltageDeltaMV)
 
 	var stdLogger *log.Logger
