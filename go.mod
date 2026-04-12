@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/librescoot/librefsm v0.4.0
-	github.com/librescoot/pn7150 v0.1.6
+	github.com/librescoot/pn7150 v0.1.8
 	github.com/redis/go-redis/v9 v9.18.0
 )
 

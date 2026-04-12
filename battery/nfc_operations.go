@@ -101,18 +101,8 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 	}
 
 	r.previousTagPresent = true
-
-	// Select the tag to transition PN7150 from Discovering → Present.
-	// Without this, ReadBinary fails or returns garbage because the tag's
-	// NFC interface isn't properly activated.
-	if err := r.hal.SelectTag(0); err != nil {
-		r.logger.Warn(fmt.Sprintf("Failed to select tag after discovery: %v", err))
-		r.handleNFCError(err)
-		return false
-	}
-
 	r.tagsDiscovered = true
-	r.logger.Debug(fmt.Sprintf("Tag discovered and selected: %X", tags[0].ID))
+	r.logger.Debug(fmt.Sprintf("Tag discovered: %X", tags[0].ID))
 
 	return true
 }
@@ -125,15 +115,8 @@ func (r *BatteryReader) pollForTagArrival() {
 	tags, err := r.hal.DetectTags()
 	if err == nil && len(tags) > 0 {
 		r.previousTagPresent = true
-
-		if err := r.hal.SelectTag(0); err != nil {
-			r.logger.Warn(fmt.Sprintf("Failed to select tag after poll arrival: %v", err))
-			r.handleNFCError(err)
-			return
-		}
-
 		r.tagsDiscovered = true
-		r.logger.Debug(fmt.Sprintf("Tag arrived and selected: UID=%X on reader %d", tags[0].ID, r.index))
+		r.logger.Debug(fmt.Sprintf("Tag arrived: UID=%X on reader %d", tags[0].ID, r.index))
 		r.fsm.SendEvent(fsm.EvTagArrived)
 	}
 }
