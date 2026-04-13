@@ -223,9 +223,9 @@ type BatteryReader struct {
 	nfcMu sync.Mutex
 
 	// State machine (FSM-based)
-	fsm          *fsmStateMachine
-	fsmCtx       context.Context
-	fsmCancel    context.CancelFunc
+	fsm            *fsmStateMachine
+	fsmCtx         context.Context
+	fsmCancel      context.CancelFunc
 	data           BMSData
 	previousData   BMSData
 	previousFields map[string]any

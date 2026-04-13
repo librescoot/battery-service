@@ -630,7 +630,6 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 
 		// Seatbox open state transitions
 		Transition(StateSendOff, EvOffTimeout, StateCondOff).
-
 		Transition(StateSendOpened, EvOpenedTimeout, StateSendInsertedOpen,
 			librefsm.WithAction(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
