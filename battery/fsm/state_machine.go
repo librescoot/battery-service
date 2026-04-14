@@ -21,6 +21,12 @@ const (
 	timeMaintPollInterval = 30 * time.Minute
 )
 
+// maxConsecutiveReadFailures is the number of back-to-back status read
+// failures tolerated in the heartbeat cycle before falling back to a full
+// presence-check restart. A single arbiter-busy NACK is absorbed so the
+// heartbeat can resend ON on the next cycle and keep the BMS active.
+const maxConsecutiveReadFailures = 3
+
 // BatteryActions is the interface for battery hardware operations
 type BatteryActions interface {
 	TakeInhibitor()
@@ -54,13 +60,14 @@ type BatteryActions interface {
 
 // fsmData holds the FSM-specific state
 type fsmData struct {
-	actions              BatteryActions
-	log                  *slog.Logger
-	ctx                  context.Context // FSM context for cancellation
-	justInserted         bool
-	justOpened           bool
-	latchedSeatboxClosed bool
-	tagAbsentCancel      context.CancelFunc
+	actions                 BatteryActions
+	log                     *slog.Logger
+	ctx                     context.Context // FSM context for cancellation
+	justInserted            bool
+	justOpened              bool
+	latchedSeatboxClosed    bool
+	tagAbsentCancel         context.CancelFunc
+	consecutiveReadFailures int
 }
 
 // StateMachine wraps librefsm.Machine to provide the same interface as before
@@ -132,15 +139,28 @@ func (sm *StateMachine) IsInState(id State) bool {
 }
 
 // readStatusAction reads battery status before a timeout event fires.
-// On failure, it queues EvRestart to restart the tag_present cycle.
-// The subsequent timeout event will be dropped since the restart exits
-// the current state before it's processed.
+// A single transient failure (e.g. NTAG arbiter busy) is absorbed: the
+// natural timer transition continues with last-known state, and the next
+// heartbeat cycle resends ON and retries the read. Only after
+// maxConsecutiveReadFailures back-to-back misses do we fall back to
+// EvRestart, which re-enters cond_check_presence for a full recovery.
 func readStatusAction(c *librefsm.Context) error {
 	d := c.Data.(*fsmData)
-	if err := d.actions.ReadStatus(); err != nil {
-		d.log.Warn("status read failed, restarting", "error", err)
-		c.Send(librefsm.Event{ID: EvRestart})
+	err := d.actions.ReadStatus()
+	if err == nil {
+		d.consecutiveReadFailures = 0
+		return nil
 	}
+	d.consecutiveReadFailures++
+	if d.consecutiveReadFailures >= maxConsecutiveReadFailures {
+		d.log.Warn("status read failed repeatedly, restarting",
+			"error", err, "failures", d.consecutiveReadFailures)
+		d.consecutiveReadFailures = 0
+		c.Send(librefsm.Event{ID: EvRestart})
+		return nil
+	}
+	d.log.Debug("status read failed, will retry on next heartbeat",
+		"error", err, "failures", d.consecutiveReadFailures)
 	return nil
 }
 
@@ -281,6 +301,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 				d.actions.TakeInhibitor()
 				d.actions.ZeroRetryCounters()
 				if d.actions.ReadStatus() == nil {
+					d.consecutiveReadFailures = 0
 					return StateWaitLastCmd
 				}
 				return StateCheckPresence
