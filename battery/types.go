@@ -262,6 +262,7 @@ type BatteryReader struct {
 	// Recovery tracking
 	commFailureCount   int
 	lastSuccessfulComm time.Time
+	commsFaultCount    int
 
 	// Power management
 	suspendInhibitor *SuspendInhibitor

@@ -191,7 +191,7 @@ func (r *BatteryReader) readStatus() bool {
 	status0, err := r.readWithVerification(0x0300)
 	if err != nil {
 		r.logger.Warn(fmt.Sprintf("Failed to read status0: %v", err))
-		r.setFault(BMSFaultBMSCommsError, true)
+		r.noteCommsFailure()
 		r.handleNFCError(err)
 		return false
 	}
@@ -199,7 +199,7 @@ func (r *BatteryReader) readStatus() bool {
 	status1, err := r.readWithVerification(0x0310)
 	if err != nil {
 		r.logger.Warn(fmt.Sprintf("Failed to read status1: %v", err))
-		r.setFault(BMSFaultBMSCommsError, true)
+		r.noteCommsFailure()
 		r.handleNFCError(err)
 		return false
 	}
@@ -207,7 +207,7 @@ func (r *BatteryReader) readStatus() bool {
 	status2, err := r.readWithVerification(0x0320)
 	if err != nil {
 		r.logger.Warn(fmt.Sprintf("Failed to read status2: %v", err))
-		r.setFault(BMSFaultBMSCommsError, true)
+		r.noteCommsFailure()
 		r.handleNFCError(err)
 		return false
 	}
@@ -232,7 +232,7 @@ func (r *BatteryReader) readStatus() bool {
 		r.data.Temperature[0], r.data.Temperature[1], r.data.Temperature[2], r.data.Temperature[3],
 		r.temperatureStateString(), r.data.StateOfHealth, r.data.CycleCount, r.data.SerialNumber, r.data.FwVersion))
 
-	r.setFault(BMSFaultBMSCommsError, false)
+	r.noteCommsSuccess()
 	r.setFault(BMSFaultBMSZeroData, false)
 
 	// Reset communication failure counter on successful read
@@ -278,7 +278,7 @@ func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
 			r.updateLastCmdTime()
 			r.commFailureCount = 0
 			r.lastSuccessfulComm = time.Now()
-			r.setFault(BMSFaultBMSCommsError, false)
+			r.noteCommsSuccess()
 			r.logger.Info(fmt.Sprintf("Sent command: %s", cmd))
 			r.stopDiscovery()
 			return
@@ -305,9 +305,36 @@ func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
 	}
 
 	r.logger.Error(fmt.Sprintf("Failed to write command %s after %d retries: %v", cmd, maxRetries, lastErr))
-	r.setFault(BMSFaultBMSCommsError, true)
+	r.noteCommsFailure()
 	r.handleNFCError(lastErr)
 	r.stopDiscovery()
+}
+
+// maxCommsFailureBeforeFault gates BMSFaultBMSCommsError activation so a
+// single transient NACK (e.g. arbiter busy) doesn't flip the battery to
+// "not present" — especially harmful for inactive-role slots whose next
+// heartbeat is 30 minutes away and can't clear a stale fault.
+const maxCommsFailureBeforeFault = 3
+
+// noteCommsFailure records a failed read/write cycle. Below threshold,
+// the fault stays unset so its 5s set-debounce can't activate. At
+// threshold we request the fault normally; any subsequent success
+// resets the counter and clears it.
+func (r *BatteryReader) noteCommsFailure() {
+	r.commsFaultCount++
+	if r.commsFaultCount >= maxCommsFailureBeforeFault {
+		r.setFault(BMSFaultBMSCommsError, true)
+		return
+	}
+	r.logger.Debug(fmt.Sprintf("Comms failure %d/%d — below fault threshold",
+		r.commsFaultCount, maxCommsFailureBeforeFault))
+}
+
+// noteCommsSuccess resets the consecutive-failure counter and clears
+// any pending or active comms fault.
+func (r *BatteryReader) noteCommsSuccess() {
+	r.commsFaultCount = 0
+	r.setFault(BMSFaultBMSCommsError, false)
 }
 
 func (r *BatteryReader) handleNFCError(err error) {
