@@ -15,6 +15,7 @@ const (
 	EvVehicleStateChanged   librefsm.EventID = "vehicle_state_changed"
 	EvDepartureTimeout      librefsm.EventID = "departure_timeout"
 	EvCheckPresenceTimeout  librefsm.EventID = "check_presence_timeout"
+	EvCheckPresenceReady    librefsm.EventID = "check_presence_ready"
 	EvLastCmdTimeout        librefsm.EventID = "last_cmd_timeout"
 	EvClosedTimeout         librefsm.EventID = "closed_timeout"
 	EvOnOffTimeout          librefsm.EventID = "on_off_timeout"

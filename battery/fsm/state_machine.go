@@ -14,7 +14,13 @@ const (
 	timeReinit        = 2 * time.Second
 	timeDeparture     = 500 * time.Millisecond
 	timeCheckReader   = 10 * time.Second
-	timeCheckPresence = 10 * time.Second
+	timeCheckPresence = 5 * time.Second
+
+	// Poll backoff bounds for check_presence recovery: start short (tag
+	// mirror typically clears within tens of ms) and cap well below
+	// timeCheckPresence so we get multiple attempts in the window.
+	checkPresencePollMin = 100 * time.Millisecond
+	checkPresencePollMax = 800 * time.Millisecond
 	// Note: Heartbeat interval is dynamic - see GetHeartbeatInterval()
 	// Active batteries: 40s (configurable via --heartbeat-timeout)
 	// Inactive batteries: 30min (configurable via --off-update-time)
@@ -38,6 +44,7 @@ type BatteryActions interface {
 	Initialize() error
 	Deinitialize()
 	ReadStatus() error
+	SendCheckPresenceReady()
 	WriteCommand(cmd BMSCommand)
 	GetEnabled() bool
 	GetSeatboxLockClosed() bool
@@ -67,6 +74,7 @@ type fsmData struct {
 	justOpened              bool
 	latchedSeatboxClosed    bool
 	tagAbsentCancel         context.CancelFunc
+	checkPresenceCancel     context.CancelFunc
 	consecutiveReadFailures int
 }
 
@@ -314,13 +322,57 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			}),
 		).
 
-		// Check Presence - send inserted command and wait
+		// Check Presence - send inserted command, then poll ReadStatus with
+		// exponential backoff. Exits early via EvCheckPresenceReady on the
+		// first successful read, or at timeCheckPresence via EvCheckPresenceTimeout.
 		State(StateCheckPresence,
 			librefsm.WithParent(StateTagPresent),
 			librefsm.WithTimeout(timeCheckPresence, EvCheckPresenceTimeout),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
+				d.log.Info("entering check_presence",
+					"timeout", timeCheckPresence,
+					"poll_min", checkPresencePollMin,
+					"poll_max", checkPresencePollMax)
 				d.actions.WriteCommand(BMSCmdInsertedInScooter)
+
+				pollCtx, cancel := context.WithCancel(d.ctx)
+				d.checkPresenceCancel = cancel
+
+				go func() {
+					backoff := checkPresencePollMin
+					attempt := 0
+					for {
+						select {
+						case <-pollCtx.Done():
+							return
+						case <-time.After(backoff):
+						}
+						attempt++
+						if err := d.actions.ReadStatus(); err == nil {
+							d.log.Info("check_presence recovered",
+								"attempt", attempt, "backoff", backoff)
+							d.actions.SendCheckPresenceReady()
+							return
+						} else {
+							d.log.Debug("check_presence poll failed",
+								"attempt", attempt, "backoff", backoff, "error", err)
+						}
+						backoff *= 2
+						if backoff > checkPresencePollMax {
+							backoff = checkPresencePollMax
+						}
+					}
+				}()
+				return nil
+			}),
+			librefsm.WithOnExit(func(c *librefsm.Context) error {
+				d := c.Data.(*fsmData)
+				if d.checkPresenceCancel != nil {
+					d.checkPresenceCancel()
+					d.checkPresenceCancel = nil
+				}
+				d.log.Info("exiting check_presence")
 				return nil
 			}),
 		).
@@ -608,6 +660,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// already verifying tag presence. Self-transition is a no-op (LCA = self).
 		Transition(StateCheckPresence, EvRestart, StateCheckPresence).
 		Transition(StateCheckPresence, EvCheckPresenceTimeout, StateCondCheckPresence).
+		Transition(StateCheckPresence, EvCheckPresenceReady, StateCondCheckPresence).
 
 		// Wait Last Cmd transitions
 		Transition(StateWaitLastCmd, EvLastCmdTimeout, StateCondIgnoreSeatbox).

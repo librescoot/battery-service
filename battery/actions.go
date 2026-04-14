@@ -78,6 +78,12 @@ func (r *BatteryReader) ReadStatus() error {
 	return nil
 }
 
+func (r *BatteryReader) SendCheckPresenceReady() {
+	if r.fsm != nil {
+		r.fsm.SendEvent(fsm.EvCheckPresenceReady)
+	}
+}
+
 func (r *BatteryReader) GetEnabled() bool {
 	return r.enabled
 }
