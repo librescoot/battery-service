@@ -279,7 +279,12 @@ func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
 			r.commFailureCount = 0
 			r.lastSuccessfulComm = time.Now()
 			r.noteCommsSuccess()
-			r.logger.Info(fmt.Sprintf("Sent command: %s", cmd))
+			// Debug level: each heartbeat cycle sends SEATBOX_CLOSED and ON,
+			// and the state-machine transitions logged around this give the
+			// same signal (send_closed / send_on_off). Demoting to debug
+			// drops ~40% of heartbeat-cycle spam in the journal without
+			// losing diagnostics.
+			r.logger.Debug(fmt.Sprintf("Sent command: %s", cmd))
 			r.stopDiscovery()
 			return
 		}
