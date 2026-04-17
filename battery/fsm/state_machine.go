@@ -57,7 +57,6 @@ type BatteryActions interface {
 	IsInactive() bool
 	ZeroRetryCounters()
 	StopHeartbeatTimer()
-	ShouldIgnoreSeatbox() bool
 	ShouldKeepActiveOnSeatboxOpen() bool
 	StartHeartbeatTimer()
 	ClearHeartbeatTimer()
@@ -389,19 +388,6 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			}),
 		).
 
-		// Condition: Ignore Seatbox - check if seatbox should be ignored
-		ConditionState(StateCondIgnoreSeatbox,
-			func(c *librefsm.Context) librefsm.StateID {
-				d := c.Data.(*fsmData)
-				if d.actions.ShouldIgnoreSeatbox() {
-					d.justInserted = false
-					return StateHeartbeat
-				}
-				return StateCondSeatboxLock
-			},
-			librefsm.WithParent(StateTagPresent),
-		).
-
 		// Condition: Seatbox Lock - check seatbox state
 		ConditionState(StateCondSeatboxLock,
 			func(c *librefsm.Context) librefsm.StateID {
@@ -663,7 +649,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateCheckPresence, EvCheckPresenceReady, StateCondCheckPresence).
 
 		// Wait Last Cmd transitions
-		Transition(StateWaitLastCmd, EvLastCmdTimeout, StateCondIgnoreSeatbox).
+		Transition(StateWaitLastCmd, EvLastCmdTimeout, StateCondSeatboxLock).
 
 		// Heartbeat transitions (apply to all heartbeat substates via hierarchy)
 		// Guarded: with keep-active-on-seatbox-open, the event is absorbed and
