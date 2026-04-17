@@ -223,7 +223,17 @@ func (r *BatteryReader) readStatus() bool {
 		}
 	}
 
-	r.parseStatusData(status0, status1, status2)
+	// NFC reads succeeded regardless of data content
+	r.noteCommsSuccess()
+	r.commFailureCount = 0
+	r.lastSuccessfulComm = time.Now()
+
+	if !r.parseStatusData(status0, status1, status2) {
+		// Empty/zero data: parseStatusData already fired fault 33 and
+		// called sendNotPresent(). Don't log zeroed r.data as status,
+		// don't re-clear the fault, don't re-publish.
+		return true
+	}
 
 	r.logger.Debug(fmt.Sprintf("Status read on reader %d: serial=%s charge=%d%% state=%s", r.index, r.data.SerialNumber, r.data.Charge, r.data.State))
 
@@ -231,16 +241,6 @@ func (r *BatteryReader) readStatus() bool {
 		r.data.State.String(), r.data.Voltage, r.data.Current, r.data.Charge,
 		r.data.Temperature[0], r.data.Temperature[1], r.data.Temperature[2], r.data.Temperature[3],
 		r.temperatureStateString(), r.data.StateOfHealth, r.data.CycleCount, r.data.SerialNumber, r.data.FwVersion))
-
-	r.noteCommsSuccess()
-	r.setFault(BMSFaultBMSZeroData, false)
-
-	// Reset communication failure counter on successful read
-	r.commFailureCount = 0
-	r.lastSuccessfulComm = time.Now()
-
-	// Reset recovery counter on successful read
-	r.data.EmptyOr0Data = 0
 
 	r.sendStatusUpdate()
 

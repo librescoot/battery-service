@@ -6,11 +6,11 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func (r *BatteryReader) parseStatusData(status0, status1, status2 []byte) {
+func (r *BatteryReader) parseStatusData(status0, status1, status2 []byte) bool {
 	if len(status0) == 0 || len(status1) == 0 || len(status2) == 0 {
 		r.data.EmptyOr0Data++
 		r.setFault(BMSFaultBMSZeroData, true)
-		return
+		return false
 	}
 
 	allZero := true
@@ -29,7 +29,7 @@ func (r *BatteryReader) parseStatusData(status0, status1, status2 []byte) {
 	if allZero {
 		r.data.EmptyOr0Data++
 		r.setFault(BMSFaultBMSZeroData, true)
-		return
+		return false
 	}
 
 	r.data.Present = true
@@ -99,6 +99,8 @@ func (r *BatteryReader) parseStatusData(status0, status1, status2 []byte) {
 	r.data.LowSOC = r.data.Charge <= BMSMinSOC
 
 	r.updateFaultsFromBatteryData()
+
+	return true
 }
 
 func (r *BatteryReader) updateTemperatureState() {
