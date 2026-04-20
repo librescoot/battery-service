@@ -97,13 +97,16 @@ func (r *BatteryReader) GetVehicleActive() bool {
 }
 
 func (r *BatteryReader) CheckStateCorrect() bool {
-	expectedState := BMSStateIdle
 	if r.enabled {
-		expectedState = BMSStateActive
+		if r.data.State != BMSStateActive {
+			r.logger.Warn("State mismatch", "expected", BMSStateActive, "got", r.data.State)
+			return false
+		}
+		return true
 	}
 
-	if r.data.State != expectedState {
-		r.logger.Warn("State mismatch", "expected", expectedState, "got", r.data.State)
+	if r.data.State != BMSStateIdle && r.data.State != BMSStateAsleep {
+		r.logger.Warn("State mismatch", "expected", "idle or asleep", "got", r.data.State)
 		return false
 	}
 	return true
