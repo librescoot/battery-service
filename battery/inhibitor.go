@@ -23,16 +23,23 @@ type SuspendInhibitor struct {
 // - why: Reason for inhibiting (e.g., "NFC_TRANSACTION")
 // - mode: "block" (prevent suspend) or "delay" (delay suspend briefly)
 //
-// Returns nil if the inhibitor cannot be acquired (e.g., D-Bus unavailable,
-// suspend already in progress).
+// Each inhibitor owns a private D-Bus connection so Release() can close it
+// without affecting other callers. dbus.SystemBus() returns a process-wide
+// shared connection, and closing that would break concurrent users.
 func NewSuspendInhibitor(name, why, mode string) (*SuspendInhibitor, error) {
-	// Connect to system bus
-	conn, err := dbus.SystemBus()
+	conn, err := dbus.SystemBusPrivate()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to system bus: %w", err)
 	}
+	if err := conn.Auth(nil); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to authenticate on system bus: %w", err)
+	}
+	if err := conn.Hello(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to send Hello on system bus: %w", err)
+	}
 
-	// Call the Inhibit method on systemd's login manager
 	obj := conn.Object("org.freedesktop.login1", "/org/freedesktop/login1")
 	call := obj.Call("org.freedesktop.login1.Manager.Inhibit", 0,
 		"sleep:shutdown", // what to inhibit
