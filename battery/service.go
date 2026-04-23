@@ -64,6 +64,9 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 func (s *Service) Start() error {
 	s.logger.Info("Starting battery service")
 
+	// Deprecated alias: if the old key is set, seed KeepActiveOnSeatboxOpen
+	// from it (and warn). The real setting below wins if both are present.
+	s.loadDeprecatedIgnoreSeatboxSetting()
 	s.loadBoolSetting(s.keepActiveOnSeatboxOpenSettingSpec())
 	s.loadUint64Setting(s.maxVoltageDeltaSettingSpec())
 	s.loadDualBatterySetting()
@@ -159,6 +162,8 @@ func (s *Service) runRedisSubscriber() {
 				switch msg.Payload {
 				case "scooter.battery-keep-active-on-seatbox-open":
 					s.reloadBoolSetting(s.keepActiveOnSeatboxOpenSettingSpec())
+				case "scooter.battery-ignores-seatbox":
+					s.handleDeprecatedIgnoreSeatboxChange()
 				case "scooter.max-voltage-delta":
 					s.reloadUint64Setting(s.maxVoltageDeltaSettingSpec())
 				case "scooter.dual-battery":
@@ -373,6 +378,45 @@ func (s *Service) keepActiveOnSeatboxOpenSettingSpec() redisBoolSetting {
 			s.restartActiveReaders()
 		},
 	}
+}
+
+// loadDeprecatedIgnoreSeatboxSetting handles the legacy
+// scooter.battery-ignores-seatbox Redis key. The old flag's full semantics
+// (suppressing seatbox events at the reader, bypassing the FSM's wake-up
+// sequence) were removed in #14, but deployed instances may still have the
+// key set. We treat it as an alias for the safer
+// scooter.battery-keep-active-on-seatbox-open flag and log a deprecation
+// warning so callers migrate. Called before the real setting loads, so the
+// real setting wins if both are present.
+func (s *Service) loadDeprecatedIgnoreSeatboxSetting() {
+	raw, err := s.redis.HGet(s.ctx, "settings", "scooter.battery-ignores-seatbox").Result()
+	if err != nil {
+		if err != redis.Nil {
+			s.logger.Warn(fmt.Sprintf("Failed to load deprecated scooter.battery-ignores-seatbox setting: %v", err))
+		}
+		return
+	}
+	value, ok := parseBoolSetting(raw)
+	if !ok {
+		s.logger.Warn(fmt.Sprintf("Invalid scooter.battery-ignores-seatbox value: %q (must be 'true' or 'false')", raw))
+		return
+	}
+	s.logger.Warn(fmt.Sprintf("Setting 'scooter.battery-ignores-seatbox=%t' is deprecated; treating as alias for 'scooter.battery-keep-active-on-seatbox-open'. Please migrate.", value))
+	s.config.KeepActiveOnSeatboxOpen.Store(value)
+}
+
+// handleDeprecatedIgnoreSeatboxChange reloads the deprecated alias key into
+// the KeepActiveOnSeatboxOpen target when a pub/sub notification arrives on
+// the old channel, logging a deprecation warning each time.
+func (s *Service) handleDeprecatedIgnoreSeatboxChange() {
+	s.logger.Warn("Received pub/sub for deprecated 'scooter.battery-ignores-seatbox'; still treating as alias for 'scooter.battery-keep-active-on-seatbox-open'. Please migrate.")
+	s.reloadBoolSetting(redisBoolSetting{
+		key:    "scooter.battery-ignores-seatbox",
+		target: &s.config.KeepActiveOnSeatboxOpen,
+		onChange: func(_, _ bool) {
+			s.restartActiveReaders()
+		},
+	})
 }
 
 func (s *Service) restartActiveReaders() {
