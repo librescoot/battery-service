@@ -126,32 +126,46 @@ func (r *BatteryReader) updateTemperatureState() {
 }
 
 func (r *BatteryReader) sendStatusUpdate() {
-	// Voltage delta protection: when battery 1 just became present (new insertion
-	// or battery swap) and has an active role, check voltage delta against battery 0.
-	// If the delta exceeds the threshold, block activation to prevent damage.
-	// The block is cleared automatically when a new battery with acceptable delta is inserted.
+	// Voltage delta protection: every status update for an active battery 1,
+	// compare its voltage against battery 0. If the delta exceeds the
+	// threshold, disable battery 1 to prevent damage. The block is cleared
+	// automatically once the delta returns to acceptable range.
+	//
+	// Done on every cycle (not just on the present transition) so that we
+	// catch (a) startup races where battery 0's voltage isn't yet in Redis
+	// when battery 1 first appears, and (b) voltage drift during operation.
 	maxDelta := r.service.config.MaxVoltageDelta.Load()
-	if r.index > 0 && maxDelta > 0 && r.role == BatteryRoleActive && r.data.Present && !r.previousData.Present {
-		if r.data.Voltage > 0 {
-			v0, err := r.service.redis.HGet(r.ctx, "battery:0", "voltage").Uint64()
-			if err == nil && v0 > 0 {
-				v1 := uint64(r.data.Voltage)
-				var delta uint64
-				if v0 > v1 {
-					delta = v0 - v1
-				} else {
-					delta = v1 - v0
-				}
-				if delta > maxDelta {
-					r.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV, battery0=%dmV, battery1=%dmV) - blocking battery 1 activation",
-						delta, maxDelta, v0, v1))
-					r.voltageDeltaBlocked = true
+	if r.index > 0 && maxDelta > 0 && r.role == BatteryRoleActive && r.data.Present && r.data.Voltage > 0 {
+		v0, err := r.service.redis.HGet(r.ctx, "battery:0", "voltage").Uint64()
+		if err == nil && v0 > 0 {
+			v1 := uint64(r.data.Voltage)
+			var delta uint64
+			if v0 > v1 {
+				delta = v0 - v1
+			} else {
+				delta = v1 - v0
+			}
+			if delta > maxDelta && !r.voltageDeltaBlocked {
+				r.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV, battery0=%dmV, battery1=%dmV) - blocking battery 1 activation",
+					delta, maxDelta, v0, v1))
+				r.voltageDeltaBlocked = true
+				if r.enabled {
 					r.enabled = false
-				} else if r.voltageDeltaBlocked {
-					r.logger.Info(fmt.Sprintf("Voltage delta OK (%dmV <= %dmV) - unblocking battery 1",
-						delta, maxDelta))
-					r.voltageDeltaBlocked = false
-					r.enabled = true
+					r.triggerRestart()
+				}
+			} else if delta <= maxDelta && r.voltageDeltaBlocked {
+				r.logger.Info(fmt.Sprintf("Voltage delta OK (%dmV <= %dmV) - unblocking battery 1",
+					delta, maxDelta))
+				r.voltageDeltaBlocked = false
+				var newEnabled bool
+				if r.service.config.KeepActiveOnSeatboxOpen.Load() {
+					newEnabled = true
+				} else {
+					newEnabled = r.seatboxLockClosed
+				}
+				if r.enabled != newEnabled {
+					r.enabled = newEnabled
+					r.triggerRestart()
 				}
 			}
 		}
