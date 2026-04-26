@@ -2,12 +2,14 @@ package battery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"battery-service/battery/fsm"
 	"github.com/librescoot/pn7150"
+	"github.com/redis/go-redis/v9"
 )
 
 func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel int, service *Service) (*BatteryReader, error) {
@@ -259,20 +261,27 @@ func (r *BatteryReader) fetchInitialRedisState() {
 	r.logger.Debug("Fetching initial Redis state from hashes")
 
 	vehicleState, err := r.service.redis.HGet(r.ctx, "vehicle", "state").Result()
-	if err == nil {
+	switch {
+	case err == nil:
 		r.logger.Debug(fmt.Sprintf("Found vehicle state: %s", vehicleState))
 		r.handleVehicleStateChange(VehicleState(vehicleState))
-	} else {
-		r.logger.Warn(fmt.Sprintf("No vehicle state in Redis hash: %v", err))
+	case errors.Is(err, redis.Nil):
+		// vehicle-service hasn't written state yet — expected on cold boot.
+		r.logger.Debug("No vehicle state in Redis hash yet")
+	default:
+		r.logger.Warn(fmt.Sprintf("Failed to read vehicle state from Redis: %v", err))
 	}
 
 	seatboxLock, err := r.service.redis.HGet(r.ctx, "vehicle", "seatbox:lock").Result()
-	if err == nil {
+	switch {
+	case err == nil:
 		closed := (seatboxLock == "closed")
 		r.logger.Debug(fmt.Sprintf("Found seatbox lock state: %s (closed=%t)", seatboxLock, closed))
 		r.handleSeatboxLockChange(closed)
-	} else {
-		r.logger.Warn(fmt.Sprintf("No seatbox lock state in Redis hash: %v", err))
+	case errors.Is(err, redis.Nil):
+		r.logger.Debug("No seatbox lock state in Redis hash yet")
+	default:
+		r.logger.Warn(fmt.Sprintf("Failed to read seatbox lock state from Redis: %v", err))
 	}
 }
 
