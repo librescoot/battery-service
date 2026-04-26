@@ -260,7 +260,9 @@ func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
 	}
 	// If already discovered, proceed directly to write
 
-	r.takeInhibitor()
+	if err := r.takeInhibitor(); err != nil {
+		r.logger.Warn(fmt.Sprintf("Proceeding with NFC write WITHOUT suspend protection: %v", err))
+	}
 	defer r.releaseInhibitor()
 
 	cmdBytes := make([]byte, 4)

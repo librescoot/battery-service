@@ -1,11 +1,18 @@
 package battery
 
 import (
+	"context"
 	"fmt"
 	"syscall"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
+
+// inhibitorCallTimeout caps each Inhibit dbus call. The default dbus service
+// activation timeout is 25s — far too long when logind is broken on a vehicle
+// and we'd block NFC operations indefinitely.
+const inhibitorCallTimeout = 3 * time.Second
 
 // SuspendInhibitor holds a systemd inhibitor lock to prevent system suspend
 // during critical NFC operations. The inhibitor is released when the file
@@ -40,8 +47,11 @@ func NewSuspendInhibitor(name, why, mode string) (*SuspendInhibitor, error) {
 		return nil, fmt.Errorf("failed to send Hello on system bus: %w", err)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), inhibitorCallTimeout)
+	defer cancel()
+
 	obj := conn.Object("org.freedesktop.login1", "/org/freedesktop/login1")
-	call := obj.Call("org.freedesktop.login1.Manager.Inhibit", 0,
+	call := obj.CallWithContext(ctx, "org.freedesktop.login1.Manager.Inhibit", 0,
 		"sleep:shutdown", // what to inhibit
 		name,             // who
 		why,              // why

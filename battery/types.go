@@ -140,7 +140,6 @@ const (
 // Retry limits
 const (
 	BMSMaxZeroRetryHeartbeat = 10
-	BMSMaxRetryTakeInhibitor = 10
 	BMSMinSOC                = 0
 )
 

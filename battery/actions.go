@@ -8,7 +8,9 @@ import (
 )
 
 func (r *BatteryReader) TakeInhibitor() {
-	r.takeInhibitor()
+	if err := r.takeInhibitor(); err != nil {
+		r.logger.Error(fmt.Sprintf("Failed to acquire suspend inhibitor: %v", err))
+	}
 }
 
 func (r *BatteryReader) ReleaseInhibitor() {

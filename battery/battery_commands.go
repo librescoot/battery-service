@@ -5,14 +5,25 @@ import (
 	"time"
 )
 
-func (r *BatteryReader) takeInhibitor() {
+// inhibitorBackoff is the exponential schedule between retries. Total budget
+// before falling back is ~1.85s of sleep + up to 5×3s of dbus call timeouts =
+// ~17s worst case before takeInhibitor returns.
+var inhibitorBackoff = []time.Duration{
+	100 * time.Millisecond,
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+	1 * time.Second,
+}
+
+func (r *BatteryReader) takeInhibitor() error {
 	if r.suspendInhibitor != nil && r.suspendInhibitor.IsActive() {
 		r.logger.Debug("Inhibitor already acquired")
-		return
+		return nil
 	}
 
+	attempts := len(inhibitorBackoff) + 1
 	var lastErr error
-	for attempt := 0; attempt < BMSMaxRetryTakeInhibitor; attempt++ {
+	for attempt := 0; attempt < attempts; attempt++ {
 		inhibitor, err := NewSuspendInhibitor(
 			"BATTERY_NFC_TRANSACTION_INHIBITOR",
 			"NFC_TRANSACTION",
@@ -21,25 +32,24 @@ func (r *BatteryReader) takeInhibitor() {
 		if err == nil {
 			r.suspendInhibitor = inhibitor
 			r.logger.Debug("Inhibitor acquired")
-			return
+			return nil
 		}
 
 		lastErr = err
 		if attempt == 0 {
 			r.logger.Debug(fmt.Sprintf("Failed to acquire suspend inhibitor (attempt %d/%d): %v",
-				attempt+1, BMSMaxRetryTakeInhibitor, err))
+				attempt+1, attempts, err))
 		} else {
 			r.logger.Warn(fmt.Sprintf("Failed to acquire suspend inhibitor (attempt %d/%d): %v",
-				attempt+1, BMSMaxRetryTakeInhibitor, err))
+				attempt+1, attempts, err))
 		}
 
-		if attempt < BMSMaxRetryTakeInhibitor-1 {
-			time.Sleep(1 * time.Millisecond)
+		if attempt < len(inhibitorBackoff) {
+			time.Sleep(inhibitorBackoff[attempt])
 		}
 	}
 
-	r.logger.Error(fmt.Sprintf("Failed to acquire suspend inhibitor after %d attempts: %v",
-		BMSMaxRetryTakeInhibitor, lastErr))
+	return fmt.Errorf("after %d attempts: %w", attempts, lastErr)
 }
 
 func (r *BatteryReader) releaseInhibitor() {
