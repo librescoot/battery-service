@@ -244,6 +244,7 @@ type BatteryReader struct {
 	// State tracking
 	enabled                  bool
 	voltageDeltaBlocked      bool // blocks activation when voltage delta is too large
+	voltageDeltaChecked      bool // latched once delta has been evaluated since last insertion
 	vehicleState             VehicleState
 	seatboxLockClosed        bool
 	latchedSeatboxLockClosed bool

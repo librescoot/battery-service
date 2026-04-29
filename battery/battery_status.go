@@ -126,16 +126,20 @@ func (r *BatteryReader) updateTemperatureState() {
 }
 
 func (r *BatteryReader) sendStatusUpdate() {
-	// Voltage delta protection: every status update for an active battery 1,
-	// compare its voltage against battery 0. If the delta exceeds the
-	// threshold, disable battery 1 to prevent damage. The block is cleared
-	// automatically once the delta returns to acceptable range.
-	//
-	// Done on every cycle (not just on the present transition) so that we
-	// catch (a) startup races where battery 0's voltage isn't yet in Redis
-	// when battery 1 first appears, and (b) voltage drift during operation.
+	// Voltage delta protection: one-shot gate at battery 1's first activation.
+	// Retry while not yet evaluated to cover the startup race where battery 0's
+	// voltage isn't yet in Redis when battery 1 first appears. Once the check
+	// has run, latch — voltage drift after activation must not disable a
+	// running battery. The not-present -> present edge resets the latch so a
+	// fresh insertion gets a new evaluation.
+	if r.index > 0 && r.data.Present && !r.previousData.Present {
+		r.voltageDeltaChecked = false
+		r.voltageDeltaBlocked = false
+	}
+
 	maxDelta := r.service.config.MaxVoltageDelta.Load()
-	if r.index > 0 && maxDelta > 0 && r.role == BatteryRoleActive && r.data.Present && r.data.Voltage > 0 {
+	if r.index > 0 && maxDelta > 0 && r.role == BatteryRoleActive &&
+		!r.voltageDeltaChecked && r.data.Present && r.data.Voltage > 0 {
 		v0, err := r.service.redis.HGet(r.ctx, "battery:0", "voltage").Uint64()
 		if err == nil && v0 > 0 {
 			v1 := uint64(r.data.Voltage)
@@ -145,26 +149,13 @@ func (r *BatteryReader) sendStatusUpdate() {
 			} else {
 				delta = v1 - v0
 			}
-			if delta > maxDelta && !r.voltageDeltaBlocked {
+			r.voltageDeltaChecked = true
+			if delta > maxDelta {
 				r.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV, battery0=%dmV, battery1=%dmV) - blocking battery 1 activation",
 					delta, maxDelta, v0, v1))
 				r.voltageDeltaBlocked = true
 				if r.enabled {
 					r.enabled = false
-					r.triggerRestart()
-				}
-			} else if delta <= maxDelta && r.voltageDeltaBlocked {
-				r.logger.Info(fmt.Sprintf("Voltage delta OK (%dmV <= %dmV) - unblocking battery 1",
-					delta, maxDelta))
-				r.voltageDeltaBlocked = false
-				var newEnabled bool
-				if r.service.config.KeepActiveOnSeatboxOpen.Load() {
-					newEnabled = true
-				} else {
-					newEnabled = r.seatboxLockClosed
-				}
-				if r.enabled != newEnabled {
-					r.enabled = newEnabled
 					r.triggerRestart()
 				}
 			}
