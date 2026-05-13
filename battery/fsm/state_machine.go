@@ -112,22 +112,28 @@ func New(actions BatteryActions, log *slog.Logger) *StateMachine {
 	}
 }
 
-// Run starts the FSM event loop
-func (sm *StateMachine) Run(ctx context.Context) {
+// Start enters the initial state synchronously and spawns the event loop.
+// When Start returns nil, State() is guaranteed to be StateInit, so callers
+// can rely on that invariant without racing the FSM goroutine. A background
+// goroutine waits on ctx and stops the machine when the context is cancelled.
+func (sm *StateMachine) Start(ctx context.Context) error {
 	sm.log.Info("state machine started", "initial_state", StateInit)
 
-	// Store context in fsmData so state handlers can use it for cancellation
+	// Store context in fsmData so state handlers can use it for cancellation.
 	sm.data.ctx = ctx
 
 	if err := sm.machine.Start(ctx); err != nil {
 		sm.log.Error("Failed to start FSM", "error", err)
-		return
+		return err
 	}
 
-	// Block until context is done
-	<-ctx.Done()
-	sm.machine.Stop()
-	sm.log.Info("state machine stopping")
+	go func() {
+		<-ctx.Done()
+		sm.machine.Stop()
+		sm.log.Info("state machine stopping")
+	}()
+
+	return nil
 }
 
 // SendEvent sends an event to the FSM

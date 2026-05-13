@@ -251,6 +251,7 @@ type BatteryReader struct {
 	justOpened               bool
 	lastCmdTime              time.Time
 	initComplete             InitComplete
+	initCompleteSent         bool // EvInitComplete already dispatched; suppresses duplicates
 	previousTagPresent       bool
 	tagsDiscovered           bool
 

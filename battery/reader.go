@@ -59,7 +59,15 @@ func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel i
 func (r *BatteryReader) Start() error {
 	r.logger.Info(fmt.Sprintf("Starting battery reader on device %s", r.deviceName))
 
-	go r.fsm.Run(r.fsmCtx)
+	// Start the FSM synchronously so it is guaranteed to be in StateInit
+	// before the event-loop / Redis-fetch goroutine starts pushing events.
+	// Spawning fsm.Run as a goroutine in parallel with r.run() races: r.run()
+	// can call checkInitComplete() before the FSM has entered StateInit, the
+	// EvInitComplete event is then skipped, and the 5s timeout fallback fires
+	// with broken defaults (notably seatboxLockClosed=false).
+	if err := r.fsm.Start(r.fsmCtx); err != nil {
+		return fmt.Errorf("start fsm: %w", err)
+	}
 
 	go r.run()
 
@@ -94,14 +102,28 @@ func (r *BatteryReader) run() {
 
 	go func() {
 		time.Sleep(5 * time.Second)
-		if r.fsm.State() == fsm.StateInit {
-			r.logger.Warn("Initialization timeout, forcing start with defaults")
-			r.initComplete.VehicleState = true
-			r.initComplete.SeatboxLock = true
-			r.vehicleState = VehicleStateStandby
-			r.seatboxLockClosed = false
-			r.checkInitComplete()
+		if r.initCompleteSent {
+			return
 		}
+		// Only fill in defaults for state we never received. If Redis already
+		// gave us a real value (initComplete.* already true), keep it — the
+		// previous behaviour of unconditionally setting seatboxLockClosed=false
+		// turned the FSM down the seatbox-open path and left an active
+		// battery stuck in idle. See bean librescoot-5u06.
+		if !r.initComplete.VehicleState {
+			r.vehicleState = VehicleStateStandby
+			r.initComplete.VehicleState = true
+			r.logger.Warn("Initialization timeout, defaulting vehicle state to stand-by")
+		}
+		if !r.initComplete.SeatboxLock {
+			// Conservative default: assume closed (the dominant resting state)
+			// rather than the historical 'open', so a missing seatbox key
+			// doesn't dump a freshly inserted battery down the idle path.
+			r.seatboxLockClosed = true
+			r.initComplete.SeatboxLock = true
+			r.logger.Warn("Initialization timeout, defaulting seatbox lock to closed")
+		}
+		r.checkInitComplete()
 	}()
 
 	for {
@@ -231,9 +253,11 @@ func (r *BatteryReader) handleEnabledChange(enabled bool) {
 }
 
 func (r *BatteryReader) checkInitComplete() {
-	if r.initComplete.VehicleState &&
-		r.initComplete.SeatboxLock &&
-		r.fsm.State() == fsm.StateInit {
+	if r.initCompleteSent {
+		return
+	}
+	if r.initComplete.VehicleState && r.initComplete.SeatboxLock {
+		r.initCompleteSent = true
 		r.fsm.SendEvent(fsm.EvInitComplete)
 	}
 }
