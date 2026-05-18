@@ -66,9 +66,14 @@ func (s *Service) Start() error {
 
 	s.loadBoolSetting(s.keepActiveOnSeatboxOpenSettingSpec())
 	s.loadUint64Setting(s.maxVoltageDeltaSettingSpec())
+	s.config.AuxLowKeepActiveEnterMv.Store(auxLowKeepActiveDefaultEnterMv)
+	s.config.AuxLowKeepActiveExitMv.Store(auxLowKeepActiveDefaultExitMv)
+	s.loadUint64Setting(s.auxLowKeepActiveEnterSettingSpec())
+	s.loadUint64Setting(s.auxLowKeepActiveExitSettingSpec())
 	s.loadDualBatterySetting()
 
 	s.loadInitialVehicleState()
+	s.recomputeAuxLowKeepActive(false)
 
 	go s.runRedisSubscriber()
 
@@ -120,11 +125,12 @@ func (s *Service) SetBatteryEnabled(index int, enabled bool) error {
 }
 
 func (s *Service) runRedisSubscriber() {
-	s.logger.Info("Starting Redis subscriber for channels: vehicle(state, seatbox:lock), settings")
+	s.logger.Info("Starting Redis subscriber for channels: vehicle(state, seatbox:lock), settings, aux-battery(voltage)")
 
 	pubsub := s.redis.Subscribe(s.ctx,
 		"vehicle",
 		"settings",
+		"aux-battery",
 	)
 	defer pubsub.Close()
 
@@ -161,8 +167,16 @@ func (s *Service) runRedisSubscriber() {
 					s.reloadBoolSetting(s.keepActiveOnSeatboxOpenSettingSpec())
 				case "scooter.max-voltage-delta":
 					s.reloadUint64Setting(s.maxVoltageDeltaSettingSpec())
+				case "scooter.battery-aux-low-keep-active-enter-mv":
+					s.reloadUint64Setting(s.auxLowKeepActiveEnterSettingSpec())
+				case "scooter.battery-aux-low-keep-active-exit-mv":
+					s.reloadUint64Setting(s.auxLowKeepActiveExitSettingSpec())
 				case "scooter.dual-battery":
 					s.handleDualBatterySettingChange()
+				}
+			case "aux-battery":
+				if msg.Payload == "voltage" {
+					s.recomputeAuxLowKeepActive(true)
 				}
 			default:
 				s.logger.Warn(fmt.Sprintf("Unknown Redis channel: %s", msg.Channel))
@@ -391,6 +405,83 @@ func (s *Service) maxVoltageDeltaSettingSpec() redisUint64Setting {
 	}
 }
 
+// Default Schmitt-trigger thresholds for the aux-low keep-active override.
+// Enter at <11.5V, exit at >=12.0V; the exit threshold matches the existing
+// "warning" boundary in lsc/internal/format/units.go (12000 mV).
+const (
+	auxLowKeepActiveDefaultEnterMv uint64 = 11500
+	auxLowKeepActiveDefaultExitMv  uint64 = 12000
+)
+
+func (s *Service) auxLowKeepActiveEnterSettingSpec() redisUint64Setting {
+	return redisUint64Setting{
+		key:         "scooter.battery-aux-low-keep-active-enter-mv",
+		target:      &s.config.AuxLowKeepActiveEnterMv,
+		valueSuffix: "mV",
+		onChange: func(_, _ uint64) {
+			s.recomputeAuxLowKeepActive(true)
+		},
+	}
+}
+
+func (s *Service) auxLowKeepActiveExitSettingSpec() redisUint64Setting {
+	return redisUint64Setting{
+		key:         "scooter.battery-aux-low-keep-active-exit-mv",
+		target:      &s.config.AuxLowKeepActiveExitMv,
+		valueSuffix: "mV",
+		onChange: func(_, _ uint64) {
+			s.recomputeAuxLowKeepActive(true)
+		},
+	}
+}
+
+// recomputeAuxLowKeepActive reads the current aux battery voltage and updates
+// the AuxLowKeepActive override using a Schmitt-trigger over the configured
+// enter/exit thresholds. On a state change it restarts active readers so the
+// FSM walks through the wake-up sequence the same way it does when the user
+// setting is toggled. allowRestart=false suppresses the restart on startup
+// where readers have not been started yet.
+func (s *Service) recomputeAuxLowKeepActive(allowRestart bool) {
+	raw, err := s.redis.HGet(s.ctx, "aux-battery", "voltage").Result()
+	if err != nil {
+		if err != redis.Nil {
+			s.logger.Warn(fmt.Sprintf("aux-low keep-active: failed to read aux-battery voltage: %v", err))
+		}
+		return
+	}
+	mv, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		s.logger.Warn(fmt.Sprintf("aux-low keep-active: invalid aux-battery voltage %q: %v", raw, err))
+		return
+	}
+
+	enter := s.config.AuxLowKeepActiveEnterMv.Load()
+	exit := s.config.AuxLowKeepActiveExitMv.Load()
+	if exit <= enter {
+		s.logger.Warn(fmt.Sprintf("aux-low keep-active: exit threshold (%d mV) must be greater than enter (%d mV); using values as-is", exit, enter))
+	}
+
+	was := s.config.AuxLowKeepActive.Load()
+	var engaged bool
+	if was {
+		engaged = mv < exit
+	} else {
+		engaged = mv < enter
+	}
+	if engaged == was {
+		return
+	}
+	s.config.AuxLowKeepActive.Store(engaged)
+	if engaged {
+		s.logger.Info(fmt.Sprintf("aux-low keep-active engaged (mv=%d enter=%d exit=%d)", mv, enter, exit))
+	} else {
+		s.logger.Info(fmt.Sprintf("aux-low keep-active disengaged (mv=%d enter=%d exit=%d)", mv, enter, exit))
+	}
+	if allowRestart {
+		s.restartActiveReaders()
+	}
+}
+
 // checkVoltageDelta reads both battery voltages from Redis and checks if the
 // difference is within acceptable limits. Returns true if the delta is OK or
 // if voltage data is unavailable (can't check). Also returns true if the
@@ -512,7 +603,7 @@ func (s *Service) handleDualBatterySettingChange() {
 	if newRole == BatteryRoleInactive {
 		// Inactive batteries are always disabled
 		reader.SetEnabled(false)
-	} else if s.config.KeepActiveOnSeatboxOpen.Load() {
+	} else if s.config.EffectiveKeepActiveOnSeatboxOpen() {
 		reader.SetEnabled(true)
 	} else {
 		// Active batteries follow seatbox state

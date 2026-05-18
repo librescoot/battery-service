@@ -201,5 +201,5 @@ func (r *BatteryReader) ShouldKeepActiveOnSeatboxOpen() bool {
 	if r.role != BatteryRoleActive {
 		return false
 	}
-	return r.service.config.KeepActiveOnSeatboxOpen.Load()
+	return r.service.config.EffectiveKeepActiveOnSeatboxOpen()
 }

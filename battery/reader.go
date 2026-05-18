@@ -194,7 +194,7 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 		switch {
 		case r.voltageDeltaBlocked:
 			newEnabled = false
-		case r.service.config.KeepActiveOnSeatboxOpen.Load():
+		case r.service.config.EffectiveKeepActiveOnSeatboxOpen():
 			newEnabled = true
 			if !closed {
 				r.logger.Info("Seatbox opened but battery staying active (keep-active-on-seatbox-open)")
@@ -224,7 +224,7 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 	// With keep-active-on-seatbox-open, don't restart a running battery on
 	// latch change; the FSM handles seatbox events directly and a restart
 	// would walk the battery through StateSendOff and briefly power it down.
-	if r.latchedSeatboxLockClosed != oldLatch && r.fsm.IsInState(fsm.StateTagPresent) && !r.service.config.KeepActiveOnSeatboxOpen.Load() {
+	if r.latchedSeatboxLockClosed != oldLatch && r.fsm.IsInState(fsm.StateTagPresent) && !r.service.config.EffectiveKeepActiveOnSeatboxOpen() {
 		r.logger.Debug(fmt.Sprintf("Latch changed (%t -> %t) and in StateTagPresent - triggering restart",
 			oldLatch, r.latchedSeatboxLockClosed))
 		r.triggerRestart()

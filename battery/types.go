@@ -169,6 +169,21 @@ type ServiceConfig struct {
 	OffUpdateTime            time.Duration
 	KeepActiveOnSeatboxOpen atomic.Bool
 	MaxVoltageDelta         atomic.Uint64 // mV, 0 = disabled
+
+	// Aux-battery low-voltage override for KeepActiveOnSeatboxOpen.
+	// While aux voltage is below Enter (mV), the override engages and the
+	// effective keep-active flag is forced true. It disengages when aux
+	// voltage rises to at-or-above Exit (mV). AuxLowKeepActive holds the
+	// current latched override state.
+	AuxLowKeepActiveEnterMv atomic.Uint64
+	AuxLowKeepActiveExitMv  atomic.Uint64
+	AuxLowKeepActive        atomic.Bool
+}
+
+// EffectiveKeepActiveOnSeatboxOpen returns the effective keep-active flag,
+// combining the user setting with the aux-low override.
+func (c *ServiceConfig) EffectiveKeepActiveOnSeatboxOpen() bool {
+	return c.KeepActiveOnSeatboxOpen.Load() || c.AuxLowKeepActive.Load()
 }
 
 type BatteryReaderConfig struct {
