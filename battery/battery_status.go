@@ -109,20 +109,22 @@ func (r *BatteryReader) updateTemperatureState() {
 		return
 	}
 
-	maxTemp := r.data.Temperature[0]
-	for _, temp := range r.data.Temperature[1:] {
-		if temp > maxTemp {
-			maxTemp = temp
+	// A single sensor out of range gates the whole pack: any sensor at or
+	// below the cold limit is cold, any sensor at or above the hot limit is
+	// hot. The first out-of-range sensor in index order decides. Taking only
+	// the hottest sensor would miss a single cold cell, which downstream
+	// consumers use to gate recuperation/charging.
+	for _, temp := range r.data.Temperature {
+		if temp <= BMSTemperatureStateColdLimit {
+			r.data.TemperatureState = BMSTemperatureStateCold
+			return
+		}
+		if temp >= BMSTemperatureStateHotLimit {
+			r.data.TemperatureState = BMSTemperatureStateHot
+			return
 		}
 	}
-
-	if maxTemp < BMSTemperatureStateColdLimit {
-		r.data.TemperatureState = BMSTemperatureStateCold
-	} else if maxTemp > BMSTemperatureStateHotLimit {
-		r.data.TemperatureState = BMSTemperatureStateHot
-	} else {
-		r.data.TemperatureState = BMSTemperatureStateIdeal
-	}
+	r.data.TemperatureState = BMSTemperatureStateIdeal
 }
 
 func (r *BatteryReader) sendStatusUpdate() {
