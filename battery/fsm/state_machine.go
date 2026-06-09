@@ -40,7 +40,7 @@ type BatteryActions interface {
 	StartDiscovery() error
 	StopDiscovery()
 	SelectTag()
-	PollForTagArrival()
+	PollForTagArrival() bool
 	Initialize() error
 	Deinitialize()
 	ReadStatus() error
@@ -278,7 +278,9 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 						case <-pollCtx.Done():
 							return
 						case <-ticker.C:
-							d.actions.PollForTagArrival()
+							if !d.actions.PollForTagArrival() {
+								return
+							}
 						}
 					}
 				}()

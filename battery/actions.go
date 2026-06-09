@@ -44,8 +44,8 @@ func (r *BatteryReader) SelectTag() {
 	}
 }
 
-func (r *BatteryReader) PollForTagArrival() {
-	r.pollForTagArrival()
+func (r *BatteryReader) PollForTagArrival() bool {
+	return r.pollForTagArrival()
 }
 
 func (r *BatteryReader) Initialize() error {

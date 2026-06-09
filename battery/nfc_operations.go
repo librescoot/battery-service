@@ -108,18 +108,35 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 	return true
 }
 
-func (r *BatteryReader) pollForTagArrival() {
+// pollForTagArrival polls once for a returning tag while in tag_absent. It
+// returns false to ask the poll loop to stop. A HAL error means the reader is
+// wedged: it would otherwise be swallowed and the slot would never recover, so
+// reinitialize (EvReinit) and stop the loop so it can't queue a second
+// EvReinit before the FSM leaves tag_absent (a stray EvReinit in NFCReaderOff
+// would cut the reinit settle short). Transient errors are logged and polling
+// continues.
+func (r *BatteryReader) pollForTagArrival() bool {
 	r.nfcMu.Lock()
 	defer r.nfcMu.Unlock()
 
-	// Poll for tag arrival in tag_absent state
 	tags, err := r.hal.DetectTags()
-	if err == nil && len(tags) > 0 {
+	if err != nil {
+		if isHALError(err) {
+			r.commFailureCount++
+			r.logger.Warn(fmt.Sprintf("DetectTags HAL error in tag_absent (failure %d), reinitializing: %v", r.commFailureCount, err))
+			r.fsm.SendEvent(fsm.EvReinit)
+			return false
+		}
+		r.logger.Debug(fmt.Sprintf("DetectTags transient error in tag_absent, retrying: %v", err))
+		return true
+	}
+	if len(tags) > 0 {
 		r.previousTagPresent = true
 		r.tagsDiscovered = true
 		r.logger.Debug(fmt.Sprintf("Tag arrived: UID=%X on reader %d", tags[0].ID, r.index))
 		r.fsm.SendEvent(fsm.EvTagArrived)
 	}
+	return true
 }
 
 func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {

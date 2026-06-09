@@ -17,7 +17,7 @@ func (noopActions) ReleaseInhibitor()              {}
 func (noopActions) StartDiscovery() error          { return nil }
 func (noopActions) StopDiscovery()                 {}
 func (noopActions) SelectTag()                     {}
-func (noopActions) PollForTagArrival()             {}
+func (noopActions) PollForTagArrival() bool        { return true }
 func (noopActions) Initialize() error              { return nil }
 func (noopActions) Deinitialize()                  {}
 func (noopActions) ReadStatus() error              { return nil }
