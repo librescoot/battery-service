@@ -18,7 +18,7 @@ func TestTimingConstants(t *testing.T) {
 		{"timeReinit", timeReinit, 2 * time.Second},
 		{"timeDeparture", timeDeparture, 500 * time.Millisecond},
 		{"timeCheckReader", timeCheckReader, 10 * time.Second},
-		{"timeCheckPresence", timeCheckPresence, 10 * time.Second},
+		{"timeCheckPresence", timeCheckPresence, 5 * time.Second},
 		{"timeMaintPollInterval", timeMaintPollInterval, 30 * time.Minute},
 	}
 
