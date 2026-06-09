@@ -191,10 +191,10 @@ func (s *Service) runRedisSubscriber() {
 
 // loadInitialVehicleState reads the vehicle state and seatbox lock from Redis
 // before the readers start, so each reader's init completes against real
-// values instead of the 5-second timeout fallback. Without this, a reader
-// waking up between vehicle-service publishes would default to
-// seatboxLockClosed=false, which is the "seatbox open" path and walks a fresh
-// tag through StateSendOff/StateSendOpened instead of straight to heartbeat.
+// values instead of the 5-second timeout fallback. A missing seatbox key
+// defaults to closed (the resting state), so a reader waking up between
+// vehicle-service publishes doesn't take the "seatbox open" path and walk a
+// running pack through StateSendOff/StateSendOpened instead of heartbeat.
 func (s *Service) loadInitialVehicleState() {
 	vehicleState := VehicleStateStandby
 	if raw, err := s.redis.HGet(s.ctx, "vehicle", "state").Result(); err == nil {
@@ -205,9 +205,10 @@ func (s *Service) loadInitialVehicleState() {
 	s.vehicleState = vehicleState
 	s.logger.Info(fmt.Sprintf("Initial vehicle state: %s", vehicleState))
 
-	// Default to open (false) when the key is missing, matching the old
-	// 5-second init timeout behaviour so we stay on the conservative path.
-	seatboxClosed := false
+	// Default to closed (true) when the key is missing, matching the reader's
+	// own 5-second timeout fallback and the resting state. Defaulting to open
+	// would walk a previously-running pack through SendOff on a boot race.
+	seatboxClosed := true
 	if raw, err := s.redis.HGet(s.ctx, "vehicle", "seatbox:lock").Result(); err == nil {
 		seatboxClosed = (raw == "closed")
 	} else if err != redis.Nil {
