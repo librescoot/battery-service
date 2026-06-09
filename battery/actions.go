@@ -62,6 +62,7 @@ func (r *BatteryReader) Initialize() error {
 	// r.hal.SetTagEventReaderEnabled(true)
 
 	r.logger.Info("NFC reader initialized successfully")
+	r.clearNFCReaderError()
 	return nil
 }
 
@@ -71,6 +72,7 @@ func (r *BatteryReader) Deinitialize() {
 
 	r.deinitializeNFC()
 	r.clearHeartbeatTimer()
+	r.raiseNFCReaderError()
 }
 
 func (r *BatteryReader) ReadStatus() error {

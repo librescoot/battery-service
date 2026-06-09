@@ -271,8 +271,9 @@ type BatteryReader struct {
 	tagsDiscovered           bool
 
 	// Fault management
-	faultMu     sync.Mutex
-	faultStates map[BMSFault]*FaultState
+	faultMu              sync.Mutex
+	faultStates          map[BMSFault]*FaultState
+	nfcReaderErrorRaised bool // NFC reader fault armed for the current error episode (FSM goroutine only)
 
 	// Recovery tracking
 	commFailureCount   int

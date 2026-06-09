@@ -162,6 +162,32 @@ func (r *BatteryReader) sendNotPresent() {
 	r.logger.Warn("Reported as not present due to critical fault")
 }
 
+// raiseNFCReaderError arms the critical NFC reader fault on the first deinit of
+// an error episode. It is edge-triggered: the reader bounces through
+// deinit/init every timeReinit while a reader is unrecoverable, and re-arming
+// on each pass would keep restarting the fault's debounce so it could never
+// elapse. Once the debounce does elapse, the critical-fault path publishes the
+// battery as not-present instead of leaving a stale present=true with a frozen
+// charge. Called from the FSM goroutine (Deinitialize).
+func (r *BatteryReader) raiseNFCReaderError() {
+	if r.nfcReaderErrorRaised {
+		return
+	}
+	r.nfcReaderErrorRaised = true
+	r.setFault(BMSFaultNFCReaderError, true)
+}
+
+// clearNFCReaderError clears the NFC reader fault after a successful init,
+// disarming the pending debounce (or clearing the active fault if it already
+// elapsed). Called from the FSM goroutine (Initialize).
+func (r *BatteryReader) clearNFCReaderError() {
+	if !r.nfcReaderErrorRaised {
+		return
+	}
+	r.nfcReaderErrorRaised = false
+	r.setFault(BMSFaultNFCReaderError, false)
+}
+
 func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present bool) {
 	batteryName := fmt.Sprintf("battery:%d", r.index)
 	faultSetKey := fmt.Sprintf("battery:%d:fault", r.index)
