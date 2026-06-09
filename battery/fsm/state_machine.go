@@ -47,6 +47,7 @@ type BatteryActions interface {
 	SendCheckPresenceReady()
 	WriteCommand(cmd BMSCommand)
 	GetEnabled() bool
+	ShouldSendOn() bool
 	GetSeatboxLockClosed() bool
 	GetVehicleActive() bool
 	CheckStateCorrect() bool
@@ -464,13 +465,13 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			}),
 		).
 
-		// Send On/Off - send on or off command based on enabled state
+		// Send On/Off - send on for an enabled, non-empty pack; off otherwise
 		State(StateSendOnOff,
 			librefsm.WithParent(StateHeartbeatActions),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				var cmd BMSCommand
-				if d.actions.GetEnabled() {
+				if d.actions.ShouldSendOn() {
 					cmd = BMSCmdOn
 				} else {
 					cmd = BMSCmdOff
@@ -506,6 +507,8 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			librefsm.WithParent(StateHeartbeatActions),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
+				// An empty pack stops cycling here and reports idle.
+				d.actions.StopTimerIfBatteryEmpty()
 				d.actions.ReleaseInhibitor()
 				// Timer is managed by parent StateHeartbeat
 				return nil

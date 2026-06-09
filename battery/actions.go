@@ -103,8 +103,22 @@ func (r *BatteryReader) GetVehicleActive() bool {
 	return r.vehicleState == VehicleStateReadyToDrive
 }
 
+// isBatteryEmpty reports whether the pack is drained: the BMS itself flags low
+// SoC and the charge has reached zero. An empty pack is left to rest rather
+// than commanded active.
+func (r *BatteryReader) isBatteryEmpty() bool {
+	return r.data.LowSOC && r.data.Charge <= BMSMinSOC
+}
+
+// ShouldSendOn reports whether the heartbeat should command the pack ON. An
+// empty pack is sent OFF even when enabled, so we don't fight a BMS that
+// refuses to activate.
+func (r *BatteryReader) ShouldSendOn() bool {
+	return r.enabled && !r.isBatteryEmpty()
+}
+
 func (r *BatteryReader) CheckStateCorrect() bool {
-	if r.enabled {
+	if r.enabled && !r.isBatteryEmpty() {
 		if r.data.State != BMSStateActive {
 			r.logger.Warn("State mismatch", "expected", BMSStateActive, "got", r.data.State)
 			return false
@@ -199,9 +213,11 @@ func (r *BatteryReader) ClearHeartbeatTimer() {
 }
 
 func (r *BatteryReader) StopTimerIfBatteryEmpty() {
-	if r.data.Charge == 0 {
-		r.logger.Debug("Battery empty (charge=0), stopping heartbeat timer")
+	if r.isBatteryEmpty() {
+		r.logger.Debug("Battery empty, stopping heartbeat and reporting idle")
 		r.StopHeartbeatTimer()
+		r.data.State = BMSStateIdle
+		r.sendStatusUpdate()
 	}
 }
 

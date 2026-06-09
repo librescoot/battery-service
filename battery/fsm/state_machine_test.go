@@ -24,6 +24,7 @@ func (noopActions) ReadStatus() error              { return nil }
 func (noopActions) SendCheckPresenceReady()        {}
 func (noopActions) WriteCommand(cmd BMSCommand)    {}
 func (noopActions) GetEnabled() bool               { return false }
+func (noopActions) ShouldSendOn() bool             { return false }
 func (noopActions) GetSeatboxLockClosed() bool     { return true }
 func (noopActions) GetVehicleActive() bool         { return false }
 func (noopActions) CheckStateCorrect() bool        { return true }

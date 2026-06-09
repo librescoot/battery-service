@@ -96,8 +96,6 @@ func (r *BatteryReader) parseStatusData(status0, status1, status2 []byte) bool {
 
 	r.updateTemperatureState()
 
-	r.data.LowSOC = r.data.Charge <= BMSMinSOC
-
 	r.updateFaultsFromBatteryData()
 
 	return true
