@@ -346,13 +346,14 @@ func (r *BatteryReader) handleDeparture() {
 	r.logger.Debug(fmt.Sprintf("Tag departure on reader %d, last serial=%s", r.index, r.data.SerialNumber))
 	r.data = BMSData{Present: false}
 
-	// Cancel any pending fault timers to prevent activation after departure
+	// The pack is gone, so clear every pack-reported fault below the
+	// reader-error fault, whether already active (remove it from Redis) or
+	// still debouncing (cancel the pending set). The reader-error fault tracks
+	// the reader itself and is managed by init/deinit, not by tag departure.
 	r.faultMu.Lock()
-	for _, state := range r.faultStates {
-		if state.SetTimer != nil {
-			state.SetTimer.Stop()
-			state.SetTimer = nil
-			state.PendingSet = false
+	for fault := range r.faultStates {
+		if fault < BMSFaultNFCReaderError {
+			r.setFaultLocked(fault, false)
 		}
 	}
 	r.faultMu.Unlock()
