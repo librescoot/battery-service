@@ -30,8 +30,8 @@ func (noopActions) CheckStateCorrect() bool        { return true }
 func (noopActions) GetRemainingCmdTime() time.Duration {
 	return 0
 }
-func (noopActions) GetOpenedTime() time.Duration         { return 0 }
-func (noopActions) GetInsertedTime() time.Duration       { return 0 }
+func (noopActions) GetOpenedTime(bool, bool) time.Duration { return 0 }
+func (noopActions) GetInsertedTime(bool) time.Duration     { return 0 }
 func (noopActions) GetHeartbeatInterval() time.Duration  { return time.Second }
 func (noopActions) IsInactive() bool                     { return true }
 func (noopActions) ZeroRetryCounters()                   {}

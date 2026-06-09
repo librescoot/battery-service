@@ -127,18 +127,38 @@ func (r *BatteryReader) GetRemainingCmdTime() time.Duration {
 	return BMSTimeCmd - elapsed
 }
 
-func (r *BatteryReader) GetOpenedTime() time.Duration {
-	if r.justOpened {
+// GetOpenedTime returns the delay between the SEATBOX_OPENED and the following
+// INSERTED_IN_SCOOTER command in the seatbox-open maintenance loop:
+//   - just inserted: BMSTimeCmd, light the LED ring as fast as possible;
+//   - else first open of an already-present pack: mirror the wake-up time, 3s
+//     if the BMS is asleep (disabled), 2s otherwise;
+//   - else steady-state: the slow maintenance rate.
+//
+// justInserted/justOpened are owned by the FSM and passed in; the previous
+// version read a reader field that was never set, so the first-open delay
+// never applied.
+func (r *BatteryReader) GetOpenedTime(justInserted, justOpened bool) time.Duration {
+	switch {
+	case justInserted:
+		return BMSTimeCmd
+	case justOpened:
 		if r.data.State == BMSStateAsleep {
 			return BMSTimeCmdFirstOpenedAsleep
 		}
 		return BMSTimeCmdFirstOpenedAwake
+	default:
+		return BMSTimeCmdSlow
 	}
-	return BMSTimeCmd
 }
 
-func (r *BatteryReader) GetInsertedTime() time.Duration {
-	return BMSTimeCmd
+// GetInsertedTime returns the delay after the INSERTED_IN_SCOOTER command:
+// BMSTimeCmd on the first pass to re-light the ring quickly, the slow
+// maintenance rate thereafter.
+func (r *BatteryReader) GetInsertedTime(justInserted bool) time.Duration {
+	if justInserted {
+		return BMSTimeCmd
+	}
+	return BMSTimeCmdSlow
 }
 
 func (r *BatteryReader) IsInactive() bool {

@@ -263,7 +263,6 @@ type BatteryReader struct {
 	vehicleState             VehicleState
 	seatboxLockClosed        bool
 	latchedSeatboxLockClosed bool
-	justOpened               bool
 	lastCmdTime              time.Time
 	initComplete             InitComplete
 	initCompleteSent         bool // EvInitComplete already dispatched; suppresses duplicates

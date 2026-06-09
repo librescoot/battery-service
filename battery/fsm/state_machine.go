@@ -51,8 +51,8 @@ type BatteryActions interface {
 	GetVehicleActive() bool
 	CheckStateCorrect() bool
 	GetRemainingCmdTime() time.Duration
-	GetOpenedTime() time.Duration
-	GetInsertedTime() time.Duration
+	GetOpenedTime(justInserted, justOpened bool) time.Duration
+	GetInsertedTime(justInserted bool) time.Duration
 	GetHeartbeatInterval() time.Duration
 	IsInactive() bool
 	ZeroRetryCounters()
@@ -574,7 +574,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				d.actions.WriteCommand(BMSCmdSeatboxOpened)
-				openedTime := d.actions.GetOpenedTime()
+				openedTime := d.actions.GetOpenedTime(d.justInserted, d.justOpened)
 				c.StartTimer("opened", openedTime, librefsm.Event{ID: EvOpenedTimeout})
 				return nil
 			}),
@@ -586,7 +586,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				d.actions.WriteCommand(BMSCmdInsertedInScooter)
-				insertedTime := d.actions.GetInsertedTime()
+				insertedTime := d.actions.GetInsertedTime(d.justInserted)
 				c.StartTimer("inserted_open", insertedTime, librefsm.Event{ID: EvInsertedOpenTimeout}, readStatusAction)
 				return nil
 			}),
