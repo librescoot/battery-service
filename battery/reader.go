@@ -181,13 +181,32 @@ func (r *BatteryReader) handleVehicleStateChange(newState VehicleState) {
 	r.checkInitComplete()
 }
 
+// nextLatchedSeatboxClosed returns the new latched seatbox-closed value used to
+// gate battery power. While ready-to-drive an opening report is ignored (the
+// latch holds its previous value) so a latch-sensor bounce on a rough road
+// can't cut 48V to the motor mid-ride; only a closing report updates it.
+// Leaving ready-to-drive with the seatbox physically open unwinds the latch in
+// handleVehicleStateChange. Outside ready-to-drive the latch tracks the raw
+// value, so this only changes the ready-to-drive case.
+func nextLatchedSeatboxClosed(vehicleState VehicleState, currentLatch, rawClosed bool) bool {
+	if vehicleState != VehicleStateReadyToDrive || (rawClosed && !currentLatch) {
+		return rawClosed
+	}
+	return currentLatch
+}
+
 func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 	r.initComplete.SeatboxLock = true
-	oldSeatboxLockClosed := r.seatboxLockClosed
 	r.seatboxLockClosed = closed
 
-	r.logger.Debug(fmt.Sprintf("Seatbox %s - role=%s, state=%s, enabled=%t",
-		map[bool]string{true: "closed", false: "opened"}[closed], r.role, r.fsm.State(), r.enabled))
+	oldLatch := r.latchedSeatboxLockClosed
+	r.latchedSeatboxLockClosed = nextLatchedSeatboxClosed(r.vehicleState, oldLatch, closed)
+	latchClosed := r.latchedSeatboxLockClosed
+
+	r.logger.Debug(fmt.Sprintf("Seatbox %s (latched %s) - role=%s, state=%s, enabled=%t",
+		map[bool]string{true: "closed", false: "opened"}[closed],
+		map[bool]string{true: "closed", false: "opened"}[latchClosed],
+		r.role, r.fsm.State(), r.enabled))
 
 	if r.role == BatteryRoleActive {
 		var newEnabled bool
@@ -196,11 +215,11 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 			newEnabled = false
 		case r.service.config.EffectiveKeepActiveOnSeatboxOpen():
 			newEnabled = true
-			if !closed {
+			if !latchClosed {
 				r.logger.Info("Seatbox opened but battery staying active (keep-active-on-seatbox-open)")
 			}
 		default:
-			newEnabled = closed
+			newEnabled = latchClosed
 		}
 		if r.enabled != newEnabled {
 			r.logger.Debug(fmt.Sprintf("Active battery enabled state changing from %t to %t", r.enabled, newEnabled))
@@ -212,31 +231,22 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 		}
 	}
 
-	oldLatch := r.latchedSeatboxLockClosed
-	if r.vehicleState == VehicleStateReadyToDrive {
-		r.latchedSeatboxLockClosed = closed
-	} else if closed {
-		r.latchedSeatboxLockClosed = true
-	} else {
-		r.latchedSeatboxLockClosed = false
-	}
-
 	// With keep-active-on-seatbox-open, don't restart a running battery on
 	// latch change; the FSM handles seatbox events directly and a restart
 	// would walk the battery through StateSendOff and briefly power it down.
-	if r.latchedSeatboxLockClosed != oldLatch && r.fsm.IsInState(fsm.StateTagPresent) && !r.service.config.EffectiveKeepActiveOnSeatboxOpen() {
+	if latchClosed != oldLatch && r.fsm.IsInState(fsm.StateTagPresent) && !r.service.config.EffectiveKeepActiveOnSeatboxOpen() {
 		r.logger.Debug(fmt.Sprintf("Latch changed (%t -> %t) and in StateTagPresent - triggering restart",
-			oldLatch, r.latchedSeatboxLockClosed))
+			oldLatch, latchClosed))
 		r.triggerRestart()
 	}
 
-	if r.vehicleState != VehicleStateReadyToDrive || !r.latchedSeatboxLockClosed {
+	if r.vehicleState != VehicleStateReadyToDrive || !latchClosed {
 		r.data.EmptyOr0Data = 0
 	}
 
-	if !closed && oldSeatboxLockClosed {
+	if !latchClosed && oldLatch {
 		r.fsm.SendEvent(fsm.EvSeatboxOpened)
-	} else if closed && !oldSeatboxLockClosed {
+	} else if latchClosed && !oldLatch {
 		r.fsm.SendEvent(fsm.EvSeatboxClosed)
 	}
 

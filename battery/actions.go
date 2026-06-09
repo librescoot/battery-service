@@ -90,8 +90,11 @@ func (r *BatteryReader) GetEnabled() bool {
 	return r.enabled
 }
 
+// GetSeatboxLockClosed returns the latched seatbox-closed value (not the raw
+// sensor) so the FSM's seatbox gate holds across a latch-sensor bounce while
+// ready-to-drive. See nextLatchedSeatboxClosed.
 func (r *BatteryReader) GetSeatboxLockClosed() bool {
-	return r.seatboxLockClosed
+	return r.latchedSeatboxLockClosed
 }
 
 func (r *BatteryReader) GetVehicleActive() bool {
