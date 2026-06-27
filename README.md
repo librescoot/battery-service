@@ -67,6 +67,8 @@ To run the service:
 - `--disable-battery1`: Disable battery 1 reader entirely
 - `--keep-active-on-seatbox-open`: Keep a running battery active across a seatbox open, but let seatbox events flow normally so asleep batteries go through the wake-up cycle and newly inserted batteries are detected without delay. Also settable at runtime via `settings.scooter.battery-keep-active-on-seatbox-open`.
 
+The legacy `settings.scooter.battery-ignores-seatbox` key is still honoured as a deprecated alias for `settings.scooter.battery-keep-active-on-seatbox-open`. The old `--dangerously-ignore-seatbox` CLI flag and its distinct FSM-bypass semantics are gone; the alias just sets the modern flag and logs a deprecation warning. If both keys are set in Redis, the modern key wins.
+
 ## Logging
 
 The service utilizes a leveled logging system. You can control the verbosity of the logs using the `--log` command-line option for the entire service, or `--log0` and `--log1` for individual battery readers. The log levels are:
