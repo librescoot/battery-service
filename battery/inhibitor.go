@@ -1,105 +1,97 @@
 package battery
 
 import (
-	"context"
 	"fmt"
-	"syscall"
+	"net"
 	"time"
-
-	"github.com/godbus/dbus/v5"
 )
 
-// inhibitorCallTimeout caps each Inhibit dbus call. The default dbus service
-// activation timeout is 25s — far too long when logind is broken on a vehicle
-// and we'd block NFC operations indefinitely.
-const inhibitorCallTimeout = 3 * time.Second
+// suspendInhibitorSocket is pm-service's inhibitor coordination socket.
+// pm-service registers one block inhibitor per live connection and will not
+// suspend or hibernate while any is held; closing the connection (or this
+// process dying) releases it. It is a var (not a const) so tests can point it
+// at a mock listener.
+var suspendInhibitorSocket = "/tmp/suspend_inhibitor"
 
-// SuspendInhibitor holds a systemd inhibitor lock to prevent system suspend
-// during critical NFC operations. The inhibitor is released when the file
-// descriptor is closed.
+// inhibitorDialTimeout caps the connect + ack wait. pm-service acks
+// immediately on accept; if it is slow or absent we must not block NFC
+// operations indefinitely.
+const inhibitorDialTimeout = 3 * time.Second
+
+// SuspendInhibitor prevents system suspend during critical NFC operations by
+// holding a connection to pm-service's /tmp/suspend_inhibitor socket open. The
+// inhibitor is released when the connection is closed.
+//
+// pm-service gates suspend on its own registry (this socket + the power:inhibits
+// hash); holding a connection here registers a block inhibitor for the lifetime
+// of the critical section.
 type SuspendInhibitor struct {
-	fd   int
-	conn *dbus.Conn
+	conn net.Conn
 	name string
 }
 
-// NewSuspendInhibitor acquires a systemd inhibitor lock via D-Bus.
-// The inhibitor prevents system suspend and shutdown until released.
+// NewSuspendInhibitor opens and holds a pm-service suspend inhibitor.
 //
-// - name: Application identifier (e.g., "BATTERY_NFC_TRANSACTION_INHIBITOR")
-// - why: Reason for inhibiting (e.g., "NFC_TRANSACTION")
-// - mode: "block" (prevent suspend) or "delay" (delay suspend briefly)
+//   - name: application identifier (e.g. "BATTERY_NFC_TRANSACTION_INHIBITOR"), for logging
+//   - why:  reason for inhibiting (e.g. "NFC_TRANSACTION"), for logging
+//   - mode: "block" (hold the connection until released) or "delay" (released
+//     immediately; the socket only offers block semantics, so delay does not
+//     hold anything)
 //
-// Each inhibitor owns a private D-Bus connection so Release() can close it
-// without affecting other callers. dbus.SystemBus() returns a process-wide
-// shared connection, and closing that would break concurrent users.
+// The connection is held open for the lifetime of the inhibitor. pm-service
+// drops the inhibitor automatically if this process dies, so a crash mid-write
+// can never wedge power management.
 func NewSuspendInhibitor(name, why, mode string) (*SuspendInhibitor, error) {
-	conn, err := dbus.SystemBusPrivate()
+	conn, err := net.DialTimeout("unix", suspendInhibitorSocket, inhibitorDialTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to system bus: %w", err)
+		return nil, fmt.Errorf("failed to connect to suspend inhibitor socket: %w", err)
 	}
-	if err := conn.Auth(nil); err != nil {
+
+	// pm-service sends a one-byte ack on accept. Wait for it (bounded) so we
+	// know the inhibitor is registered before returning.
+	if err := conn.SetReadDeadline(time.Now().Add(inhibitorDialTimeout)); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to authenticate on system bus: %w", err)
+		return nil, fmt.Errorf("failed to set inhibitor read deadline: %w", err)
 	}
-	if err := conn.Hello(); err != nil {
+	ack := make([]byte, 1)
+	if _, err := conn.Read(ack); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to send Hello on system bus: %w", err)
+		return nil, fmt.Errorf("failed to read inhibitor ack: %w", err)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), inhibitorCallTimeout)
-	defer cancel()
-
-	obj := conn.Object("org.freedesktop.login1", "/org/freedesktop/login1")
-	call := obj.CallWithContext(ctx, "org.freedesktop.login1.Manager.Inhibit", 0,
-		"sleep:shutdown", // what to inhibit
-		name,             // who
-		why,              // why
-		mode)             // mode
-
-	if call.Err != nil {
+	// Clear the deadline: the connection is now held indefinitely. We never read
+	// again — closing it is what releases the inhibitor.
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to acquire inhibitor lock: %w", call.Err)
+		return nil, fmt.Errorf("failed to clear inhibitor read deadline: %w", err)
 	}
 
-	// Extract the file descriptor from the response
-	var fd dbus.UnixFD
-	if err := call.Store(&fd); err != nil {
+	si := &SuspendInhibitor{conn: conn, name: name}
+
+	// A "delay" inhibitor is non-blocking at the socket layer: release the
+	// connection right away.
+	if mode == "delay" {
 		conn.Close()
-		return nil, fmt.Errorf("failed to extract file descriptor: %w", err)
-	}
-
-	return &SuspendInhibitor{
-		fd:   int(fd),
-		conn: conn,
-		name: name,
-	}, nil
-}
-
-// Release closes the inhibitor file descriptor and DBus connection,
-// releasing the lock and allowing the system to suspend again.
-func (si *SuspendInhibitor) Release() error {
-	if si.fd < 0 {
-		return nil // already released
-	}
-
-	if err := syscall.Close(si.fd); err != nil {
-		if si.conn != nil {
-			si.conn.Close()
-		}
-		return fmt.Errorf("failed to close inhibitor fd: %w", err)
-	}
-
-	if si.conn != nil {
-		si.conn.Close()
 		si.conn = nil
 	}
 
-	si.fd = -1
+	return si, nil
+}
+
+// Release closes the inhibitor connection, releasing the lock and allowing the
+// system to suspend again.
+func (si *SuspendInhibitor) Release() error {
+	if si.conn == nil {
+		return nil // already released (or delay mode)
+	}
+	err := si.conn.Close()
+	si.conn = nil
+	if err != nil {
+		return fmt.Errorf("failed to close inhibitor connection: %w", err)
+	}
 	return nil
 }
 
-// IsActive returns true if the inhibitor lock is still held
+// IsActive returns true if the inhibitor connection is still held.
 func (si *SuspendInhibitor) IsActive() bool {
-	return si.fd >= 0
+	return si.conn != nil
 }

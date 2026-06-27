@@ -6,7 +6,7 @@ import (
 )
 
 // inhibitorBackoff is the exponential schedule between retries. Total budget
-// before falling back is ~1.85s of sleep + up to 5×3s of dbus call timeouts =
+// before falling back is ~1.85s of sleep + up to 5×3s of socket dial timeouts =
 // ~17s worst case before takeInhibitor returns.
 var inhibitorBackoff = []time.Duration{
 	100 * time.Millisecond,
