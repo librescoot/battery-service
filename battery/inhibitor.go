@@ -50,18 +50,18 @@ func NewSuspendInhibitor(name, why, mode string) (*SuspendInhibitor, error) {
 	// pm-service sends a one-byte ack on accept. Wait for it (bounded) so we
 	// know the inhibitor is registered before returning.
 	if err := conn.SetReadDeadline(time.Now().Add(inhibitorDialTimeout)); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to set inhibitor read deadline: %w", err)
 	}
 	ack := make([]byte, 1)
 	if _, err := conn.Read(ack); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to read inhibitor ack: %w", err)
 	}
 	// Clear the deadline: the connection is now held indefinitely. We never read
 	// again — closing it is what releases the inhibitor.
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to clear inhibitor read deadline: %w", err)
 	}
 
@@ -70,7 +70,7 @@ func NewSuspendInhibitor(name, why, mode string) (*SuspendInhibitor, error) {
 	// A "delay" inhibitor is non-blocking at the socket layer: release the
 	// connection right away.
 	if mode == "delay" {
-		conn.Close()
+		_ = conn.Close()
 		si.conn = nil
 	}
 

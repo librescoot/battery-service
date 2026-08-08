@@ -1,0 +1,10 @@
+version: "2"
+
+linters:
+  exclusions:
+    rules:
+      # A failed Close on a deferred cleanup path is not actionable: the
+      # process is already unwinding and there is nowhere to report it.
+      # Checking it everywhere would add noise without adding safety.
+      - linters: [errcheck]
+        source: "^\\s*defer "

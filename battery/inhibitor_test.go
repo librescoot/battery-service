@@ -31,7 +31,7 @@ func newFakePMSocket(t *testing.T) *fakePMSocket {
 	suspendInhibitorSocket = path
 	t.Cleanup(func() {
 		suspendInhibitorSocket = old
-		ln.Close()
+		_ = ln.Close()
 	})
 
 	go func() {
@@ -44,7 +44,7 @@ func newFakePMSocket(t *testing.T) *fakePMSocket {
 			f.held++
 			f.mu.Unlock()
 			go func(c net.Conn) {
-				c.Write([]byte{0}) // ack
+				_, _ = c.Write([]byte{0}) // ack
 				buf := make([]byte, 1)
 				for {
 					if _, err := c.Read(buf); err != nil {
@@ -54,7 +54,7 @@ func newFakePMSocket(t *testing.T) *fakePMSocket {
 				f.mu.Lock()
 				f.held--
 				f.mu.Unlock()
-				c.Close()
+				_ = c.Close()
 			}(conn)
 		}
 	}()

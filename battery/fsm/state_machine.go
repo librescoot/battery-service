@@ -130,7 +130,9 @@ func (sm *StateMachine) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		sm.machine.Stop()
+		if err := sm.machine.Stop(); err != nil {
+			sm.log.Error("Failed to stop FSM", "error", err)
+		}
 		sm.log.Info("state machine stopping")
 	}()
 

@@ -109,7 +109,9 @@ func (s *Service) Stop() {
 	wg.Wait()
 
 	if s.redis != nil {
-		s.redis.Close()
+		if err := s.redis.Close(); err != nil {
+			s.logger.Warn(fmt.Sprintf("Failed to close Redis connection: %v", err))
+		}
 	}
 
 	s.logger.Info("Battery service stopped")
