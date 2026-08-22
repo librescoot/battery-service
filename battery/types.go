@@ -70,6 +70,32 @@ const (
 	BMSTemperatureStateHotLimit  = 43
 )
 
+// Sensors 0 and 1 move together and have been observed pegged at exactly these
+// two values while sensors 2 and 3 read ambient, in frames that were otherwise
+// intact and that recovered within seconds. Sensors 2 and 3 have never been
+// seen at either value. Both readings therefore mean "no measurement", not a
+// temperature, and only the 0/1 pair is checked for them.
+const (
+	sensors01ExtremeHot  = 105
+	sensors01ExtremeCold = -40
+)
+
+// An extreme on sensors 0 and 1 is believed only when the previous sample was
+// already near it. A pack this size cannot move ~25 K within one poll interval,
+// so a jump straight to an extreme is the artifact rather than a measurement.
+// A pack that really reaches these temperatures also sets its own latching
+// fault bits, which this service parses separately.
+const (
+	sensors01HotCredibleFrom = 80
+	sensors01ColdCredibleTo  = -20
+)
+
+// A previous sample older than this says nothing about whether an extreme is
+// real, so it counts as absent. Covers the active pack's heartbeat interval
+// with margin; a slot polled more slowly than this never accepts an extreme,
+// which is the safe direction.
+const sensors01PreviousMaxAge = 60 * time.Second
+
 type BMSFault int
 
 const (
@@ -102,6 +128,18 @@ const (
 
 func (f BMSFault) IsCritical() bool {
 	return f >= BMSFaultBMSZeroData
+}
+
+// sensors01Sample is the last sample whose sensor 0/1 readings were believed.
+// Voltage and current are kept alongside because they have been seen wrong in
+// the same frames: the frame that pegged both sensors at the hot extreme also
+// reported a voltage around a third of the pack's true voltage, with charge,
+// serial and the other two sensors all correct.
+type sensors01Sample struct {
+	valid       bool
+	temperature [2]int
+	voltage     uint
+	current     int
 }
 
 type BMSData struct {
@@ -272,6 +310,13 @@ type BatteryReader struct {
 	// on each side and only the one facing this slot's reader is ever seen, so
 	// the UID identifies the side as well as the pack.
 	currentTagUID []byte
+
+	// Last sample whose sensor 0/1 readings were believed. Used both to judge
+	// whether a new extreme is real and to stand in for the fields that go
+	// wrong alongside it.
+	lastGoodSensors01     sensors01Sample
+	lastGoodSensors01Time time.Time
+	sensors01Artifacts    uint64
 
 	// Fault management
 	faultMu              sync.Mutex

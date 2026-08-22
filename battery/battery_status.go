@@ -2,6 +2,7 @@ package battery
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -94,17 +95,90 @@ func (r *BatteryReader) parseStatusData(status0, status1, status2 []byte) bool {
 		}
 	}
 
-	r.updateTemperatureState()
+	r.updateTemperatureState(r.applySensors01Guard(time.Now()))
 
 	r.updateFaultsFromBatteryData()
 
 	return true
 }
 
-func (r *BatteryReader) updateTemperatureState() {
+// sensors01Suspect reports whether temperature sensors 0 and 1 are both sitting
+// on the same extreme with nothing to make that credible.
+//
+// The two always move together, so both landing on the same extreme in one
+// sample, while sensors 2 and 3 carry on reading normally, is the shape of the
+// artifact rather than of a pack getting hot or cold. A real excursion arrives
+// gradually and leaves a previous sample near the extreme.
+func sensors01Suspect(t0, t1 int, prev sensors01Sample, prevAge time.Duration) bool {
+	atHot := t0 == sensors01ExtremeHot && t1 == sensors01ExtremeHot
+	atCold := t0 == sensors01ExtremeCold && t1 == sensors01ExtremeCold
+	if !atHot && !atCold {
+		return false
+	}
+
+	// Nothing to judge against, so there is no way to tell the artifact from a
+	// real excursion. Substitute rather than accept.
+	if !prev.valid || prevAge > sensors01PreviousMaxAge {
+		return true
+	}
+
+	if atHot {
+		return prev.temperature[0] < sensors01HotCredibleFrom && prev.temperature[1] < sensors01HotCredibleFrom
+	}
+	return prev.temperature[0] > sensors01ColdCredibleTo && prev.temperature[1] > sensors01ColdCredibleTo
+}
+
+// applySensors01Guard stands the last believed values in for the fields that go
+// wrong together with sensors 0 and 1, and records this sample as the new
+// reference when its readings are believed.
+//
+// It returns whether sensors 0 and 1 may be used to decide the temperature
+// state: true when this sample is believed, and also when the last believed
+// sample stood in for it. False only when there is nothing to substitute, in
+// which case the state has to be decided on sensors 2 and 3.
+func (r *BatteryReader) applySensors01Guard(now time.Time) bool {
+	if !sensors01Suspect(r.data.Temperature[0], r.data.Temperature[1], r.lastGoodSensors01, now.Sub(r.lastGoodSensors01Time)) {
+		r.lastGoodSensors01 = sensors01Sample{
+			valid:       true,
+			temperature: [2]int{r.data.Temperature[0], r.data.Temperature[1]},
+			voltage:     r.data.Voltage,
+			current:     r.data.Current,
+		}
+		r.lastGoodSensors01Time = now
+		return true
+	}
+
+	r.sensors01Artifacts++
+	r.logger.Warn(fmt.Sprintf(
+		"Temperature sensors 0/1 both reading exactly %d with no comparable previous sample, holding last known good temperature, voltage and current (occurrence %d)",
+		r.data.Temperature[0], r.sensors01Artifacts))
+
+	if !r.lastGoodSensors01.valid {
+		// Nothing to substitute. Leave the raw values in place so the reading
+		// stays visible, and let the caller decide the state on sensors 2 and 3.
+		return false
+	}
+
+	r.data.Temperature[0] = r.lastGoodSensors01.temperature[0]
+	r.data.Temperature[1] = r.lastGoodSensors01.temperature[1]
+	r.data.Voltage = r.lastGoodSensors01.voltage
+	r.data.Current = r.lastGoodSensors01.current
+	return true
+}
+
+// updateTemperatureState decides the pack's temperature state. useSensors01 is
+// false when sensors 0 and 1 are sitting on an extreme that cannot be believed
+// and there is no earlier sample to stand in, leaving sensors 2 and 3 as the
+// only usable measurements.
+func (r *BatteryReader) updateTemperatureState(useSensors01 bool) {
 	if len(r.data.Temperature) == 0 {
 		r.data.TemperatureState = BMSTemperatureStateUnknown
 		return
+	}
+
+	channels := r.data.Temperature[:]
+	if !useSensors01 {
+		channels = r.data.Temperature[2:]
 	}
 
 	// A single sensor out of range gates the whole pack: any sensor at or
@@ -112,7 +186,7 @@ func (r *BatteryReader) updateTemperatureState() {
 	// hot. The first out-of-range sensor in index order decides. Taking only
 	// the hottest sensor would miss a single cold cell, which downstream
 	// consumers use to gate recuperation/charging.
-	for _, temp := range r.data.Temperature {
+	for _, temp := range channels {
 		if temp <= BMSTemperatureStateColdLimit {
 			r.data.TemperatureState = BMSTemperatureStateCold
 			return

@@ -22,7 +22,7 @@ func TestUpdateTemperatureState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &BatteryReader{}
 			r.data.Temperature = tc.temp
-			r.updateTemperatureState()
+			r.updateTemperatureState(true)
 			if r.data.TemperatureState != tc.want {
 				t.Errorf("temp=%v: got state %d, want %d", tc.temp, r.data.TemperatureState, tc.want)
 			}
