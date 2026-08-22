@@ -346,6 +346,8 @@ func (r *BatteryReader) handleDeparture(reason string) {
 	r.logger.Info(fmt.Sprintf("Tag departed (%s): UID=%X, last serial=%s",
 		reason, r.currentTagUID, r.data.SerialNumber))
 	r.currentTagUID = nil
+	r.fresh.stopTimer()
+	r.fresh = tagFreshness{}
 	r.data = BMSData{Present: false}
 
 	// The pack is gone, so clear every pack-reported fault below the

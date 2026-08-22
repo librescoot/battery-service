@@ -96,6 +96,50 @@ const (
 // which is the safe direction.
 const sensors01PreviousMaxAge = 60 * time.Second
 
+// How long after a tag change to ask for an early read if the pack has not
+// been seen writing by then. The pack takes 3.0 to 3.5 s on this hardware, so a
+// read requested at this point lands just after it. Without it the next read
+// could be a whole poll interval away: 40 s on the active slot, half an hour on
+// an idle one.
+const tagConfirmAfter = 3 * time.Second
+
+// tagFreshness tracks whether the pack has been seen writing to this slot's tag
+// since the tag last changed.
+//
+// A pack carries a tag on each side and writes its status to the one facing the
+// reader, so the tag on the other side keeps whatever was last written to it,
+// however long ago. Reading a pack through a tag it has not written to recently
+// yields a complete, self-consistent frame of the right pack that is simply
+// old: correct serial, stale charge, voltage and temperatures. Re-reading does
+// not separate the two, since the tag serves the same bytes until the pack
+// overwrites them. What does is the pack writing, which shows up as the frame
+// changing.
+//
+// Frames are published throughout, so a slot never looks empty while this is
+// pending. Only the dual-battery voltage delta check waits on it, because that
+// one latches a decision about whether the second pack may activate.
+type tagFreshness struct {
+	unconfirmed bool
+	haveFrame   bool
+	since       time.Time
+	frame       BMSData
+	timer       *time.Timer
+}
+
+// confirm marks the tag as written to and cancels any pending early read.
+func (f *tagFreshness) confirm() {
+	f.unconfirmed = false
+	f.stopTimer()
+}
+
+// stopTimer cancels the early-read timer if one is pending.
+func (f *tagFreshness) stopTimer() {
+	if f.timer != nil {
+		f.timer.Stop()
+		f.timer = nil
+	}
+}
+
 type BMSFault int
 
 const (
@@ -201,10 +245,10 @@ const (
 // live (via Redis setting pub/sub) are atomic so reader goroutines see
 // consistent values without a lock.
 type ServiceConfig struct {
-	RedisServerAddress       string
-	RedisServerPort          uint16
-	HeartbeatTimeout         time.Duration
-	OffUpdateTime            time.Duration
+	RedisServerAddress      string
+	RedisServerPort         uint16
+	HeartbeatTimeout        time.Duration
+	OffUpdateTime           time.Duration
 	KeepActiveOnSeatboxOpen atomic.Bool
 	MaxVoltageDelta         atomic.Uint64 // mV, 0 = disabled
 
@@ -310,6 +354,10 @@ type BatteryReader struct {
 	// on each side and only the one facing this slot's reader is ever seen, so
 	// the UID identifies the side as well as the pack.
 	currentTagUID []byte
+
+	// Tracks whether the pack has been seen writing to this slot's tag since
+	// the tag changed.
+	fresh tagFreshness
 
 	// Last sample whose sensor 0/1 readings were believed. Used both to judge
 	// whether a new extreme is real and to stand in for the fields that go

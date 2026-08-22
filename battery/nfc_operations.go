@@ -153,6 +153,21 @@ func (r *BatteryReader) noteTagPresent(uid []byte) {
 	}
 	r.currentTagUID = append([]byte(nil), uid...)
 	r.logger.Info(fmt.Sprintf("Tag arrived: UID=%X", uid))
+
+	// This tag may not have been written to since the pack last faced this
+	// reader, so its data is unconfirmed until the pack is seen writing to it.
+	r.fresh.stopTimer()
+	r.fresh = tagFreshness{unconfirmed: true, since: time.Now()}
+
+	// Ask for an early heartbeat if the pack has not written by then. The
+	// heartbeat reads status on its way through, which is what confirms the
+	// tag; without it the next read could be a whole poll interval away. Send
+	// is non-blocking and drops if the queue is full, so this cannot wedge.
+	r.fresh.timer = time.AfterFunc(tagConfirmAfter, func() {
+		if r.fsm != nil {
+			r.fsm.SendEvent(fsm.EvHeartbeatTimeout)
+		}
+	})
 }
 
 func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {

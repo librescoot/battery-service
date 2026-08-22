@@ -199,7 +199,52 @@ func (r *BatteryReader) updateTemperatureState(useSensors01 bool) {
 	r.data.TemperatureState = BMSTemperatureStateIdeal
 }
 
+// statusFrameChanged reports whether anything the pack measures or counts has
+// moved between two frames. A tag the pack has written to since the last read
+// shows movement; one still serving an older snapshot returns the same bytes
+// however often it is read.
+func statusFrameChanged(a, b BMSData) bool {
+	return a.Voltage != b.Voltage ||
+		a.Current != b.Current ||
+		a.Charge != b.Charge ||
+		a.State != b.State ||
+		a.Temperature != b.Temperature ||
+		a.CycleCount != b.CycleCount
+}
+
+// noteFrameFreshness records the first frame after a tag change and marks the
+// tag confirmed once a later frame differs, which is the pack having written to
+// it. Frames are published regardless; this only decides whether the
+// dual-battery voltage delta check may act on them.
+func (r *BatteryReader) noteFrameFreshness() {
+	if !r.fresh.unconfirmed {
+		return
+	}
+
+	if !r.fresh.haveFrame {
+		r.fresh.frame = r.data
+		r.fresh.haveFrame = true
+		return
+	}
+
+	if statusFrameChanged(r.data, r.fresh.frame) {
+		r.fresh.confirm()
+		return
+	}
+
+	// Backstop for the early read: past the bound, act on what we have rather
+	// than leaving the delta check waiting indefinitely on a pack whose
+	// readings never move.
+	if time.Since(r.fresh.since) >= tagConfirmAfter {
+		r.logger.Warn(fmt.Sprintf(
+			"Tag data unchanged %s after the tag changed, treating it as current", tagConfirmAfter))
+		r.fresh.confirm()
+	}
+}
+
 func (r *BatteryReader) sendStatusUpdate() {
+	r.noteFrameFreshness()
+
 	// Voltage delta protection: one-shot gate at battery 1's first activation.
 	// Retry while not yet evaluated to cover the startup race where battery 0's
 	// voltage isn't yet in Redis when battery 1 first appears. Once the check
@@ -211,9 +256,12 @@ func (r *BatteryReader) sendStatusUpdate() {
 		r.voltageDeltaBlocked = false
 	}
 
+	// Wait for the tag to be confirmed before latching this decision. A tag the
+	// pack has not written to recently reports a voltage from the pack's
+	// previous life, which would block or permit activation on the wrong number.
 	maxDelta := r.service.config.MaxVoltageDelta.Load()
 	if r.index > 0 && maxDelta > 0 && r.role == BatteryRoleActive &&
-		!r.voltageDeltaChecked && r.data.Present && r.data.Voltage > 0 {
+		!r.voltageDeltaChecked && !r.fresh.unconfirmed && r.data.Present && r.data.Voltage > 0 {
 		v0, err := r.service.redis.HGet(r.ctx, "battery:0", "voltage").Uint64()
 		if err == nil && v0 > 0 {
 			v1 := uint64(r.data.Voltage)
