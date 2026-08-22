@@ -268,6 +268,10 @@ type BatteryReader struct {
 	initCompleteSent         bool // EvInitComplete already dispatched; suppresses duplicates
 	previousTagPresent       bool
 	tagsDiscovered           bool
+	// UID of the tag currently selected on this reader. A pack carries a tag
+	// on each side and only the one facing this slot's reader is ever seen, so
+	// the UID identifies the side as well as the pack.
+	currentTagUID []byte
 
 	// Fault management
 	faultMu              sync.Mutex

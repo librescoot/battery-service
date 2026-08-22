@@ -342,8 +342,10 @@ func (r *BatteryReader) makeLogCallback() hal.LogCallback {
 	}
 }
 
-func (r *BatteryReader) handleDeparture() {
-	r.logger.Debug(fmt.Sprintf("Tag departure on reader %d, last serial=%s", r.index, r.data.SerialNumber))
+func (r *BatteryReader) handleDeparture(reason string) {
+	r.logger.Info(fmt.Sprintf("Tag departed (%s): UID=%X, last serial=%s",
+		reason, r.currentTagUID, r.data.SerialNumber))
+	r.currentTagUID = nil
 	r.data = BMSData{Present: false}
 
 	// The pack is gone, so clear every pack-reported fault below the

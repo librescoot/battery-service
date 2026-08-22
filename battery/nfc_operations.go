@@ -92,10 +92,9 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 		r.logger.Debug(fmt.Sprintf("No tags on reader %d (previousTagPresent=%v)", r.index, r.previousTagPresent))
 		// If we previously had a tag present and now detect no tags, treat as tag departure
 		if r.previousTagPresent {
-			r.logger.Info("Tag departed (no tags detected)")
 			r.previousTagPresent = false
 			r.tagsDiscovered = false
-			r.handleDeparture()
+			r.handleDeparture("no tags detected")
 			r.fsm.SendEvent(fsm.EvTagDeparted) // Always send, let FSM decide what to do
 		}
 		return false
@@ -103,7 +102,7 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 
 	r.previousTagPresent = true
 	r.tagsDiscovered = true
-	r.logger.Debug(fmt.Sprintf("Tag discovered: UID=%X on reader %d", tags[0].ID, r.index))
+	r.noteTagPresent(tags[0].ID)
 
 	return true
 }
@@ -133,10 +132,27 @@ func (r *BatteryReader) pollForTagArrival() bool {
 	if len(tags) > 0 {
 		r.previousTagPresent = true
 		r.tagsDiscovered = true
-		r.logger.Debug(fmt.Sprintf("Tag arrived: UID=%X on reader %d", tags[0].ID, r.index))
+		r.noteTagPresent(tags[0].ID)
 		r.fsm.SendEvent(fsm.EvTagArrived)
 	}
 	return true
+}
+
+// noteTagPresent records the UID of the tag now selected on this reader and
+// reports it at info level the first time it is seen, or when it changes.
+// Discovery runs again after every command cycle, so logging every hit would
+// repeat the same UID every few seconds.
+//
+// The UID is worth having in the log because a pack carries a tag on each side
+// and each slot's reader faces a different one, so the same pack answers with a
+// different UID depending on which slot it sits in.
+func (r *BatteryReader) noteTagPresent(uid []byte) {
+	if len(uid) == 0 || bytes.Equal(uid, r.currentTagUID) {
+		r.logger.Debug(fmt.Sprintf("Tag discovered: UID=%X on reader %d", uid, r.index))
+		return
+	}
+	r.currentTagUID = append([]byte(nil), uid...)
+	r.logger.Info(fmt.Sprintf("Tag arrived: UID=%X", uid))
 }
 
 func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
@@ -368,9 +384,8 @@ func (r *BatteryReader) handleNFCError(err error) {
 
 	// Handle tag departure - no fault, clean transition
 	if isTagDepartedError(err) {
-		r.logger.Info("Tag departure detected")
 		r.previousTagPresent = false
-		r.handleDeparture()
+		r.handleDeparture("reader reported departure")
 		r.fsm.SendEvent(fsm.EvTagDeparted) // Always send, let FSM decide what to do
 		return
 	}
