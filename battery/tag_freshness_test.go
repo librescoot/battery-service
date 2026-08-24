@@ -83,7 +83,7 @@ func TestFreshnessNeedsTheFrameToMove(t *testing.T) {
 }
 
 // A pack whose readings never move must not leave the check waiting forever.
-func TestFreshnessConfirmsAfterTheBound(t *testing.T) {
+func TestFreshnessConfirmsAfterTheDeadline(t *testing.T) {
 	r := newFreshnessTestReader()
 	r.noteTagPresent([]byte{0x04, 0x30, 0x3F, 0x62, 0x77, 0x70, 0x80})
 
@@ -93,7 +93,7 @@ func TestFreshnessConfirmsAfterTheBound(t *testing.T) {
 		t.Fatal("the first frame confirmed the tag on its own")
 	}
 
-	r.fresh.since = time.Now().Add(-tagConfirmAfter - time.Second)
+	r.fresh.since = time.Now().Add(-tagConfirmDeadline - time.Second)
 	r.data = staleFrame
 	r.noteFrameFreshness()
 	if r.fresh.unconfirmed {
@@ -199,5 +199,57 @@ func TestFreshnessClearedOnDeparture(t *testing.T) {
 
 	if r.fresh.unconfirmed || r.fresh.timer != nil {
 		t.Error("freshness tracking survived the departure")
+	}
+}
+
+// An unchanged frame inside the deadline must not settle the question. The
+// measured spread for a pack writing after a tag change is 2.9 to 5.7 s, so
+// giving up on the first unchanged frame concedes about half the time.
+func TestFreshnessKeepsAskingInsideTheDeadline(t *testing.T) {
+	r := newFreshnessTestReader()
+	r.noteTagPresent([]byte{0x04, 0x30, 0x3F, 0x62, 0x77, 0x70, 0x80})
+
+	r.data = staleFrame
+	r.noteFrameFreshness()
+
+	// Frames at the cadence the swap on hardware produced: unchanged past the
+	// old 3 s bound, then moving at 5.7 s.
+	r.fresh.since = time.Now().Add(-4 * time.Second)
+	r.data = staleFrame
+	r.noteFrameFreshness()
+	if !r.fresh.unconfirmed {
+		t.Fatal("gave up on an unchanged frame while still inside the deadline")
+	}
+	if r.fresh.timer == nil {
+		t.Error("did not ask for another read after an unchanged frame")
+	}
+
+	r.fresh.since = time.Now().Add(-6 * time.Second)
+	r.data = liveFrame
+	r.noteFrameFreshness()
+	if r.fresh.unconfirmed {
+		t.Fatal("the pack writing at 5.7 s did not confirm the tag")
+	}
+	if r.fresh.timer != nil {
+		t.Error("the retry timer outlived the confirmation")
+	}
+}
+
+// Each unchanged frame replaces the pending request rather than stacking them.
+func TestFreshnessRetryDoesNotStackTimers(t *testing.T) {
+	r := newFreshnessTestReader()
+	r.noteTagPresent([]byte{0x04, 0x30, 0x3F, 0x62, 0x77, 0x70, 0x80})
+
+	r.data = staleFrame
+	r.noteFrameFreshness()
+	first := r.fresh.timer
+
+	r.data = staleFrame
+	r.noteFrameFreshness()
+	if r.fresh.timer == first {
+		t.Error("the retry reused the pending timer")
+	}
+	if first != nil && first.Stop() {
+		t.Error("the replaced timer was still pending")
 	}
 }

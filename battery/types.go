@@ -96,12 +96,20 @@ const (
 // which is the safe direction.
 const sensors01PreviousMaxAge = 60 * time.Second
 
-// How long after a tag change to ask for an early read if the pack has not
-// been seen writing by then. The pack takes 3.0 to 3.5 s on this hardware, so a
-// read requested at this point lands just after it. Without it the next read
-// could be a whole poll interval away: 40 s on the active slot, half an hour on
-// an idle one.
-const tagConfirmAfter = 3 * time.Second
+// How often to ask for an early read while a tag is still unconfirmed. Without
+// it the next read could be a whole poll interval away: 40 s on the active
+// slot, half an hour on an idle one.
+const tagConfirmRetry = 3 * time.Second
+
+// How long to keep asking before accepting an unchanged frame as current.
+//
+// Measured on this hardware, the pack takes 2.9 to 5.7 s to write after a tag
+// change. A deadline inside that range loses the race to its own backstop:
+// with it at 3 s, four of eight tag changes were accepted unconfirmed while
+// the pack went on to write shortly afterwards. This sits above the range so
+// the pack normally wins. Nothing is withheld while it runs, so the only cost
+// of the longer wait is that one internal check waits with it.
+const tagConfirmDeadline = 9 * time.Second
 
 // tagFreshness tracks whether the pack has been seen writing to this slot's tag
 // since the tag last changed.
@@ -124,6 +132,11 @@ type tagFreshness struct {
 	since       time.Time
 	frame       BMSData
 	timer       *time.Timer
+}
+
+// expired reports whether the pack has had long enough to write.
+func (f *tagFreshness) expired() bool {
+	return time.Since(f.since) >= tagConfirmDeadline
 }
 
 // confirm marks the tag as written to and cancels any pending early read.

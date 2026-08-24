@@ -232,14 +232,18 @@ func (r *BatteryReader) noteFrameFreshness() {
 		return
 	}
 
-	// Backstop for the early read: past the bound, act on what we have rather
-	// than leaving the delta check waiting indefinitely on a pack whose
-	// readings never move.
-	if time.Since(r.fresh.since) >= tagConfirmAfter {
+	// Backstop: past the deadline, act on what we have rather than leaving the
+	// delta check waiting indefinitely on a pack whose readings never move.
+	if r.fresh.expired() {
 		r.logger.Warn(fmt.Sprintf(
-			"Tag data unchanged %s after the tag changed, treating it as current", tagConfirmAfter))
+			"Tag data unchanged %s after the tag changed, treating it as current", tagConfirmDeadline))
 		r.fresh.confirm()
+		return
 	}
+
+	// Still within the deadline, so give the pack another chance to write
+	// rather than settling for this frame.
+	r.armConfirmRead()
 }
 
 func (r *BatteryReader) sendStatusUpdate() {

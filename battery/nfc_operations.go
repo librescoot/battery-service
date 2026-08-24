@@ -158,12 +158,17 @@ func (r *BatteryReader) noteTagPresent(uid []byte) {
 	// reader, so its data is unconfirmed until the pack is seen writing to it.
 	r.fresh.stopTimer()
 	r.fresh = tagFreshness{unconfirmed: true, since: time.Now()}
+	r.armConfirmRead()
+}
 
-	// Ask for an early heartbeat if the pack has not written by then. The
-	// heartbeat reads status on its way through, which is what confirms the
-	// tag; without it the next read could be a whole poll interval away. Send
-	// is non-blocking and drops if the queue is full, so this cannot wedge.
-	r.fresh.timer = time.AfterFunc(tagConfirmAfter, func() {
+// armConfirmRead asks the FSM for an early heartbeat, which reads status on its
+// way through. That read is what gets the tag confirmed; without it the next
+// one could be a whole poll interval away. Re-armed after each read that has
+// not confirmed yet, so a slot stays bounded however slowly it polls. Send is
+// non-blocking and drops if the queue is full, so this cannot wedge.
+func (r *BatteryReader) armConfirmRead() {
+	r.fresh.stopTimer()
+	r.fresh.timer = time.AfterFunc(tagConfirmRetry, func() {
 		if r.fsm != nil {
 			r.fsm.SendEvent(fsm.EvHeartbeatTimeout)
 		}
