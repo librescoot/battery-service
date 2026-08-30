@@ -1,102 +1,78 @@
 # Librescoot Battery Service
 
-The Librescoot Battery Service is a critical component responsible for managing and monitoring battery systems through NFC communication. This service handles real-time battery state management, safety monitoring, and communication with the Redis messaging system.
-
 Part of the [Librescoot](https://librescoot.org/) open-source platform.
 
-## Features
+`battery-service` monitors Librescoot battery packs through PN7150 NFC readers
+and publishes battery state to Redis. It supports two reader slots and tracks
+battery presence, status, temperature, and faults.
 
-- Dual battery monitoring system with a single thread per reader
-- Real-time battery state management
-- NFC-based communication with batteries
-- Temperature monitoring and safety controls
-- Redis-based messaging system for component communication
-- Configurable update intervals for different battery states
-- Automatic battery presence detection
-- Leveled logging for granular log control
-- Build-time and git revision information embedded in the binary
+## Capabilities
 
-## Dependencies
+- Reads BMS status from configured NFC devices.
+- Publishes per-pack state, measurements, identity data, and fault state.
+- Monitors pack temperature and derives `cold`, `ideal`, `hot`, or `unknown`
+  temperature state.
+- Coordinates reader activity with vehicle and seatbox state.
+- Supports a second active battery and guards activation with a configurable
+  voltage-difference check.
 
-- `github.com/redis/go-redis/v9` - Redis client for Go
-- `golang.org/x/sys` - System calls and primitives
-- NFC Hardware Abstraction Layer (HAL) for PN7150 NFC controller
+## Operation and Redis interface
 
-## System Architecture
+Each reader maintains a `battery:<index>` hash (`battery:0` and, when enabled,
+`battery:1`). Published fields include presence, BMS state, voltage, current,
+charge, four temperatures, temperature state, cycle count, state of health,
+serial number, manufacture date, and firmware version. Changed fields are
+announced on the matching `battery:<index>` channel.
 
-The service is built around two main components:
-- **Battery Service**: Core service managing multiple battery readers
-- **Battery Reader**: Individual reader instances managing NFC communication with batteries. Each reader runs in its own thread.
+Active pack faults are held in `battery:<index>:fault`; fault events are also
+appended to `events:faults` with the corresponding battery group. The service
+subscribes to `vehicle`, `settings`, and `aux-battery`. Vehicle `state` and
+`seatbox:lock` changes control reader behavior.
 
-### Key Components
+## Configuration
 
-- **NFC Communication**: Handles low-level communication with battery NFC tags
-- **State Management**: Tracks battery presence, temperature, and operational states
-- **Redis Integration**: Manages communication with other system components
-- **Safety Monitoring**: Monitors temperature limits and battery states
-- **Configuration System**: Flexible configuration for different deployment scenarios
+Run `bin/battery-service -help` after building for the authoritative flag list.
+Command-line configuration selects Redis, update and heartbeat intervals,
+reader device paths, reader roles, logging, and debug output. Reader 0 is active
+by default. Reader 1 can be enabled as active with a command-line option or by
+the `scooter.dual-battery` Redis setting; it can also be disabled entirely.
 
-## Building and Running
+The following `settings` hash fields are read at startup and reloaded on
+notification:
 
-To build the service:
+- `scooter.dual-battery`
+- `scooter.battery-keep-active-on-seatbox-open`
+- `scooter.max-voltage-delta`
+- `scooter.battery-aux-low-keep-active-enter-mv`
+- `scooter.battery-aux-low-keep-active-exit-mv`
+
+Temperature, battery activation, and voltage-difference settings affect power
+behavior. Restrict their modification to trusted configuration components.
+
+## Build and test
 
 ```bash
-make build
+make build         # Linux ARMv7 binary: bin/battery-service
+make build-host    # local-development binary: bin/battery-service-host
+make build-native  # local-development binary: bin/battery-service
+make test
+make lint          # requires golangci-lint
 ```
 
-To run the service:
+## Deployment and operations
 
-```bash
-./battery-service [options]
-```
+The Yocto layer ships `librescoot-battery.service`, which requires Valkey,
+starts after the vehicle service, and wants systemd-logind. The service requires
+a reachable Redis-compatible datastore, access to the configured PN7150 NFC
+devices (defaults are `/dev/pn5xx_i2c0` and `/dev/pn5xx_i2c1`), and hardware
+compatible with the battery reader protocol.
 
-### Command Line Options
-
-- `--version`: Show version information (git revision and build time)
-- `--redis-server`: Redis server address (default: "127.0.0.1")
-- `--redis-port`: Redis server port (default: 6379)
-- `--off-update-time`: Update time when off in seconds (default: 1800)
-- `--heartbeat-timeout`: Heartbeat timeout in seconds (default: 40)
-- `--device0`: Battery 0 NFC device path (default: "/dev/pn5xx_i2c0")
-- `--device1`: Battery 1 NFC device path (default: "/dev/pn5xx_i2c1")
-- `--log`: Service-wide log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG, default: 3)
-- `--log0`: Battery 0 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG). Defaults to `--log` if not set.
-- `--log1`: Battery 1 log level (0=NONE, 1=ERROR, 2=WARN, 3=INFO, 4=DEBUG). Defaults to `--log` if not set.
-- `--debug`: Enable debug logging for detailed NCI/DATA messages
-- `--battery1-active`: Enable battery 1 as active in addition to battery 0 (default: inactive)
-- `--disable-battery1`: Disable battery 1 reader entirely
-- `--keep-active-on-seatbox-open`: Keep a running battery active across a seatbox open, but let seatbox events flow normally so asleep batteries go through the wake-up cycle and newly inserted batteries are detected without delay. Also settable at runtime via `settings.scooter.battery-keep-active-on-seatbox-open`.
-
-## Logging
-
-The service utilizes a leveled logging system. You can control the verbosity of the logs using the `--log` command-line option for the entire service, or `--log0` and `--log1` for individual battery readers. The log levels are:
-
-- **0=NONE**: No logs
-- **1=ERROR**: Only error messages
-- **2=WARN**: Warning messages and errors
-- **3=INFO**: Informational messages, warnings, and errors (default)
-- **4=DEBUG**: Detailed debug messages, informational messages, warnings, and errors
-
-## Safety Features
-
-The service implements several safety features:
-- Temperature state monitoring (Cold/Normal/Hot states)
-- Automatic battery presence detection
-- Heartbeat monitoring to prevent endless recovery loops
-- Multiple retry mechanisms for reliable communication
-- Comprehensive error logging and reporting
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+It handles `SIGINT` and `SIGTERM`, then stops readers before closing Redis.
+Redis status is useful for monitoring but should not replace electrical safety
+controls or direct diagnosis of a pack.
 
 ## License
 
-This project is dual-licensed. The source code is available under the
-[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License][cc-by-nc-sa].
-The maintainers reserve the right to grant separate licenses for commercial distribution; please contact the maintainers to discuss commercial licensing.
+This project is licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](LICENSE).
 
-[![CC BY-NC-SA 4.0][cc-by-nc-sa-image]][cc-by-nc-sa]
-
-[cc-by-nc-sa]: http://creativecommons.org/licenses/by-nc-sa/4.0/
-[cc-by-nc-sa-image]: https://licensebuttons.net/l/by-nc-sa/4.0/88x31.png
+Made with ❤️ by the Librescoot community

@@ -18,7 +18,6 @@ const (
 	LogLevelDebug
 )
 
-// FSMHandler is a custom slog.Handler for FSM logs
 type FSMHandler struct {
 	w         io.Writer
 	level     LogLevel
@@ -28,7 +27,6 @@ type FSMHandler struct {
 	batteryID int
 }
 
-// NewFSMHandler creates a new FSM handler with the specified log level and battery ID
 func NewFSMHandler(w io.Writer, level LogLevel, batteryID int) *FSMHandler {
 	return &FSMHandler{
 		w:         w,
@@ -53,7 +51,6 @@ func (h *FSMHandler) Enabled(_ context.Context, level slog.Level) bool {
 	}
 }
 
-// Handle formats and writes a log record
 func (h *FSMHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -114,7 +111,6 @@ func (h *FSMHandler) Handle(_ context.Context, r slog.Record) error {
 	return err
 }
 
-// WithAttrs returns a new handler with the given attributes added
 func (h *FSMHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	newAttrs := make([]slog.Attr, len(h.attrs)+len(attrs))
 	copy(newAttrs, h.attrs)
@@ -129,7 +125,6 @@ func (h *FSMHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	}
 }
 
-// WithGroup returns a new handler with the given group added
 func (h *FSMHandler) WithGroup(name string) slog.Handler {
 	newGroups := make([]string, len(h.groups)+1)
 	copy(newGroups, h.groups)
@@ -144,7 +139,6 @@ func (h *FSMHandler) WithGroup(name string) slog.Handler {
 	}
 }
 
-// ServiceHandler is a custom slog.Handler for service-level logs
 type ServiceHandler struct {
 	w      io.Writer
 	level  LogLevel
@@ -153,7 +147,6 @@ type ServiceHandler struct {
 	mu     sync.Mutex
 }
 
-// NewServiceHandler creates a new service handler with the specified log level
 func NewServiceHandler(w io.Writer, level LogLevel) *ServiceHandler {
 	return &ServiceHandler{
 		w:     w,
@@ -177,7 +170,6 @@ func (h *ServiceHandler) Enabled(_ context.Context, level slog.Level) bool {
 	}
 }
 
-// Handle formats and writes a log record
 func (h *ServiceHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -211,7 +203,6 @@ func (h *ServiceHandler) Handle(_ context.Context, r slog.Record) error {
 	return err
 }
 
-// WithAttrs returns a new handler with the given attributes added
 func (h *ServiceHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	newAttrs := make([]slog.Attr, len(h.attrs)+len(attrs))
 	copy(newAttrs, h.attrs)
@@ -225,7 +216,6 @@ func (h *ServiceHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	}
 }
 
-// WithGroup returns a new handler with the given group added
 func (h *ServiceHandler) WithGroup(name string) slog.Handler {
 	newGroups := make([]string, len(h.groups)+1)
 	copy(newGroups, h.groups)

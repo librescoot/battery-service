@@ -12,11 +12,9 @@ package battery
 //   - If channel was empty, it has space
 //   - Single sender means no one else can fill it between drain and send
 func tryUpdateChannel[T any](ch chan T, value T) {
-	// Drain any existing value (non-blocking)
 	select {
 	case <-ch:
 	default:
 	}
-	// Send new value - safe because channel now has space
 	ch <- value
 }
