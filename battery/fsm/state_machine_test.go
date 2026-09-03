@@ -12,36 +12,36 @@ import (
 // constructed in tests without dragging in Redis, NFC HAL, etc.
 type noopActions struct{}
 
-func (noopActions) TakeInhibitor()                 {}
-func (noopActions) ReleaseInhibitor()              {}
-func (noopActions) StartDiscovery() error          { return nil }
-func (noopActions) StopDiscovery()                 {}
-func (noopActions) SelectTag()                     {}
-func (noopActions) PollForTagArrival() bool        { return true }
-func (noopActions) Initialize() error              { return nil }
-func (noopActions) Deinitialize()                  {}
-func (noopActions) ReadStatus() error              { return nil }
-func (noopActions) SendCheckPresenceReady()        {}
-func (noopActions) WriteCommand(cmd BMSCommand)    {}
-func (noopActions) GetEnabled() bool               { return false }
-func (noopActions) ShouldSendOn() bool             { return false }
-func (noopActions) GetSeatboxLockClosed() bool     { return true }
-func (noopActions) GetVehicleActive() bool         { return false }
-func (noopActions) CheckStateCorrect() bool        { return true }
+func (noopActions) TakeInhibitor()              {}
+func (noopActions) ReleaseInhibitor()           {}
+func (noopActions) StartDiscovery() error       { return nil }
+func (noopActions) StopDiscovery()              {}
+func (noopActions) SelectTag()                  {}
+func (noopActions) PollForTagArrival() bool     { return true }
+func (noopActions) Initialize() error           { return nil }
+func (noopActions) Deinitialize()               {}
+func (noopActions) ReadStatus() error           { return nil }
+func (noopActions) SendCheckPresenceReady()     {}
+func (noopActions) WriteCommand(cmd BMSCommand) {}
+func (noopActions) GetEnabled() bool            { return false }
+func (noopActions) ShouldSendOn() bool          { return false }
+func (noopActions) GetSeatboxLockClosed() bool  { return true }
+func (noopActions) GetVehicleActive() bool      { return false }
+func (noopActions) CheckStateCorrect() bool     { return true }
 func (noopActions) GetRemainingCmdTime() time.Duration {
 	return 0
 }
 func (noopActions) GetOpenedTime(bool, bool) time.Duration { return 0 }
 func (noopActions) GetInsertedTime(bool) time.Duration     { return 0 }
-func (noopActions) GetHeartbeatInterval() time.Duration  { return time.Second }
-func (noopActions) IsInactive() bool                     { return true }
-func (noopActions) ZeroRetryCounters()                   {}
-func (noopActions) StopHeartbeatTimer()                  {}
-func (noopActions) ShouldKeepActiveOnSeatboxOpen() bool  { return false }
-func (noopActions) StartHeartbeatTimer()                 {}
-func (noopActions) ClearHeartbeatTimer()                 {}
-func (noopActions) StopTimerIfBatteryEmpty()             {}
-func (noopActions) IsRoleInactive() bool                 { return false }
+func (noopActions) GetHeartbeatInterval() time.Duration    { return time.Second }
+func (noopActions) IsInactive() bool                       { return true }
+func (noopActions) ZeroRetryCounters()                     {}
+func (noopActions) StopHeartbeatTimer()                    {}
+func (noopActions) ShouldKeepActiveOnSeatboxOpen() bool    { return false }
+func (noopActions) StartHeartbeatTimer()                   {}
+func (noopActions) ClearHeartbeatTimer()                   {}
+func (noopActions) StopTimerIfBatteryEmpty()               {}
+func (noopActions) IsRoleInactive() bool                   { return false }
 
 // TestStartIsSynchronous locks in the invariant that fixes bean librescoot-5u06:
 // after StateMachine.Start returns, the machine MUST be in StateInit. Callers
