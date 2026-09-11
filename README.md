@@ -2,7 +2,8 @@
 
 Part of the [Librescoot](https://librescoot.org/) open-source platform.
 
-`battery-service` monitors Librescoot battery packs through PN7150 NFC readers
+`battery-service` monitors the unu Scooter Pro Battery Packs (Propulsion
+Battery Packs) through PN7150 NFC readers
 and publishes battery state to Redis. It supports two reader slots and tracks
 battery presence, status, temperature, and faults.
 
