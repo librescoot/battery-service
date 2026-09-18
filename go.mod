@@ -3,7 +3,7 @@ module battery-service
 go 1.24.0
 
 require (
-	github.com/librescoot/librefsm v0.4.0
+	github.com/librescoot/librefsm v0.6.1
 	github.com/librescoot/pn7150 v0.1.9
 	github.com/redis/go-redis/v9 v9.18.0
 )
