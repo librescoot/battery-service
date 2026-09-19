@@ -33,6 +33,27 @@ const (
 // heartbeat can resend ON on the next cycle and keep the BMS active.
 const maxConsecutiveReadFailures = 3
 
+// offConfirmTimeout bounds StateReadOffStatus. The state derives its result
+// synchronously in OnEnter and then sends one event; if that single send were
+// ever dropped (full event queue) the OFF loop would otherwise stall with no
+// timer. Reads are expected to finish well under this bound: if one outlives
+// it, the queued retry wins and the result is discarded, costing one redundant
+// OFF write rather than misapplying anything. The timer is cancelled when the
+// state exits.
+//
+// Overridden by sequential tests only; it is read once when the definition is
+// built, so parallel tests must not change it.
+var offConfirmTimeout = 3 * time.Second
+
+// OffState is the result of a fresh status read during OFF confirmation.
+type OffState int
+
+const (
+	OffStateUnknown OffState = iota
+	OffStateActive
+	OffStateInactive
+)
+
 // BatteryActions is the interface for battery hardware operations
 type BatteryActions interface {
 	TakeInhibitor()
@@ -44,8 +65,10 @@ type BatteryActions interface {
 	Initialize() error
 	Deinitialize()
 	ReadStatus() error
+	ReadFreshOffState() (OffState, error)
 	SendCheckPresenceReady()
 	WriteCommand(cmd BMSCommand)
+	WriteOffCommand() error
 	GetEnabled() bool
 	ShouldSendOn() bool
 	GetSeatboxLockClosed() bool
@@ -563,14 +586,49 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			librefsm.WithParent(StateTagPresent),
 		).
 
-		// Send Off - send off command
+		// Send Off - send one command and wait the normal command interval.
 		State(StateSendOff,
 			librefsm.WithParent(StateTagPresent),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
-				d.actions.WriteCommand(BMSCmdOff)
-				// Timer starts AFTER write so the BMS has the full delay to process
-				c.StartTimer("off", timeCmd, librefsm.Event{ID: EvOffTimeout}, readStatusAction)
+				if err := d.actions.WriteOffCommand(); err != nil {
+					d.log.Warn("OFF command write failed", "error", err)
+				} else {
+					d.log.Debug("OFF command accepted by NTAG")
+				}
+				c.StartTimer("off", timeCmd, librefsm.Event{ID: EvOffTimeout})
+				return nil
+			}),
+		).
+
+		// Read Off Status - block in OnEnter to derive a fresh result under the
+		// reader's NFC lock, then send the outcome. librefsm processes one event
+		// at a time, so nothing can move the machine while the read runs, and the
+		// transitions for these two events exist only on this state, so a result
+		// that arrives after an interruption, departure or reinit is dropped
+		// rather than applied somewhere else. The declarative timeout re-arms the
+		// OFF attempt if the result event is ever dropped.
+		State(StateReadOffStatus,
+			librefsm.WithParent(StateTagPresent),
+			librefsm.WithTimeout(offConfirmTimeout, EvOffRetry),
+			librefsm.WithOnEnter(func(c *librefsm.Context) error {
+				d := c.Data.(*fsmData)
+				state, err := d.actions.ReadFreshOffState()
+				if err != nil {
+					d.log.Warn("OFF fresh status read failed", "error", err)
+					c.Send(librefsm.Event{ID: EvOffRetry})
+					return nil
+				}
+				switch state {
+				case OffStateInactive:
+					c.Send(librefsm.Event{ID: EvOffConfirmedInactive})
+				case OffStateActive:
+					d.log.Info("OFF fresh status remains ACTIVE")
+					c.Send(librefsm.Event{ID: EvOffRetry})
+				default:
+					d.log.Warn("OFF fresh status is unknown")
+					c.Send(librefsm.Event{ID: EvOffRetry})
+				}
 				return nil
 			}),
 		).
@@ -702,7 +760,15 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateSendInsertedClosed, EvInsertedClosedTimeout, StateSendClosed).
 
 		// Seatbox open state transitions
-		Transition(StateSendOff, EvOffTimeout, StateCondOff).
+		Transition(StateSendOff, EvOffTimeout, StateReadOffStatus).
+		Transition(StateReadOffStatus, EvOffConfirmedInactive, StateSendOpened,
+			librefsm.WithAction(func(c *librefsm.Context) error {
+				d := c.Data.(*fsmData)
+				d.justOpened = true
+				return nil
+			}),
+		).
+		Transition(StateReadOffStatus, EvOffRetry, StateSendOff).
 		Transition(StateSendOpened, EvOpenedTimeout, StateSendInsertedOpen,
 			librefsm.WithAction(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)

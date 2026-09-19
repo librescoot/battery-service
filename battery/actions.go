@@ -82,6 +82,24 @@ func (r *BatteryReader) ReadStatus() error {
 	return nil
 }
 
+func (r *BatteryReader) ReadFreshOffState() (fsm.OffState, error) {
+	r.nfcMu.Lock()
+	defer r.nfcMu.Unlock()
+
+	ok, stateDecoded := r.readStatusLocked()
+	if !ok || !stateDecoded {
+		return fsm.OffStateUnknown, fmt.Errorf("battery %d: failed to read fresh OFF status", r.index)
+	}
+	switch r.data.State {
+	case BMSStateIdle, BMSStateAsleep:
+		return fsm.OffStateInactive, nil
+	case BMSStateActive:
+		return fsm.OffStateActive, nil
+	default:
+		return fsm.OffStateUnknown, nil
+	}
+}
+
 func (r *BatteryReader) SendCheckPresenceReady() {
 	if r.fsm != nil {
 		r.fsm.SendEvent(fsm.EvCheckPresenceReady)

@@ -12,22 +12,24 @@ import (
 // constructed in tests without dragging in Redis, NFC HAL, etc.
 type noopActions struct{}
 
-func (noopActions) TakeInhibitor()              {}
-func (noopActions) ReleaseInhibitor()           {}
-func (noopActions) StartDiscovery() error       { return nil }
-func (noopActions) StopDiscovery()              {}
-func (noopActions) SelectTag()                  {}
-func (noopActions) PollForTagArrival() bool     { return true }
-func (noopActions) Initialize() error           { return nil }
-func (noopActions) Deinitialize()               {}
-func (noopActions) ReadStatus() error           { return nil }
-func (noopActions) SendCheckPresenceReady()     {}
-func (noopActions) WriteCommand(cmd BMSCommand) {}
-func (noopActions) GetEnabled() bool            { return false }
-func (noopActions) ShouldSendOn() bool          { return false }
-func (noopActions) GetSeatboxLockClosed() bool  { return true }
-func (noopActions) GetVehicleActive() bool      { return false }
-func (noopActions) CheckStateCorrect() bool     { return true }
+func (noopActions) TakeInhibitor()                       {}
+func (noopActions) ReleaseInhibitor()                    {}
+func (noopActions) StartDiscovery() error                { return nil }
+func (noopActions) StopDiscovery()                       {}
+func (noopActions) SelectTag()                           {}
+func (noopActions) PollForTagArrival() bool              { return true }
+func (noopActions) Initialize() error                    { return nil }
+func (noopActions) Deinitialize()                        {}
+func (noopActions) ReadStatus() error                    { return nil }
+func (noopActions) ReadFreshOffState() (OffState, error) { return OffStateInactive, nil }
+func (noopActions) SendCheckPresenceReady()              {}
+func (noopActions) WriteCommand(cmd BMSCommand)          {}
+func (noopActions) WriteOffCommand() error               { return nil }
+func (noopActions) GetEnabled() bool                     { return false }
+func (noopActions) ShouldSendOn() bool                   { return false }
+func (noopActions) GetSeatboxLockClosed() bool           { return true }
+func (noopActions) GetVehicleActive() bool               { return false }
+func (noopActions) CheckStateCorrect() bool              { return true }
 func (noopActions) GetRemainingCmdTime() time.Duration {
 	return 0
 }

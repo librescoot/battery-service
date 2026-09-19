@@ -234,10 +234,18 @@ func (r *BatteryReader) readStatus() bool {
 	r.nfcMu.Lock()
 	defer r.nfcMu.Unlock()
 
+	ok, _ := r.readStatusLocked()
+	return ok
+}
+
+// readStatusLocked reads and publishes status while the caller holds nfcMu.
+// The second result says whether this read decoded a new state value; state is
+// parsed from status1 alone, so the frame that carries it is what is checked.
+func (r *BatteryReader) readStatusLocked() (bool, bool) {
 	// Only start discovery if not already discovered
 	if !r.tagsDiscovered {
 		if !r.discoverBatteryTag() {
-			return false
+			return false, false
 		}
 	}
 
@@ -246,7 +254,7 @@ func (r *BatteryReader) readStatus() bool {
 		r.logger.Warn(fmt.Sprintf("Failed to read status0: %v", err))
 		r.noteCommsFailure()
 		r.handleNFCError(err)
-		return false
+		return false, false
 	}
 
 	status1, err := r.readWithVerification(0x0310)
@@ -254,7 +262,7 @@ func (r *BatteryReader) readStatus() bool {
 		r.logger.Warn(fmt.Sprintf("Failed to read status1: %v", err))
 		r.noteCommsFailure()
 		r.handleNFCError(err)
-		return false
+		return false, false
 	}
 
 	status2, err := r.readWithVerification(0x0320)
@@ -262,7 +270,7 @@ func (r *BatteryReader) readStatus() bool {
 		r.logger.Warn(fmt.Sprintf("Failed to read status2: %v", err))
 		r.noteCommsFailure()
 		r.handleNFCError(err)
-		return false
+		return false, false
 	}
 
 	if r.service.debug {
@@ -285,7 +293,7 @@ func (r *BatteryReader) readStatus() bool {
 		// Empty/zero data: parseStatusData already fired fault 33 and
 		// called sendNotPresent(). Don't log zeroed r.data as status,
 		// don't re-clear the fault, don't re-publish.
-		return true
+		return true, false
 	}
 
 	r.logger.Debug(fmt.Sprintf("Status read on reader %d: serial=%s charge=%d%% state=%s", r.index, r.data.SerialNumber, r.data.Charge, r.data.State))
@@ -297,10 +305,18 @@ func (r *BatteryReader) readStatus() bool {
 
 	r.sendStatusUpdate()
 
-	return true
+	return true, len(status1) >= 16
 }
 
 func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
+	_ = r.writeCommand(cmd)
+}
+
+func (r *BatteryReader) WriteOffCommand() error {
+	return r.writeCommand(fsm.BMSCmdOff)
+}
+
+func (r *BatteryReader) writeCommand(cmd fsm.BMSCommand) error {
 	r.nfcMu.Lock()
 	defer r.nfcMu.Unlock()
 
@@ -308,7 +324,7 @@ func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
 	if !r.tagsDiscovered {
 		if !r.discoverBatteryTag() {
 			r.stopDiscovery()
-			return
+			return fmt.Errorf("battery %d: tag unavailable for command %s", r.index, cmd)
 		}
 	}
 	// If already discovered, proceed directly to write
@@ -341,7 +357,7 @@ func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
 			// losing diagnostics.
 			r.logger.Debug(fmt.Sprintf("Sent command: %s", cmd))
 			r.stopDiscovery()
-			return
+			return nil
 		}
 
 		lastErr = err
@@ -368,6 +384,7 @@ func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
 	r.noteCommsFailure()
 	r.handleNFCError(lastErr)
 	r.stopDiscovery()
+	return lastErr
 }
 
 // maxCommsFailureBeforeFault gates BMSFaultBMSCommsError activation so a

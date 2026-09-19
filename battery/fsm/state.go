@@ -29,6 +29,7 @@ const (
 	StateCondJustInserted   State = "cond_just_inserted"
 	StateCondOff            State = "cond_off"
 	StateSendOff            State = "send_off"
+	StateReadOffStatus      State = "read_off_status"
 	StateSendOpened         State = "send_opened"
 	StateSendInsertedOpen   State = "send_inserted_open"
 )

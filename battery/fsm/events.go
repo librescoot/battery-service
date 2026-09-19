@@ -21,6 +21,8 @@ const (
 	EvOnOffTimeout          librefsm.EventID = "on_off_timeout"
 	EvInsertedClosedTimeout librefsm.EventID = "inserted_closed_timeout"
 	EvOffTimeout            librefsm.EventID = "off_timeout"
+	EvOffConfirmedInactive  librefsm.EventID = "off_confirmed_inactive"
+	EvOffRetry              librefsm.EventID = "off_retry"
 	EvOpenedTimeout         librefsm.EventID = "opened_timeout"
 	EvInsertedOpenTimeout   librefsm.EventID = "inserted_open_timeout"
 	EvCheckReaderTimeout    librefsm.EventID = "check_reader_timeout"
