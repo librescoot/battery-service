@@ -711,6 +711,12 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateTagPresent, EvTagDeparted, StateDiscoverTag).
 		Transition(StateTagPresent, EvReinit, StateNFCReaderOff).
 		Transition(StateTagPresent, EvRestart, StateTagPresent).
+		// A close has no other route out of the seatbox-open loop
+		// (send_opened/send_inserted_open). Waiting out the command interval and
+		// letting cond_seatbox_lock re-read the latch mirrors the restart walk
+		// without its presence check. Guard callbacks must not call IsInState,
+		// which takes the machine lock the event loop already holds.
+		Transition(StateTagPresent, EvSeatboxClosed, StateWaitLastCmd).
 
 		// Check Presence transitions
 		// Absorb EvRestart during check_presence - prevents restart loops while

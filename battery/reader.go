@@ -202,6 +202,8 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 	oldLatch := r.latchedSeatboxLockClosed
 	r.latchedSeatboxLockClosed = nextLatchedSeatboxClosed(r.vehicleState, oldLatch, closed)
 	latchClosed := r.latchedSeatboxLockClosed
+	// Seatbox changes have FSM edges of their own, so they carry themselves.
+	latchChanged := latchClosed != oldLatch
 
 	r.logger.Debug(fmt.Sprintf("Seatbox %s (latched %s) - role=%s, state=%s, enabled=%t",
 		map[bool]string{true: "closed", false: "opened"}[closed],
@@ -224,20 +226,12 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 		if r.enabled != newEnabled {
 			r.logger.Debug(fmt.Sprintf("Active battery enabled state changing from %t to %t", r.enabled, newEnabled))
 			r.enabled = newEnabled
-			if r.fsm.IsInState(fsm.StateTagPresent) {
+			// An enabled change with no seatbox event to carry it still needs one.
+			if !latchChanged && r.fsm.IsInState(fsm.StateTagPresent) {
 				r.logger.Debug("Triggering restart due to enabled state change")
 				r.triggerRestart()
 			}
 		}
-	}
-
-	// With keep-active-on-seatbox-open, don't restart a running battery on
-	// latch change; the FSM handles seatbox events directly and a restart
-	// would walk the battery through StateSendOff and briefly power it down.
-	if latchClosed != oldLatch && r.fsm.IsInState(fsm.StateTagPresent) && !r.service.config.EffectiveKeepActiveOnSeatboxOpen() {
-		r.logger.Debug(fmt.Sprintf("Latch changed (%t -> %t) and in StateTagPresent - triggering restart",
-			oldLatch, latchClosed))
-		r.triggerRestart()
 	}
 
 	if r.vehicleState != VehicleStateReadyToDrive || !latchClosed {

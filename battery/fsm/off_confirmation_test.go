@@ -13,19 +13,84 @@ import (
 type offTestActions struct {
 	noopActions
 
-	mu           sync.Mutex
-	writeErrors  []error
-	statusStates []OffState
-	statusErrors []error
-	writeTimes   []time.Time
-	statusReads  int
+	mu            sync.Mutex
+	writeErrors   []error
+	statusStates  []OffState
+	statusErrors  []error
+	writeTimes    []time.Time
+	statusReads   int
+	seatboxClosed bool
+	// lastCmd models the reader's command timestamp so wait_last_cmd can be
+	// exercised; commands records what the FSM asked the pack to do.
+	lastCmd      time.Time
+	commands     []BMSCommand
+	commandTimes []time.Time
+	openedTime   time.Duration
+	sendOn       bool
 	readStarted  chan struct{}
 	readRelease  chan struct{}
 }
 
-func (a *offTestActions) GetSeatboxLockClosed() bool             { return false }
-func (a *offTestActions) GetOpenedTime(bool, bool) time.Duration { return time.Hour }
-func (a *offTestActions) IsInactive() bool                       { return false }
+func (a *offTestActions) GetSeatboxLockClosed() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.seatboxClosed
+}
+
+func (a *offTestActions) setSeatboxClosed(closed bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.seatboxClosed = closed
+}
+
+func (a *offTestActions) GetOpenedTime(bool, bool) time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.openedTime != 0 {
+		return a.openedTime
+	}
+	return time.Hour
+}
+
+func (a *offTestActions) ShouldSendOn() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sendOn
+}
+
+func (a *offTestActions) GetRemainingCmdTime() time.Duration {
+	a.mu.Lock()
+	last := a.lastCmd
+	a.mu.Unlock()
+	if last.IsZero() {
+		return 0
+	}
+	if elapsed := time.Since(last); elapsed < timeCmd {
+		return timeCmd - elapsed
+	}
+	return 0
+}
+
+func (a *offTestActions) WriteCommand(cmd BMSCommand) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.commands = append(a.commands, cmd)
+	a.commandTimes = append(a.commandTimes, time.Now())
+	a.lastCmd = time.Now()
+}
+
+func (a *offTestActions) setLastCmdAgo(ago time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.lastCmd = time.Now().Add(-ago)
+}
+
+func (a *offTestActions) commandsSnapshot() ([]BMSCommand, []time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]BMSCommand(nil), a.commands...), append([]time.Time(nil), a.commandTimes...)
+}
+func (a *offTestActions) IsInactive() bool { return false }
 
 func (a *offTestActions) WriteOffCommand() error {
 	a.mu.Lock()
