@@ -438,16 +438,33 @@ func (s *Service) auxLowKeepActiveExitSettingSpec() redisUint64Setting {
 	}
 }
 
+// auxLowKeepActiveLatch returns the latched override state for a valid aux
+// reading of mv millivolts. haveHistory is false until the first reading has
+// been applied since start, when there is no previous latch to resume: that
+// first reading is judged against exit, so a boot that cannot see the previous
+// latch errs toward keeping the pack awake instead of dropping the override
+// across the Enter..Exit band. Later readings follow the usual hysteresis.
+func auxLowKeepActiveLatch(was, haveHistory bool, mv, enter, exit uint64) bool {
+	if was || !haveHistory {
+		return mv < exit
+	}
+	return mv < enter
+}
+
 // recomputeAuxLowKeepActive reads the current aux battery voltage and updates
 // the AuxLowKeepActive override using a Schmitt-trigger over the configured
-// enter/exit thresholds. On a state change it restarts active readers so the
-// FSM walks through the wake-up sequence the same way it does when the user
+// enter/exit thresholds. The first reading applied since start is judged by
+// auxLowKeepActiveLatch; the latch is not persisted, so that reading is what
+// establishes it. On a state change it restarts active readers so the FSM
+// walks through the wake-up sequence the same way it does when the user
 // setting is toggled. allowRestart=false suppresses the restart on startup
 // where readers have not been started yet.
 func (s *Service) recomputeAuxLowKeepActive(allowRestart bool) {
 	raw, err := s.redis.HGet(s.ctx, "aux-battery", "voltage").Result()
 	if err != nil {
-		if err != redis.Nil {
+		if err == redis.Nil {
+			s.logger.Warn("aux-low keep-active: no aux-battery voltage yet, override stays off until the first reading")
+		} else {
 			s.logger.Warn(fmt.Sprintf("aux-low keep-active: failed to read aux-battery voltage: %v", err))
 		}
 		return
@@ -465,22 +482,18 @@ func (s *Service) recomputeAuxLowKeepActive(allowRestart bool) {
 	}
 
 	was := s.config.AuxLowKeepActive.Load()
-	var engaged bool
-	if was {
-		engaged = mv < exit
-	} else {
-		engaged = mv < enter
-	}
-	if engaged == was {
+	haveHistory := s.config.AuxLowKeepActiveEvaluated.Swap(true)
+	engaged := auxLowKeepActiveLatch(was, haveHistory, mv, enter, exit)
+	if engaged == was && haveHistory {
 		return
 	}
 	s.config.AuxLowKeepActive.Store(engaged)
 	if engaged {
-		s.logger.Info(fmt.Sprintf("aux-low keep-active engaged (mv=%d enter=%d exit=%d)", mv, enter, exit))
+		s.logger.Info(fmt.Sprintf("aux-low keep-active engaged (mv=%d enter=%d exit=%d first=%t)", mv, enter, exit, !haveHistory))
 	} else {
-		s.logger.Info(fmt.Sprintf("aux-low keep-active disengaged (mv=%d enter=%d exit=%d)", mv, enter, exit))
+		s.logger.Info(fmt.Sprintf("aux-low keep-active disengaged (mv=%d enter=%d exit=%d first=%t)", mv, enter, exit, !haveHistory))
 	}
-	if allowRestart {
+	if engaged != was && allowRestart {
 		s.restartActiveReaders()
 	}
 }

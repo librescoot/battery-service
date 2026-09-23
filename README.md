@@ -47,6 +47,13 @@ notification:
 - `scooter.battery-aux-low-keep-active-enter-mv`
 - `scooter.battery-aux-low-keep-active-exit-mv`
 
+The two aux-low keep-active settings drive a Schmitt trigger over the
+`aux-battery` voltage: the override engages below the enter threshold and
+disengages at or above the exit threshold. The latch lives in memory only, so
+the first aux reading after a service start is judged against the exit
+threshold rather than the enter one. If `aux-battery` has no voltage yet, the
+override stays off until the first reading arrives.
+
 Temperature, battery activation, and voltage-difference settings affect power
 behavior. Restrict their modification to trusted configuration components.
 

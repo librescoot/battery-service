@@ -269,10 +269,13 @@ type ServiceConfig struct {
 	// While aux voltage is below Enter (mV), the override engages and the
 	// effective keep-active flag is forced true. It disengages when aux
 	// voltage rises to at-or-above Exit (mV). AuxLowKeepActive holds the
-	// current latched override state.
-	AuxLowKeepActiveEnterMv atomic.Uint64
-	AuxLowKeepActiveExitMv  atomic.Uint64
-	AuxLowKeepActive        atomic.Bool
+	// current latched override state. AuxLowKeepActiveEvaluated records that
+	// a valid reading has been applied since start, so the first reading can
+	// be judged differently from later ones.
+	AuxLowKeepActiveEnterMv   atomic.Uint64
+	AuxLowKeepActiveExitMv    atomic.Uint64
+	AuxLowKeepActive          atomic.Bool
+	AuxLowKeepActiveEvaluated atomic.Bool
 }
 
 // EffectiveKeepActiveOnSeatboxOpen returns the effective keep-active flag,
