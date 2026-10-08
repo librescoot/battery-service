@@ -3,6 +3,7 @@ package fsm
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/librescoot/librefsm"
@@ -99,6 +100,7 @@ type fsmData struct {
 	tagAbsentCancel         context.CancelFunc
 	checkPresenceCancel     context.CancelFunc
 	consecutiveReadFailures int
+	tagPresent              atomic.Bool
 }
 
 // StateMachine wraps librefsm.Machine to provide the same interface as before
@@ -174,10 +176,16 @@ func (sm *StateMachine) State() State {
 
 // IsInState checks if the FSM is in the given state or any of its children
 func (sm *StateMachine) IsInState(id State) bool {
+	// Fault callbacks query presence while holding the fault mutex. They
+	// must not wait for an FSM action that may need that same mutex.
+	if id == StateTagPresent {
+		return sm.data.tagPresent.Load()
+	}
 	return sm.machine.IsInState(id)
 }
 
-// readStatusAction reads battery status before a timeout event fires.
+// readStatusAction reads status on the FSM event loop after command settling.
+// Timer callbacks only enqueue events; NFC work must not race transitions.
 // A single transient failure (e.g. NTAG arbiter busy) is absorbed: the
 // natural timer transition continues with last-known state, and the next
 // heartbeat cycle resends ON and retries the read. Only after
@@ -333,6 +341,14 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		State(StateTagPresent,
 			librefsm.WithParent(StateNFCReaderOn),
 			librefsm.WithDefaultChild(StateCondCheckPresence),
+			librefsm.WithOnEnter(func(c *librefsm.Context) error {
+				c.Data.(*fsmData).tagPresent.Store(true)
+				return nil
+			}),
+			librefsm.WithOnExit(func(c *librefsm.Context) error {
+				c.Data.(*fsmData).tagPresent.Store(false)
+				return nil
+			}),
 		).
 
 		// Condition: Check Presence - decides if tag read succeeded
@@ -503,7 +519,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 				}
 				d.actions.WriteCommand(cmd)
 				// Timer starts AFTER write so the BMS has the full delay to process
-				c.StartTimer("on_off", timeCmd, librefsm.Event{ID: EvOnOffTimeout}, readStatusAction)
+				c.StartTimer("on_off", timeCmd, librefsm.Event{ID: EvOnOffTimeout})
 				return nil
 			}),
 		).
@@ -652,7 +668,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 				d := c.Data.(*fsmData)
 				d.actions.WriteCommand(BMSCmdInsertedInScooter)
 				insertedTime := d.actions.GetInsertedTime(d.justInserted)
-				c.StartTimer("inserted_open", insertedTime, librefsm.Event{ID: EvInsertedOpenTimeout}, readStatusAction)
+				c.StartTimer("inserted_open", insertedTime, librefsm.Event{ID: EvInsertedOpenTimeout})
 				return nil
 			}),
 		).
@@ -745,7 +761,9 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		Transition(StateSendClosed, EvClosedTimeout, StateSendOnOff).
 
 		// Send OnOff transitions
-		Transition(StateSendOnOff, EvOnOffTimeout, StateCondStateOK).
+		Transition(StateSendOnOff, EvOnOffTimeout, StateCondStateOK,
+			librefsm.WithAction(readStatusAction),
+		).
 
 		// Wait Update transitions
 		// Transition to StateHeartbeat (not HeartbeatActions) to restart the timer
@@ -795,14 +813,14 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			librefsm.WithAction(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				d.justInserted = false
-				return nil
+				return readStatusAction(c)
 			}),
 		).
 		Transition(StateSendInsertedOpen, EvInsertedOpenTimeout, StateSendOpened,
 			librefsm.WithAction(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				d.justInserted = false
-				return nil
+				return readStatusAction(c)
 			}),
 		).
 
