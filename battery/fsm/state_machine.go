@@ -765,6 +765,11 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			librefsm.WithAction(readStatusAction),
 		).
 
+		// Admission polling never interrupts a command or its settling delay.
+		// Preserve the running pack's ON heartbeat before the potentially slow
+		// status read. The command gate rejects stale admission observations.
+		Transition(StateWaitUpdate, EvAdmissionPoll, StateHeartbeat).
+
 		// Wait Update transitions
 		// Transition to StateHeartbeat (not HeartbeatActions) to restart the timer
 		// State check moved here from timer callback to avoid race conditions

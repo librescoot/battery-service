@@ -10,6 +10,7 @@ const (
 	EvTagDeparted           librefsm.EventID = "tag_departed"
 	EvRestart               librefsm.EventID = "restart"
 	EvHeartbeatTimeout      librefsm.EventID = "heartbeat_timeout"
+	EvAdmissionPoll         librefsm.EventID = "admission_poll"
 	EvSeatboxOpened         librefsm.EventID = "seatbox_opened"
 	EvSeatboxClosed         librefsm.EventID = "seatbox_closed"
 	EvVehicleStateChanged   librefsm.EventID = "vehicle_state_changed"

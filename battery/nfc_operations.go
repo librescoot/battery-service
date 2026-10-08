@@ -88,6 +88,9 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 	}
 
 	if len(tags) == 0 {
+		if a := r.packAdmission(); a != nil {
+			a.observeAbsent(r.index, time.Now())
+		}
 		r.logger.Warn("DetectTags returned no tags")
 		r.logger.Debug(fmt.Sprintf("No tags on reader %d (previousTagPresent=%v)", r.index, r.previousTagPresent))
 		// If we previously had a tag present and now detect no tags, treat as tag departure
@@ -129,6 +132,11 @@ func (r *BatteryReader) pollForTagArrival() bool {
 		r.logger.Debug(fmt.Sprintf("DetectTags transient error in tag_absent, retrying: %v", err))
 		return true
 	}
+	if len(tags) == 0 {
+		if a := r.packAdmission(); a != nil {
+			a.observeAbsent(r.index, time.Now())
+		}
+	}
 	if len(tags) > 0 {
 		r.previousTagPresent = true
 		r.tagsDiscovered = true
@@ -150,6 +158,9 @@ func (r *BatteryReader) noteTagPresent(uid []byte) {
 	if len(uid) == 0 || bytes.Equal(uid, r.currentTagUID) {
 		r.logger.Debug(fmt.Sprintf("Tag discovered: UID=%X on reader %d", uid, r.index))
 		return
+	}
+	if a := r.packAdmission(); a != nil {
+		a.tag(r.index, uid)
 	}
 	r.currentTagUID = append([]byte(nil), uid...)
 	r.logger.Info(fmt.Sprintf("Tag arrived: UID=%X", uid))
@@ -242,6 +253,12 @@ func (r *BatteryReader) readStatus() bool {
 // The second result says whether this read decoded a new state value; state is
 // parsed from status1 alone, so the frame that carries it is what is checked.
 func (r *BatteryReader) readStatusLocked() (bool, bool) {
+	admissionSampleOK := false
+	defer func() {
+		if a := r.packAdmission(); a != nil && !admissionSampleOK {
+			a.invalidate(r.index)
+		}
+	}()
 	// Only start discovery if not already discovered
 	if !r.tagsDiscovered {
 		if !r.discoverBatteryTag() {
@@ -289,11 +306,17 @@ func (r *BatteryReader) readStatusLocked() (bool, bool) {
 	r.commFailureCount = 0
 	r.lastSuccessfulComm = time.Now()
 
+	artifacts := r.sensors01Artifacts
 	if !r.parseStatusData(status0, status1, status2) {
 		// Empty/zero data: parseStatusData already fired fault 33 and
 		// called sendNotPresent(). Don't log zeroed r.data as status,
 		// don't re-clear the fault, don't re-publish.
 		return true, false
+	}
+
+	admissionSampleOK = len(status0) >= 16 && len(status1) >= 16 && len(status2) >= 16 && artifacts == r.sensors01Artifacts
+	if a := r.packAdmission(); a != nil && admissionSampleOK {
+		a.observe(r.index, r.data, time.Now())
 	}
 
 	r.logger.Debug(fmt.Sprintf("Status read on reader %d: serial=%s charge=%d%% state=%s", r.index, r.data.SerialNumber, r.data.Charge, r.data.State))
@@ -327,12 +350,17 @@ func (r *BatteryReader) writeCommand(cmd fsm.BMSCommand) error {
 			return fmt.Errorf("battery %d: tag unavailable for command %s", r.index, cmd)
 		}
 	}
-	// If already discovered, proceed directly to write
-
 	if err := r.takeInhibitor(); err != nil {
 		r.logger.Warn(fmt.Sprintf("Proceeding with NFC write WITHOUT suspend protection: %v", err))
 	}
 	defer r.releaseInhibitor()
+
+	// Discovery and inhibitor acquisition can block. Decide immediately
+	// before writing, against the selected tag and current observations.
+	// Denial skips ON; it must not become an OFF command.
+	if !r.admitCommand(cmd, time.Now()) {
+		return fmt.Errorf("battery %d: activation deferred: %s", r.index, r.lastAdmissionReason)
+	}
 
 	cmdBytes := make([]byte, 4)
 	cmdBytes[0] = byte(cmd)

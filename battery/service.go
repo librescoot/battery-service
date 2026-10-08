@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"battery-service/battery/fsm"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -71,6 +74,7 @@ func (s *Service) Start() error {
 	s.loadUint64Setting(s.auxLowKeepActiveEnterSettingSpec())
 	s.loadUint64Setting(s.auxLowKeepActiveExitSettingSpec())
 	s.loadDualBatterySetting()
+	s.admission = newPackAdmission(s.batteryConfig)
 
 	s.loadInitialVehicleState()
 	s.recomputeAuxLowKeepActive(false)
@@ -85,6 +89,8 @@ func (s *Service) Start() error {
 			}
 		}
 	}
+
+	go s.runAdmissionPoller()
 
 	s.logger.Info("Battery service started successfully")
 	return nil
@@ -205,6 +211,9 @@ func (s *Service) loadInitialVehicleState() {
 		s.logger.Warn(fmt.Sprintf("Failed to read initial vehicle state: %v", err))
 	}
 	s.vehicleState = vehicleState
+	if s.admission != nil {
+		s.admission.setVehicle(vehicleState)
+	}
 	s.logger.Info(fmt.Sprintf("Initial vehicle state: %s", vehicleState))
 
 	// Default to closed (true) when the key is missing, matching the reader's
@@ -237,6 +246,9 @@ func (s *Service) handleVehicleStateMessage() {
 	s.logger.Info(fmt.Sprintf("Vehicle state changed: %s", newState))
 
 	s.vehicleState = newState
+	if s.admission != nil {
+		s.admission.setVehicle(newState)
+	}
 
 	for _, reader := range s.readers {
 		if reader != nil {
@@ -498,31 +510,24 @@ func (s *Service) recomputeAuxLowKeepActive(allowRestart bool) {
 	}
 }
 
-// checkVoltageDelta reads both battery voltages from Redis and checks if the
-// difference is within acceptable limits. Returns true if the delta is OK or
-// if voltage data is unavailable (can't check). Also returns true if the
-// threshold is set to 0 (disabled).
-func (s *Service) checkVoltageDelta() (ok bool, delta uint64) {
-	maxDelta := s.config.MaxVoltageDelta.Load()
-	if maxDelta == 0 {
-		return true, 0
+func (s *Service) runAdmissionPoller() {
+	ticker := time.NewTicker(admissionPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			if s.admission == nil || !s.admission.needsPoll() {
+				continue
+			}
+			for _, reader := range s.readers {
+				if reader != nil && reader.fsm != nil {
+					reader.fsm.SendEvent(fsm.EvAdmissionPoll)
+				}
+			}
+		}
 	}
-
-	v0, err := s.redis.HGet(s.ctx, "battery:0", "voltage").Uint64()
-	if err != nil || v0 == 0 {
-		return true, 0
-	}
-	v1, err := s.redis.HGet(s.ctx, "battery:1", "voltage").Uint64()
-	if err != nil || v1 == 0 {
-		return true, 0
-	}
-
-	if v0 > v1 {
-		delta = v0 - v1
-	} else {
-		delta = v1 - v0
-	}
-	return delta <= maxDelta, delta
 }
 
 func (s *Service) loadDualBatterySetting() {
@@ -546,14 +551,11 @@ func (s *Service) loadDualBatterySetting() {
 		newRole := BatteryRoleInactive
 		if dualBattery {
 			newRole = BatteryRoleActive
-
-			// Check voltage delta before activating
-			if ok, delta := s.checkVoltageDelta(); !ok {
-				s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, s.config.MaxVoltageDelta.Load()))
-				newRole = BatteryRoleInactive
-			}
 		}
 		s.batteryConfig.Readers[1].Role = newRole
+		if s.admission != nil {
+			s.admission.setRole(1, newRole == BatteryRoleActive)
+		}
 
 		// Also update the reader if it was already created
 		if len(s.readers) > 1 && s.readers[1] != nil {
@@ -601,13 +603,8 @@ func (s *Service) handleDualBatterySettingChange() {
 		return
 	}
 
-	// Check voltage delta before activating
-	if newRole == BatteryRoleActive {
-		if ok, delta := s.checkVoltageDelta(); !ok {
-			s.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV) - refusing to activate battery 1", delta, s.config.MaxVoltageDelta.Load()))
-			return
-		}
-		reader.voltageDeltaBlocked = false
+	if s.admission != nil {
+		s.admission.setRole(1, newRole == BatteryRoleActive)
 	}
 
 	reader.role = newRole

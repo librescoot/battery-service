@@ -104,11 +104,9 @@ const tagConfirmRetry = 3 * time.Second
 // How long to keep asking before accepting an unchanged frame as current.
 //
 // Measured on this hardware, the pack takes 2.9 to 5.7 s to write after a tag
-// change. A deadline inside that range loses the race to its own backstop:
-// with it at 3 s, four of eight tag changes were accepted unconfirmed while
-// the pack went on to write shortly afterwards. This sits above the range so
-// the pack normally wins. Nothing is withheld while it runs, so the only cost
-// of the longer wait is that one internal check waits with it.
+// change. The deadline sits above that range; status publication continues
+// throughout. Activation admission uses separate write evidence without a
+// timeout fallback.
 const tagConfirmDeadline = 9 * time.Second
 
 // tagFreshness tracks whether the pack has been seen writing to this slot's tag
@@ -123,9 +121,8 @@ const tagConfirmDeadline = 9 * time.Second
 // overwrites them. What does is the pack writing, which shows up as the frame
 // changing.
 //
-// Frames are published throughout, so a slot never looks empty while this is
-// pending. Only the dual-battery voltage delta check waits on it, because that
-// one latches a decision about whether the second pack may activate.
+// Frames are published throughout. This tracker schedules bounded early
+// reads; packAdmission independently checks write evidence for activation.
 type tagFreshness struct {
 	unconfirmed bool
 	haveFrame   bool
@@ -314,6 +311,7 @@ type Service struct {
 	redis         *redis.Client
 	vehicleState  VehicleState
 	readers       []*BatteryReader
+	admission     *packAdmission
 }
 
 // BatteryReader represents a single battery reader with its own event loop
@@ -356,8 +354,7 @@ type BatteryReader struct {
 
 	// State tracking
 	enabled                  bool
-	voltageDeltaBlocked      bool // blocks activation when voltage delta is too large
-	voltageDeltaChecked      bool // latched once delta has been evaluated since last insertion
+	lastAdmissionReason      string // protected by nfcMu
 	vehicleState             VehicleState
 	seatboxLockClosed        bool
 	latchedSeatboxLockClosed bool

@@ -213,8 +213,6 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 	if r.role == BatteryRoleActive {
 		var newEnabled bool
 		switch {
-		case r.voltageDeltaBlocked:
-			newEnabled = false
 		case r.service.config.EffectiveKeepActiveOnSeatboxOpen():
 			newEnabled = true
 			if !latchClosed {
@@ -337,6 +335,9 @@ func (r *BatteryReader) makeLogCallback() hal.LogCallback {
 }
 
 func (r *BatteryReader) handleDeparture(reason string) {
+	if a := r.packAdmission(); a != nil {
+		a.invalidate(r.index)
+	}
 	r.logger.Info(fmt.Sprintf("Tag departed (%s): UID=%X, last serial=%s",
 		reason, r.currentTagUID, r.data.SerialNumber))
 	r.currentTagUID = nil

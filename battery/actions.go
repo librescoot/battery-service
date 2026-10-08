@@ -137,6 +137,9 @@ func (r *BatteryReader) ShouldSendOn() bool {
 
 func (r *BatteryReader) CheckStateCorrect() bool {
 	if r.enabled && !r.isBatteryEmpty() {
+		if a := r.packAdmission(); a != nil && a.waiting(r.index, time.Now()) {
+			return true
+		}
 		if r.data.State != BMSStateActive {
 			r.logger.Warn("State mismatch", "expected", BMSStateActive, "got", r.data.State)
 			return false

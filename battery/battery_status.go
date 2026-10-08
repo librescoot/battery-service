@@ -214,8 +214,8 @@ func statusFrameChanged(a, b BMSData) bool {
 
 // noteFrameFreshness records the first frame after a tag change and marks the
 // tag confirmed once a later frame differs, which is the pack having written to
-// it. Frames are published regardless; this only decides whether the
-// dual-battery voltage delta check may act on them.
+// it. Frames are published regardless; this controls the early-read timer.
+// Activation admission does not use this tracker's timeout fallback.
 func (r *BatteryReader) noteFrameFreshness() {
 	if !r.fresh.unconfirmed {
 		return
@@ -248,45 +248,6 @@ func (r *BatteryReader) noteFrameFreshness() {
 
 func (r *BatteryReader) sendStatusUpdate() {
 	r.noteFrameFreshness()
-
-	// Voltage delta protection: one-shot gate at battery 1's first activation.
-	// Retry while not yet evaluated to cover the startup race where battery 0's
-	// voltage isn't yet in Redis when battery 1 first appears. Once the check
-	// has run, latch — voltage drift after activation must not disable a
-	// running battery. The not-present -> present edge resets the latch so a
-	// fresh insertion gets a new evaluation.
-	if r.index > 0 && r.data.Present && !r.previousData.Present {
-		r.voltageDeltaChecked = false
-		r.voltageDeltaBlocked = false
-	}
-
-	// Wait for the tag to be confirmed before latching this decision. A tag the
-	// pack has not written to recently reports a voltage from the pack's
-	// previous life, which would block or permit activation on the wrong number.
-	maxDelta := r.service.config.MaxVoltageDelta.Load()
-	if r.index > 0 && maxDelta > 0 && r.role == BatteryRoleActive &&
-		!r.voltageDeltaChecked && !r.fresh.unconfirmed && r.data.Present && r.data.Voltage > 0 {
-		v0, err := r.service.redis.HGet(r.ctx, "battery:0", "voltage").Uint64()
-		if err == nil && v0 > 0 {
-			v1 := uint64(r.data.Voltage)
-			var delta uint64
-			if v0 > v1 {
-				delta = v0 - v1
-			} else {
-				delta = v1 - v0
-			}
-			r.voltageDeltaChecked = true
-			if delta > maxDelta {
-				r.logger.Warn(fmt.Sprintf("Voltage delta too large (%dmV > %dmV, battery0=%dmV, battery1=%dmV) - blocking battery 1 activation",
-					delta, maxDelta, v0, v1))
-				r.voltageDeltaBlocked = true
-				if r.enabled {
-					r.enabled = false
-					r.triggerRestart()
-				}
-			}
-		}
-	}
 
 	effectivePresent := r.data.Present
 
