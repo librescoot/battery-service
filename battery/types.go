@@ -354,6 +354,8 @@ type BatteryReader struct {
 
 	// State tracking
 	enabled                  bool
+	voltageDeltaBlocked      bool
+	voltageDeltaChecked      bool
 	lastAdmissionReason      string // protected by nfcMu
 	vehicleState             VehicleState
 	seatboxLockClosed        bool

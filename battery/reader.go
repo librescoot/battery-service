@@ -213,6 +213,8 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 	if r.role == BatteryRoleActive {
 		var newEnabled bool
 		switch {
+		case r.voltageDeltaBlocked:
+			newEnabled = false
 		case r.service.config.EffectiveKeepActiveOnSeatboxOpen():
 			newEnabled = true
 			if !latchClosed {

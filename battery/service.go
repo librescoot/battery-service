@@ -73,8 +73,8 @@ func (s *Service) Start() error {
 	s.config.AuxLowKeepActiveExitMv.Store(auxLowKeepActiveDefaultExitMv)
 	s.loadUint64Setting(s.auxLowKeepActiveEnterSettingSpec())
 	s.loadUint64Setting(s.auxLowKeepActiveExitSettingSpec())
+	s.loadAdmissionSetting()
 	s.loadDualBatterySetting()
-	s.admission = newPackAdmission(s.batteryConfig)
 
 	s.loadInitialVehicleState()
 	s.recomputeAuxLowKeepActive(false)
@@ -90,7 +90,9 @@ func (s *Service) Start() error {
 		}
 	}
 
-	go s.runAdmissionPoller()
+	if s.admission != nil {
+		go s.runAdmissionPoller()
+	}
 
 	s.logger.Info("Battery service started successfully")
 	return nil
@@ -510,6 +512,50 @@ func (s *Service) recomputeAuxLowKeepActive(allowRestart bool) {
 	}
 }
 
+// Admission mode is fixed before readers start. Changing the policy while a
+// pack may be supplying power would discard command reservations.
+func (s *Service) loadAdmissionSetting() {
+	const key = "experimental.battery.dual-pack-admission"
+	raw, err := s.redis.HGet(s.ctx, "settings", key).Result()
+	if err != nil {
+		if err != redis.Nil {
+			s.logger.Warn("Failed to load experimental admission setting", "error", err)
+		}
+		return
+	}
+	enabled, valid := parseBoolSetting(raw)
+	if !valid {
+		s.logger.Warn("Invalid experimental admission setting", "value", raw)
+		return
+	}
+	if enabled {
+		s.admission = newPackAdmission(s.batteryConfig)
+	}
+	s.logger.Info("Experimental dual-pack admission", "enabled", enabled)
+}
+
+// The non-experimental role gate uses the published voltage snapshots.
+func (s *Service) checkVoltageDelta() (ok bool, delta uint64) {
+	maxDelta := s.config.MaxVoltageDelta.Load()
+	if maxDelta == 0 {
+		return true, 0
+	}
+	v0, err := s.redis.HGet(s.ctx, "battery:0", "voltage").Uint64()
+	if err != nil || v0 == 0 {
+		return true, 0
+	}
+	v1, err := s.redis.HGet(s.ctx, "battery:1", "voltage").Uint64()
+	if err != nil || v1 == 0 {
+		return true, 0
+	}
+	if v0 > v1 {
+		delta = v0 - v1
+	} else {
+		delta = v1 - v0
+	}
+	return delta <= maxDelta, delta
+}
+
 func (s *Service) runAdmissionPoller() {
 	ticker := time.NewTicker(admissionPollInterval)
 	defer ticker.Stop()
@@ -551,10 +597,16 @@ func (s *Service) loadDualBatterySetting() {
 		newRole := BatteryRoleInactive
 		if dualBattery {
 			newRole = BatteryRoleActive
+			if s.admission == nil {
+				if ok, delta := s.checkVoltageDelta(); !ok {
+					s.logger.Warn("Voltage delta too large; refusing battery 1 activation", "delta", delta)
+					newRole = BatteryRoleInactive
+				}
+			}
 		}
 		s.batteryConfig.Readers[1].Role = newRole
 		if s.admission != nil {
-			s.admission.setRole(1, newRole == BatteryRoleActive)
+			s.admission.setRole(1, s.batteryConfig.Readers[1].Enabled && newRole == BatteryRoleActive)
 		}
 
 		// Also update the reader if it was already created
@@ -604,7 +656,13 @@ func (s *Service) handleDualBatterySettingChange() {
 	}
 
 	if s.admission != nil {
-		s.admission.setRole(1, newRole == BatteryRoleActive)
+		s.admission.setRole(1, s.batteryConfig.Readers[1].Enabled && newRole == BatteryRoleActive)
+	} else if newRole == BatteryRoleActive {
+		if ok, delta := s.checkVoltageDelta(); !ok {
+			s.logger.Warn("Voltage delta too large; refusing battery 1 activation", "delta", delta)
+			return
+		}
+		reader.voltageDeltaBlocked = false
 	}
 
 	reader.role = newRole

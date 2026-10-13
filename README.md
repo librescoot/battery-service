@@ -14,8 +14,8 @@ battery presence, status, temperature, and faults.
 - Monitors pack temperature and derives `cold`, `ideal`, `hot`, or `unknown`
   temperature state.
 - Coordinates reader activity with vehicle and seatbox state.
-- Selects the higher-voltage pack as the initial supply in dual-battery mode
-  and coordinates admission of the second pack.
+- Provides optional experimental higher-voltage pack selection and coordinated
+  admission of the second pack.
 
 ## Operation and Redis interface
 
@@ -59,61 +59,39 @@ behavior. Restrict their modification to trusted configuration components.
 
 ## Dual-battery activation
 
-With `scooter.dual-battery=true` (or `--battery1-active`), both readers share
-an admission policy. Every ON command passes through it, including activation
-following a seatbox cycle, role change, or observed pack deactivation.
+`experimental.battery.dual-pack-admission` defaults to **false**. It is read at
+startup; changes require a service restart. It does not enable reader 1: that
+still requires `scooter.dual-battery=true` or `--battery1-active`.
 
-- When both packs are confirmed inactive, the higher-voltage usable pack is
-  selected first. Charge percentage breaks an equal-voltage tie; slot 0 breaks
-  an exact tie. A pack reporting a fault or the BMS empty condition is not
-  selected as a new supply.
+With the flag off, slot 1 uses `scooter.max-voltage-delta` against the published
+slot 0 voltage. Startup and role changes check the limit. The insertion check
+waits for tag confirmation and latches until the pack is reinserted.
+
+With the flag on:
+
+- Both readers share a gate for every ON command. The higher-voltage usable
+  pack starts first; charge breaks a voltage tie, then slot 0 breaks an exact tie.
 - Initial activation is allowed in `stand-by`, `waiting-seatbox`, or `parked`.
-  A pack joining an existing supply must wait for `parked`.
-- A lower-voltage running supply is not switched off to select the fuller pack.
-  Selection is reconsidered when both packs are confirmed inactive.
-- Already-active packs retain their ON heartbeats despite voltage drift or
-  missing measurements. A fresh inactive report requires new admission. No
-  inactive pack is automatically added in `ready-to-drive`.
-- Seatbox, empty-pack and explicit disable behavior still control OFF commands.
-  ON after an OFF attempt requires post-command inactive evidence.
+  A second pack can join only in `parked`.
+- Active packs keep their ON heartbeats. The service does not switch off a
+  running pack to select another, or add an inactive pack while driving.
+- OFF commands still follow seatbox, empty-pack and disable handling. An OFF
+  attempt needs a later inactive reading before ON is allowed again.
 
-Admission uses complete NFC reads, not cached Redis voltage. Both readers must
-provide fresh data, or the unused slot must have a recent successful no-tag
-observation. A frame change is required as evidence that the pack has written
-to its tag within the last 10 seconds; repeated identical reads do not extend
-that deadline. Truncated frames and sensor-artifact substitutions are excluded.
-There is no timeout that turns unknown data into permission to activate.
+Admission uses complete NFC reads with a frame change in the last 10 seconds,
+not cached Redis voltage. Missing, stale, truncated or substituted data cannot
+admit a pack. Pending activation polls every 3 seconds without interrupting commands.
+A second pack needs three samples over 6 seconds: data age ≤10 seconds, reader
+skew ≤3 seconds, absolute current ≤1000 mA, and voltage variation ≤100 mV per pack.
+The voltage difference must stay within `scooter.max-voltage-delta` minus 10%
+(capped at 100 mV). A limit of 0 disables only the voltage check.
 
-For a second pack to join, readings must be at most 10 seconds old and no more
-than 3 seconds apart. Both packs need at least three samples spanning 6 seconds,
-with absolute current at or below 1000 mA and voltage variation at or below
-100 mV per pack. Every voltage pair in that window must be at or below
-`scooter.max-voltage-delta` minus an admission margin of 10% (capped at 100 mV).
-The default limit is 1000 mV, giving a 900 mV admission bound. Setting the limit
-to `0` disables only the voltage-difference check, not freshness, load, vehicle
-state, or command coordination.
+ON writes reserve the slot before I/O. Failed writes and lost tags do not prove
+the pack is off. Reservations need inactive readings to clear; unconfirmed ON
+retries stop after 10 seconds. Admission state is not persisted across restarts.
 
-While admission is pending in parked, a 3-second poll requests early heartbeats
-from readers resting between command cycles. Polling does not interrupt command
-settling delays. The running pack receives its ON heartbeat before the status
-read. Initial selection also polls in stand-by or waiting-seatbox until a supply
-is confirmed. Both-active operation uses the normal heartbeat interval.
-
-An ON reservation prevents simultaneous independent activation decisions. A
-failed write remains a possible live supply until an inactive report confirms
-otherwise; unconfirmed ON retries are bounded to 10 seconds. Losing an active
-pack's NFC tag does not prove its output is OFF and can therefore defer another
-pack's activation until power state is confirmed. A different tag identity
-starts a new admission episode. Decision changes and deferral reasons appear
-in the service log as `Battery activation decision`.
-
-Admission state is not persisted across service restarts. At startup, an
-unchanged ACTIVE tag snapshot alone cannot authorize ON; the service waits for
-write evidence. Restart power continuity therefore needs explicit bench testing.
-
-The load, timing and voltage bounds require bench validation before vehicle
-rollout. Voltage agreement is an admission condition, not a guarantee of a
-particular equalization current or an exact current split between packs.
+The experimental path, including restart power continuity, needs bench testing
+before vehicle use.
 
 ## Build and test
 
