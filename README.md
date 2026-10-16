@@ -81,8 +81,10 @@ With the flag on:
 Admission uses complete NFC reads with a frame change in the last 10 seconds,
 not cached Redis voltage. Missing, stale, truncated or substituted data cannot
 admit a pack. Shared sampling rounds prompt both reader FSMs at most every 3 seconds
-without interrupting commands. Rounds continue with both packs active in `parked`
-and `ready-to-drive`; they do not permit second-pack admission while driving.
+without interrupting commands. With both readers configured for active roles,
+rounds are attempted regardless of vehicle state, including `stand-by`, before
+and after both packs become active. Sampling does not authorize activation:
+second-pack admission still requires `parked`.
 A second pack needs three paired samples over 6 seconds: data age ≤10 seconds,
 STATUS0 acquisition skew ≤1 second, absolute current ≤1000 mA, and voltage
 variation ≤100 mV per pack.
@@ -109,7 +111,8 @@ concurrently on their independent NFC controllers through the existing FSMs and
 Each read claims its round at entry, before discovery; a read already in flight
 when a round opens cannot be relabeled into it.
 There is no barrier, extra NFC worker, catch-up loop or retry of a failed round.
-Busy readers may miss rounds; heartbeats never wait for the peer.
+Busy readers may miss rounds; heartbeats never wait for the peer. Sampling does
+not bypass OFF confirmation, wake a stopped reader or prevent service shutdown.
 
 STATUS0 contains voltage/current. Its start and end are recorded around the
 verified read, including any retries; full-frame completion is recorded separately.
@@ -160,7 +163,9 @@ logged pack voltages/currents and bus voltage. Do not infer continuity from Redi
 4. Test voltage mismatch, load above 1000 mA, moving vehicle state, OFF in progress,
    role changes, shutdown and restart. Confirm no unsafe second-pack admission and
    measure running-supply continuity, including restart behavior.
-5. With both packs active, record ongoing rounds and traffic for an extended run.
+5. With both packs active, record ongoing rounds and traffic for an extended run,
+   including `stand-by`. Confirm that sampling continues across vehicle states
+   while second-pack admission remains parked-only.
    Compare NFC data against independently timestamped load/voltage changes to
    characterize tag refresh latency and inter-pack measurement age. Report those
    separately from the NFC acquisition bound; do not claim measurement synchronization

@@ -200,10 +200,19 @@ func TestSamplingOngoingAndSinglePack(t *testing.T) {
 	a := samplingPolicy()
 	a.slots[1].active = true
 	a.slots[1].held = true
-	for _, state := range []VehicleState{VehicleStateParked, VehicleStateReadyToDrive} {
+	for _, state := range []VehicleState{
+		VehicleStateStandby, VehicleStateParked, VehicleStateReadyToDrive,
+		VehicleStateWaitingSeatbox, VehicleStateShuttingDown, VehicleStateUpdating,
+		VehicleStateWaitingHibernation, VehicleStateWaitingHibernationAdvanced,
+		VehicleStateWaitingHibernationSeatbox, VehicleStateWaitingHibernationConfirm,
+		VehicleStateOther, "",
+	} {
 		a.setVehicle(state)
 		if !a.needsPoll() {
-			t.Fatal("active packs no longer sampled")
+			t.Fatalf("active packs no longer sampled in %q", state)
+		}
+		if id, _ := a.beginRound(admissionTestTime); id == 0 {
+			t.Fatalf("no sampling round in %q", state)
 		}
 	}
 	a.setRole(1, false)
@@ -215,6 +224,25 @@ func TestSamplingOngoingAndSinglePack(t *testing.T) {
 	if id, _ := a.beginRound(admissionTestTime); id != 0 {
 		t.Fatal("disabled round")
 	}
+}
+
+func TestSamplingStandbyPairsDoNotAdmitSecondPack(t *testing.T) {
+	a := samplingPolicy()
+	a.setVehicle(VehicleStateStandby)
+	for i := 0; i < 3; i++ {
+		deliverPair(t, a, admissionTestTime.Add(time.Duration(i)*admissionPollInterval), 52001+uint(i%2))
+	}
+	now := admissionTestTime.Add(6200 * time.Millisecond)
+	requireAdmission(t, a, 0, now, true)
+	if allowed, reason := a.requestOn(1, now, DefaultMaxVoltageDeltaMV); allowed || reason != "waiting for parked" {
+		t.Fatalf("standby admission: allowed=%t reason=%q", allowed, reason)
+	}
+	a.setVehicle(VehicleStateParked)
+	requireAdmission(t, a, 1, now, false)
+	for i := 3; i < 6; i++ {
+		deliverPair(t, a, admissionTestTime.Add(time.Duration(i)*admissionPollInterval), 52001+uint(i%2))
+	}
+	requireAdmission(t, a, 1, admissionTestTime.Add(15200*time.Millisecond), true)
 }
 
 func TestSamplingConcurrentClaimsAndResults(t *testing.T) {

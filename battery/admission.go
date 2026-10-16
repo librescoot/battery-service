@@ -342,11 +342,8 @@ func (a *packAdmission) needsPollLocked() bool {
 	if !a.coordinated {
 		return false
 	}
-	if a.sampling.enabled && a.slots[0].eligible && a.slots[1].eligible {
-		switch a.vehicle {
-		case VehicleStateParked, VehicleStateReadyToDrive:
-			return true
-		}
+	if a.sampling.enabled {
+		return a.slots[0].eligible && a.slots[1].eligible
 	}
 	switch a.vehicle {
 	case VehicleStateParked:
