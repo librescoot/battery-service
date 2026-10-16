@@ -366,13 +366,6 @@ func (r *BatteryReader) writeCommand(cmd fsm.BMSCommand) error {
 	}
 	defer r.releaseInhibitor()
 
-	// Discovery and inhibitor acquisition can block. Decide immediately
-	// before writing, against the selected tag and current observations.
-	// Denial skips ON; it must not become an OFF command.
-	if !r.admitCommand(cmd, time.Now()) {
-		return fmt.Errorf("battery %d: activation deferred: %s", r.index, r.lastAdmissionReason)
-	}
-
 	cmdBytes := make([]byte, 4)
 	cmdBytes[0] = byte(cmd)
 	cmdBytes[1] = byte(cmd >> 8)
@@ -383,6 +376,11 @@ func (r *BatteryReader) writeCommand(cmd fsm.BMSCommand) error {
 	const maxRetries = 5
 	var lastErr error
 	for retry := 0; retry < maxRetries; retry++ {
+		// Discovery and retries can outlive stopped/throttle-off evidence.
+		// Recheck immediately before each write; denial never becomes OFF.
+		if !r.admitCommand(cmd, time.Now()) {
+			return fmt.Errorf("battery %d: activation deferred: %s", r.index, r.lastAdmissionReason)
+		}
 		err := r.hal.WriteBinary(0x0330, cmdBytes)
 		if err == nil {
 			r.updateLastCmdTime()

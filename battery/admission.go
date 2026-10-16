@@ -55,6 +55,7 @@ type packAdmission struct {
 	vehicle     VehicleState
 	slots       [2]admissionSlot
 	sampling    samplingRounds
+	motion      stoppedAdmission
 }
 
 func newPackAdmission(config *BatteryConfiguration) *packAdmission {
@@ -246,6 +247,16 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (bo
 	}
 	switch a.vehicle {
 	case VehicleStateParked, VehicleStateStandby, VehicleStateWaitingSeatbox:
+	case VehicleStateReadyToDrive:
+		if !a.motion.enabled {
+			return false, "waiting for activation vehicle state"
+		}
+		if !peer.held || !peer.active || peer.offPending {
+			return false, "waiting for running peer"
+		}
+		if !a.stoppedPairReadyLocked(now) {
+			return false, "waiting for fresh stopped-vehicle pair"
+		}
 	default:
 		return false, "waiting for activation vehicle state"
 	}
@@ -253,7 +264,9 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (bo
 		if now.Sub(s.onAt) > admissionOnSettle {
 			return false, "waiting for ON confirmation"
 		}
-		return true, "awaiting ON confirmation"
+		if a.vehicle != VehicleStateReadyToDrive {
+			return true, "awaiting ON confirmation"
+		}
 	}
 	if !s.fresh(now) {
 		return false, "waiting for fresh pack data"
@@ -273,7 +286,7 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (bo
 			if peer.frame.FaultCode != 0 || (peer.frame.LowSOC && peer.frame.Charge == 0) {
 				return false, "peer empty or faulted"
 			}
-			if a.vehicle != VehicleStateParked {
+			if a.vehicle != VehicleStateParked && a.vehicle != VehicleStateReadyToDrive {
 				return false, "waiting for parked"
 			}
 			if a.sampling.enabled && (a.sampling.pairedAt.IsZero() || now.Sub(a.sampling.pairedAt) > admissionMaxAge ||
@@ -302,6 +315,9 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (bo
 				return false, "higher-voltage pack selected"
 			}
 		}
+	}
+	if s.held {
+		return true, "awaiting ON confirmation"
 	}
 	a.cancelRoundLocked("activation reserved")
 	s.held, s.onAt = true, now

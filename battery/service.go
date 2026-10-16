@@ -80,6 +80,10 @@ func (s *Service) Start() error {
 	s.recomputeAuxLowKeepActive(false)
 
 	go s.runRedisSubscriber()
+	if s.admission != nil && s.admission.motion.enabled {
+		s.motionWG.Add(1)
+		go s.runStoppedAdmissionMonitor()
+	}
 
 	for _, reader := range s.readers {
 		if reader != nil {
@@ -118,6 +122,7 @@ func (s *Service) Stop() {
 	}
 
 	wg.Wait()
+	s.motionWG.Wait()
 
 	if s.redis != nil {
 		if err := s.redis.Close(); err != nil {
@@ -534,6 +539,7 @@ func (s *Service) loadAdmissionSetting() {
 	if enabled {
 		s.admission = newPackAdmission(s.batteryConfig)
 		s.admission.sampling.enabled = true
+		s.loadStoppedAdmissionSetting()
 	}
 	s.logger.Info("Experimental dual-pack admission", "enabled", enabled)
 }

@@ -72,9 +72,10 @@ With the flag on:
 - Both readers share a gate for every ON command. The higher-voltage usable
   pack starts first; charge breaks a voltage tie, then slot 0 breaks an exact tie.
 - Initial activation is allowed in `stand-by`, `waiting-seatbox`, or `parked`.
-  A second pack can join only in `parked`.
+  A second pack can join only in `parked` by default; a separate stopped-vehicle
+  exception is described below.
 - Active packs keep their ON heartbeats. The service does not switch off a
-  running pack to select another, or add an inactive pack while driving.
+  running pack to select another, or add an inactive pack while moving.
 - OFF commands still follow seatbox, empty-pack and disable handling. An OFF
   attempt needs a later inactive reading before ON is allowed again.
 
@@ -83,8 +84,9 @@ not cached Redis voltage. Missing, stale, truncated or substituted data cannot
 admit a pack. Shared sampling rounds prompt both reader FSMs at most every 3 seconds
 without interrupting commands. With both readers configured for active roles,
 rounds are attempted regardless of vehicle state, including `stand-by`, before
-and after both packs become active. Sampling does not authorize activation:
-second-pack admission still requires `parked`.
+and after both packs become active. Sampling alone does not authorize activation;
+the second-pack gate remains parked-only unless the stopped-vehicle exception is
+explicitly enabled.
 A second pack needs three paired samples over 6 seconds: data age ≤10 seconds,
 STATUS0 acquisition skew ≤1 second, absolute current ≤1000 mA, and voltage
 variation ≤100 mV per pack.
@@ -94,6 +96,42 @@ The voltage difference must stay within `scooter.max-voltage-delta` minus 10%
 ON writes reserve the slot before I/O. Failed writes and lost tags do not prove
 the pack is off. Reservations need inactive readings to clear; unconfirmed ON
 retries stop after 10 seconds. Admission state is not persisted across restarts.
+
+### Experimental stopped-vehicle admission
+
+`experimental.battery.dual-pack-admission-while-stopped` defaults to **false**.
+It is read at startup, requires `experimental.battery.dual-pack-admission=true`,
+and also requires a service restart to change. It permits second-pack admission
+in `ready-to-drive` only under all of these additional conditions:
+
+- The peer is a confirmed running supply with no pending OFF command. This
+  exception cannot start the first supply in `ready-to-drive`.
+- Fresh CAN Status1 reports show zero RPM, zero raw speed and throttle off
+  throughout the stable sampling window. Zero whole-km/h speed alone is not
+  sufficient. A receive gap longer than 500 ms, movement, throttle-on, transport
+  error or receive-queue overflow requires a new qualification window.
+- Three successful paired acquisitions span at least 6 seconds after the current
+  stopped/throttle-off condition began. Existing low-load, voltage-span,
+  voltage-difference and tag-write freshness checks still apply.
+- The latest pair's earliest STATUS0 start is at most 3 seconds old. A CAN report
+  received after both complete battery frames must still confirm stopped and
+  throttle-off, and must be at most 500 ms old when the ON write is attempted.
+
+The gate is checked immediately before every command write attempt, including
+arbiter retries. An ON reservation consumes its pairing evidence; an unconfirmed
+RTD activation needs a new qualified window before another ON attempt. A failed
+gate never substitutes OFF or releases a supply reservation. Already-confirmed
+running packs continue their heartbeats even if motion telemetry disappears.
+
+When this setting is enabled, a receive-only SocketCAN listener on `can0` reads
+standard 8-byte Status1 frames (`0x7E0`), using the same RPM/raw-speed/throttle
+layout as `ecu-service/bosch.go`. `--admission-can-device` selects another CAN
+interface if needed. No CAN commands are sent and the interface is not configured
+or brought up by this service. Kernel receive timestamps prevent queued frames
+from becoming fresh merely because they were dequeued recently. Cached
+`engine-ecu` Redis values cannot enable this gate: unchanged fields have no
+receive timestamp there. Missing or invalid CAN evidence defers RTD admission;
+it does not disable the service or the normal parked admission path.
 
 ### Coordinated acquisition
 
@@ -135,8 +173,8 @@ with the experimental flag disabled, the existing path is unchanged.
 
 Service debug logs emit at most one round summary per scheduler tick: round ID,
 result, conservative skew, STATUS0 durations and full-frame durations from
-STATUS0 start. Missing observations have zero durations. No new Redis fields
-or settings are introduced.
+STATUS0 start. Missing observations have zero durations. Sampling adds no public
+Redis status fields.
 
 Synchronized NFC acquisition does **not** guarantee synchronized BMS measurements.
 The tags contain independently refreshed data without proven sample timestamps.
@@ -165,11 +203,19 @@ logged pack voltages/currents and bus voltage. Do not infer continuity from Redi
    measure running-supply continuity, including restart behavior.
 5. With both packs active, record ongoing rounds and traffic for an extended run,
    including `stand-by`. Confirm that sampling continues across vehicle states
-   while second-pack admission remains parked-only.
+   while second-pack admission remains parked-only with the stopped-vehicle
+   exception disabled.
    Compare NFC data against independently timestamped load/voltage changes to
    characterize tag refresh latency and inter-pack measurement age. Report those
    separately from the NFC acquisition bound; do not claim measurement synchronization
    from successful rounds alone.
+6. On the protected bench, separately enable the stopped-vehicle setting. Verify
+   RTD admission only after a full stopped/throttle-off stable window and a fresh
+   pair. Exercise nonzero RPM with zero rounded speed, throttle pulses during
+   reads and retries, stale/queued CAN frames, receive gaps, bus errors, missing
+   peer power confirmation and OFF pending. Verify the pending pack stays off
+   when denied and running supplies keep heartbeating. Repeat with the setting
+   disabled to confirm the default parked-only gate.
 
 ## Build and test
 
