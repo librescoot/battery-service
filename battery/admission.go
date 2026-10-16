@@ -23,16 +23,17 @@ type admissionSample struct {
 }
 
 type admissionSlot struct {
-	monitored bool
-	eligible  bool
-	uid       string
-	absent    bool
-	observed  time.Time
-	frame     BMSData
-	haveFrame bool
-	written   time.Time
-	valid     bool
-	history   []admissionSample
+	monitored     bool
+	eligible      bool
+	uid           string
+	absent        bool
+	observed      time.Time
+	observedRound uint64
+	frame         BMSData
+	haveFrame     bool
+	written       time.Time
+	valid         bool
+	history       []admissionSample
 
 	// A command reservation counts as a possible live supply even if its
 	// write fails. Only positive OFF evidence may release it; a read error
@@ -53,6 +54,7 @@ type packAdmission struct {
 	coordinated bool
 	vehicle     VehicleState
 	slots       [2]admissionSlot
+	sampling    samplingRounds
 }
 
 func newPackAdmission(config *BatteryConfiguration) *packAdmission {
@@ -70,6 +72,7 @@ func newPackAdmission(config *BatteryConfiguration) *packAdmission {
 func (a *packAdmission) setRole(index int, eligible bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.cancelRoundLocked("role changed")
 	a.slots[index].eligible = eligible
 	if a.slots[0].eligible && a.slots[1].eligible {
 		a.coordinated = true
@@ -83,6 +86,7 @@ func (a *packAdmission) setVehicle(state VehicleState) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.vehicle != state {
+		a.cancelRoundLocked("vehicle changed")
 		for i := range a.slots {
 			a.slots[i].history = nil
 		}
@@ -93,6 +97,7 @@ func (a *packAdmission) setVehicle(state VehicleState) {
 func (a *packAdmission) tag(index int, uid []byte) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.cancelRoundLocked("tag changed")
 	s := &a.slots[index]
 	if s.uid != string(uid) {
 		*s = admissionSlot{monitored: s.monitored, eligible: s.eligible, uid: string(uid)}
@@ -106,9 +111,17 @@ func (a *packAdmission) tag(index int, uid []byte) {
 }
 
 func (a *packAdmission) invalidate(index int) {
+	a.failAcquisition(index, 0, acquisition{})
+}
+
+func (a *packAdmission) failAcquisition(index int, id uint64, sample acquisition) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s := &a.slots[index]
+	if r := a.sampling.round; r != nil && r.id == id {
+		r.samples[index] = sample
+	}
+	a.cancelRoundLocked("read failed")
 	s.valid = false
 	s.absent = false
 	s.history = nil
@@ -120,6 +133,7 @@ func (a *packAdmission) observeAbsent(index int, now time.Time) {
 	s := &a.slots[index]
 	s.valid = false
 	s.history = nil
+	a.cancelRoundLocked("pack absent")
 	s.absent = !s.held
 	s.observed = now
 }
@@ -130,7 +144,12 @@ func (a *packAdmission) observeAbsent(index int, now time.Time) {
 func (a *packAdmission) observe(index int, data BMSData, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.observeLocked(index, data, now)
+}
+
+func (a *packAdmission) observeLocked(index int, data BMSData, now time.Time) {
 	s := &a.slots[index]
+	s.observedRound = 0
 	if s.haveFrame && statusFrameChanged(s.frame, data) {
 		s.written = now
 	}
@@ -148,6 +167,7 @@ func (a *packAdmission) observe(index int, data BMSData, now time.Time) {
 	} else if (!s.offPending && (s.active || now.Sub(s.onAt) >= admissionOnSettle)) ||
 		(s.offPending && s.written.After(s.offAt)) {
 		if s.held {
+			a.cancelRoundLocked("supply became inactive")
 			for i := range a.slots {
 				a.slots[i].history = nil
 			}
@@ -155,13 +175,20 @@ func (a *packAdmission) observe(index int, data BMSData, now time.Time) {
 		s.held, s.active, s.offPending = false, false, false
 	}
 
+	if a.sampling.enabled && a.coordinated {
+		return
+	}
+	s.appendHistory(data, now)
+}
+
+func (s *admissionSlot) appendHistory(data BMSData, now time.Time) {
 	if len(s.history) > 0 && now.Sub(s.history[len(s.history)-1].at) > admissionMaxAge {
 		s.history = nil
 	}
 	s.history = append(s.history, admissionSample{data: data, at: now})
-	// Keep the sample just before the window boundary as well, so jitter in
-	// the poll cadence cannot prevent a full stable window from accumulating.
-	for len(s.history) > 2 && now.Sub(s.history[1].at) >= admissionStableTime {
+	// Keep at least three samples and the sample just before the window
+	// boundary, including when discovery lengthens the sampling cadence.
+	for len(s.history) > 3 && now.Sub(s.history[1].at) >= admissionStableTime {
 		s.history = s.history[1:]
 	}
 }
@@ -175,7 +202,7 @@ func (s *admissionSlot) usable() bool {
 }
 
 func (s *admissionSlot) stable(now time.Time) bool {
-	if !s.fresh(now) || len(s.history) < 3 || now.Sub(s.history[0].at) < admissionStableTime {
+	if !s.fresh(now) || len(s.history) < 3 || s.history[len(s.history)-1].at.Sub(s.history[0].at) < admissionStableTime {
 		return false
 	}
 	minV, maxV := s.frame.Voltage, s.frame.Voltage
@@ -249,6 +276,10 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (bo
 			if a.vehicle != VehicleStateParked {
 				return false, "waiting for parked"
 			}
+			if a.sampling.enabled && (a.sampling.pairedAt.IsZero() || now.Sub(a.sampling.pairedAt) > admissionMaxAge ||
+				s.observedRound != a.sampling.pairedID || peer.observedRound != a.sampling.pairedID) {
+				return false, "waiting for paired acquisition"
+			}
 			skew := s.observed.Sub(peer.observed)
 			if skew < -admissionMaxSkew || skew > admissionMaxSkew || !s.stable(now) || !peer.stable(now) {
 				return false, "waiting for stable low-load readings"
@@ -272,6 +303,7 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (bo
 			}
 		}
 	}
+	a.cancelRoundLocked("activation reserved")
 	s.held, s.onAt = true, now
 	// Samples before a command cannot establish its settled load.
 	for i := range a.slots {
@@ -283,6 +315,7 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (bo
 func (a *packAdmission) offAttempt(index int, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.cancelRoundLocked("OFF command")
 	s := &a.slots[index]
 	if s.held && !s.offPending {
 		s.offPending, s.offAt = true, now
@@ -302,8 +335,18 @@ func (a *packAdmission) waiting(index int, now time.Time) bool {
 func (a *packAdmission) needsPoll() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.needsPollLocked()
+}
+
+func (a *packAdmission) needsPollLocked() bool {
 	if !a.coordinated {
 		return false
+	}
+	if a.sampling.enabled && a.slots[0].eligible && a.slots[1].eligible {
+		switch a.vehicle {
+		case VehicleStateParked, VehicleStateReadyToDrive:
+			return true
+		}
 	}
 	switch a.vehicle {
 	case VehicleStateParked:

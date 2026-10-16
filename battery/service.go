@@ -102,6 +102,9 @@ func (s *Service) Stop() {
 	s.logger.Info("Stopping battery service")
 
 	s.cancel()
+	if s.admission != nil {
+		s.admission.stopSampling()
+	}
 
 	var wg sync.WaitGroup
 	for _, reader := range s.readers {
@@ -530,6 +533,7 @@ func (s *Service) loadAdmissionSetting() {
 	}
 	if enabled {
 		s.admission = newPackAdmission(s.batteryConfig)
+		s.admission.sampling.enabled = true
 	}
 	s.logger.Info("Experimental dual-pack admission", "enabled", enabled)
 }
@@ -564,7 +568,15 @@ func (s *Service) runAdmissionPoller() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			if s.admission == nil || !s.admission.needsPoll() {
+			if s.admission == nil {
+				continue
+			}
+			id, report := s.admission.beginRound(time.Now())
+			if report.id != 0 {
+				s.logger.Debug("Paired status round", "round", report.id, "result", report.reason,
+					"skew", report.skew, "status0_duration", report.status0, "frame_duration", report.frame)
+			}
+			if id == 0 {
 				continue
 			}
 			for _, reader := range s.readers {
