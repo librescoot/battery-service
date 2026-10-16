@@ -572,10 +572,7 @@ func (s *Service) runAdmissionPoller() {
 				continue
 			}
 			id, report := s.admission.beginRound(time.Now())
-			if report.id != 0 {
-				s.logger.Debug("Paired status round", "round", report.id, "result", report.reason,
-					"skew", report.skew, "status0_duration", report.status0, "frame_duration", report.frame)
-			}
+			s.logSamplingReport(report)
 			if id == 0 {
 				continue
 			}
@@ -586,6 +583,15 @@ func (s *Service) runAdmissionPoller() {
 			}
 		}
 	}
+}
+
+func (s *Service) logSamplingReport(report samplingReport) {
+	if report.id == 0 {
+		return
+	}
+	// ServiceHandler renders message text only, not structured attributes.
+	s.logger.Debug(fmt.Sprintf("Paired status round: round=%d result=%q skew=%s status0_duration=%v frame_duration=%v",
+		report.id, report.reason, report.skew, report.status0, report.frame))
 }
 
 func (s *Service) loadDualBatterySetting() {

@@ -1,6 +1,9 @@
 package battery
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -298,6 +301,25 @@ func TestSamplingMissingPackAndOffConfirmation(t *testing.T) {
 	a.observeAcquisition(0, 0, acquisition{data: admissionFrame(52001, BMSStateIdle), complete: now.Add(time.Second)})
 	if a.slots[0].held || a.slots[0].offPending {
 		t.Fatal("unpaired fresh OFF not confirmed")
+	}
+}
+
+func TestSamplingDiagnosticsThroughServiceHandler(t *testing.T) {
+	var out bytes.Buffer
+	s := &Service{logger: slog.New(NewServiceHandler(&out, LogLevelDebug))}
+	s.logSamplingReport(samplingReport{})
+	if out.Len() != 0 {
+		t.Fatal("empty report logged")
+	}
+	s.logSamplingReport(samplingReport{
+		id: 7, reason: "acquisition skew", skew: 1200 * time.Millisecond,
+		status0: [2]time.Duration{100 * time.Millisecond, 200 * time.Millisecond},
+		frame:   [2]time.Duration{300 * time.Millisecond, 400 * time.Millisecond},
+	})
+	for _, field := range []string{"round=7", `result="acquisition skew"`, "skew=1.2s", "status0_duration=[100ms 200ms]", "frame_duration=[300ms 400ms]"} {
+		if !strings.Contains(out.String(), field) {
+			t.Errorf("missing %q in %q", field, out.String())
+		}
 	}
 }
 
