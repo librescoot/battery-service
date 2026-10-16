@@ -10,6 +10,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestStoppedStatusFilterSelectsStandardDataFrames(t *testing.T) {
+	if stoppedStatusCANMask&unix.CAN_ERR_FLAG != 0 {
+		t.Fatal("data filter would be registered as an error filter")
+	}
+	if stoppedStatusCANMask != unix.CAN_SFF_MASK|unix.CAN_EFF_FLAG|unix.CAN_RTR_FLAG {
+		t.Fatal("filter must match the full standard ID and exclude extended and remote frames")
+	}
+	for _, id := range []uint32{stoppedStatusCANID, 0x7e1, stoppedStatusCANID | unix.CAN_EFF_FLAG, stoppedStatusCANID | unix.CAN_RTR_FLAG} {
+		if matches := id&stoppedStatusCANMask == stoppedStatusCANID; matches != (id == stoppedStatusCANID) {
+			t.Fatalf("CAN ID %#x matches=%t", id, matches)
+		}
+	}
+}
+
 func TestStoppedStatusRequiresZeroRPMZeroSpeedAndThrottleOff(t *testing.T) {
 	for _, tc := range []struct {
 		name           string

@@ -12,6 +12,10 @@ import (
 
 const stoppedStatusCANID = 0x7e0
 
+// CAN_ERR_FLAG in a filter mask selects the kernel's error receive list.
+// Data frames use this mask; errors use CAN_RAW_ERR_FILTER separately.
+const stoppedStatusCANMask = unix.CAN_SFF_MASK | unix.CAN_EFF_FLAG | unix.CAN_RTR_FLAG
+
 func openStoppedMotionSocket(device string) (int, error) {
 	iface, err := net.InterfaceByName(device)
 	if err != nil {
@@ -27,7 +31,7 @@ func openStoppedMotionSocket(device string) (int, error) {
 			_ = unix.Close(fd)
 		}
 	}()
-	filter := []unix.CanFilter{{Id: stoppedStatusCANID, Mask: unix.CAN_SFF_MASK | unix.CAN_EFF_FLAG | unix.CAN_RTR_FLAG | unix.CAN_ERR_FLAG}}
+	filter := []unix.CanFilter{{Id: stoppedStatusCANID, Mask: stoppedStatusCANMask}}
 	if err = unix.SetsockoptCanRawFilter(fd, unix.SOL_CAN_RAW, unix.CAN_RAW_FILTER, filter); err != nil {
 		return -1, err
 	}
@@ -86,6 +90,7 @@ func (s *Service) readStoppedMotion(ctx context.Context, fd int) error {
 	var frame [16]byte
 	var control [128]byte
 	var lastDrops uint32
+	reportedMotion := false
 	for ctx.Err() == nil {
 		poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 		if _, err := unix.Poll(poll, 50); err != nil {
@@ -119,6 +124,15 @@ func (s *Service) readStoppedMotion(ctx context.Context, fd int) error {
 			continue
 		}
 		lastDrops = s.admission.observeCANMotion(stopped, messages, now, lastDrops)
+		if !reportedMotion {
+			s.admission.mu.Lock()
+			received, stopped := s.admission.motion.at, s.admission.motion.stopped
+			s.admission.mu.Unlock()
+			if !received.IsZero() {
+				s.logger.Info(fmt.Sprintf("Stopped-vehicle admission received fresh CAN Status1: stopped=%t age=%s", stopped, now.Sub(received)))
+				reportedMotion = true
+			}
+		}
 	}
 	return ctx.Err()
 }
