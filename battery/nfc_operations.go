@@ -254,9 +254,16 @@ func (r *BatteryReader) readStatus() bool {
 // parsed from status1 alone, so the frame that carries it is what is checked.
 func (r *BatteryReader) readStatusLocked() (bool, bool) {
 	admissionSampleOK := false
+	var roundID uint64
+	var status0Start, status0End time.Time
+	if a := r.packAdmission(); a != nil {
+		roundID = a.claimRound(r.index, time.Now())
+	}
 	defer func() {
 		if a := r.packAdmission(); a != nil && !admissionSampleOK {
-			a.invalidate(r.index)
+			a.failAcquisition(r.index, roundID, acquisition{
+				start: status0Start, end: status0End, complete: time.Now(),
+			})
 		}
 	}()
 	// Only start discovery if not already discovered
@@ -266,7 +273,9 @@ func (r *BatteryReader) readStatusLocked() (bool, bool) {
 		}
 	}
 
+	status0Start = time.Now()
 	status0, err := r.readWithVerification(0x0300)
+	status0End = time.Now()
 	if err != nil {
 		r.logger.Warn(fmt.Sprintf("Failed to read status0: %v", err))
 		r.noteCommsFailure()
@@ -316,7 +325,9 @@ func (r *BatteryReader) readStatusLocked() (bool, bool) {
 
 	admissionSampleOK = len(status0) >= 16 && len(status1) >= 16 && len(status2) >= 16 && artifacts == r.sensors01Artifacts
 	if a := r.packAdmission(); a != nil && admissionSampleOK {
-		a.observe(r.index, r.data, time.Now())
+		a.observeAcquisition(r.index, roundID, acquisition{
+			start: status0Start, end: status0End, complete: time.Now(), data: r.data,
+		})
 	}
 
 	r.logger.Debug(fmt.Sprintf("Status read on reader %d: serial=%s charge=%d%% state=%s", r.index, r.data.SerialNumber, r.data.Charge, r.data.State))
@@ -355,13 +366,6 @@ func (r *BatteryReader) writeCommand(cmd fsm.BMSCommand) error {
 	}
 	defer r.releaseInhibitor()
 
-	// Discovery and inhibitor acquisition can block. Decide immediately
-	// before writing, against the selected tag and current observations.
-	// Denial skips ON; it must not become an OFF command.
-	if !r.admitCommand(cmd, time.Now()) {
-		return fmt.Errorf("battery %d: activation deferred: %s", r.index, r.lastAdmissionReason)
-	}
-
 	cmdBytes := make([]byte, 4)
 	cmdBytes[0] = byte(cmd)
 	cmdBytes[1] = byte(cmd >> 8)
@@ -372,6 +376,11 @@ func (r *BatteryReader) writeCommand(cmd fsm.BMSCommand) error {
 	const maxRetries = 5
 	var lastErr error
 	for retry := 0; retry < maxRetries; retry++ {
+		// Discovery and retries can outlive stopped/throttle-off evidence.
+		// Recheck immediately before each write; denial never becomes OFF.
+		if !r.admitCommand(cmd, time.Now()) {
+			return fmt.Errorf("battery %d: activation deferred: %s", r.index, r.lastAdmissionReason)
+		}
 		err := r.hal.WriteBinary(0x0330, cmdBytes)
 		if err == nil {
 			r.updateLastCmdTime()

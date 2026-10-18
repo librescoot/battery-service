@@ -80,6 +80,10 @@ func (s *Service) Start() error {
 	s.recomputeAuxLowKeepActive(false)
 
 	go s.runRedisSubscriber()
+	if s.admission != nil && s.admission.motion.enabled {
+		s.motionWG.Add(1)
+		go s.runMotionSubscriber()
+	}
 
 	for _, reader := range s.readers {
 		if reader != nil {
@@ -102,6 +106,9 @@ func (s *Service) Stop() {
 	s.logger.Info("Stopping battery service")
 
 	s.cancel()
+	if s.admission != nil {
+		s.admission.stopSampling()
+	}
 
 	var wg sync.WaitGroup
 	for _, reader := range s.readers {
@@ -115,6 +122,7 @@ func (s *Service) Stop() {
 	}
 
 	wg.Wait()
+	s.motionWG.Wait()
 
 	if s.redis != nil {
 		if err := s.redis.Close(); err != nil {
@@ -530,6 +538,8 @@ func (s *Service) loadAdmissionSetting() {
 	}
 	if enabled {
 		s.admission = newPackAdmission(s.batteryConfig)
+		s.admission.sampling.enabled = true
+		s.loadStoppedAdmissionSetting()
 	}
 	s.logger.Info("Experimental dual-pack admission", "enabled", enabled)
 }
@@ -564,7 +574,12 @@ func (s *Service) runAdmissionPoller() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			if s.admission == nil || !s.admission.needsPoll() {
+			if s.admission == nil {
+				continue
+			}
+			id, report := s.admission.beginRound(time.Now())
+			s.logSamplingReport(report)
+			if id == 0 {
 				continue
 			}
 			for _, reader := range s.readers {
@@ -574,6 +589,15 @@ func (s *Service) runAdmissionPoller() {
 			}
 		}
 	}
+}
+
+func (s *Service) logSamplingReport(report samplingReport) {
+	if report.id == 0 {
+		return
+	}
+	// ServiceHandler renders message text only, not structured attributes.
+	s.logger.Debug(fmt.Sprintf("Paired status round: round=%d result=%q skew=%s status0_duration=%v frame_duration=%v",
+		report.id, report.reason, report.skew, report.status0, report.frame))
 }
 
 func (s *Service) loadDualBatterySetting() {

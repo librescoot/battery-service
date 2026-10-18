@@ -312,6 +312,7 @@ type Service struct {
 	vehicleState  VehicleState
 	readers       []*BatteryReader
 	admission     *packAdmission
+	motionWG      sync.WaitGroup
 }
 
 // BatteryReader represents a single battery reader with its own event loop
