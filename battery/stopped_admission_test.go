@@ -71,7 +71,7 @@ func TestStoppedAdmissionAllowsFreshQualifiedPair(t *testing.T) {
 	}
 }
 
-func TestStoppedSettingDoesNotRequireCANForParkedAdmission(t *testing.T) {
+func TestStoppedSettingDoesNotRequireMotionForParkedAdmission(t *testing.T) {
 	a := samplingPolicy()
 	a.motion.enabled = true
 	for i := 0; i < 3; i++ {

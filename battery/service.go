@@ -82,7 +82,7 @@ func (s *Service) Start() error {
 	go s.runRedisSubscriber()
 	if s.admission != nil && s.admission.motion.enabled {
 		s.motionWG.Add(1)
-		go s.runStoppedAdmissionMonitor()
+		go s.runMotionSubscriber()
 	}
 
 	for _, reader := range s.readers {

@@ -106,15 +106,15 @@ in `ready-to-drive` only under all of these additional conditions:
 
 - The peer is a confirmed running supply with no pending OFF command. This
   exception cannot start the first supply in `ready-to-drive`.
-- Fresh CAN Status1 reports show zero RPM, zero raw speed and throttle off
+- Fresh ECU motion observations show zero RPM, zero raw speed and throttle off
   throughout the stable sampling window. Zero whole-km/h speed alone is not
   sufficient. A receive gap longer than 500 ms, movement, throttle-on, transport
   error or receive-queue overflow requires a new qualification window.
 - Three successful paired acquisitions span at least 6 seconds after the current
   stopped/throttle-off condition began. Existing low-load, voltage-span,
   voltage-difference and tag-write freshness checks still apply.
-- The latest pair's earliest STATUS0 start is at most 3 seconds old. A CAN report
-  received after both complete battery frames must still confirm stopped and
+- The latest pair's earliest STATUS0 start is at most 3 seconds old. An ECU
+  observation acquired after both complete battery frames must confirm stopped and
   throttle-off, and must be at most 500 ms old when the ON write is attempted.
 
 The gate is checked immediately before every command write attempt, including
@@ -123,15 +123,15 @@ RTD activation needs a new qualified window before another ON attempt. A failed
 gate never substitutes OFF or releases a supply reservation. Already-confirmed
 running packs continue their heartbeats even if motion telemetry disappears.
 
-When this setting is enabled, a receive-only SocketCAN listener on `can0` reads
-standard 8-byte Status1 frames (`0x7E0`), using the same RPM/raw-speed/throttle
-layout as `ecu-service/bosch.go`. `--admission-can-device` selects another CAN
-interface if needed. No CAN commands are sent and the interface is not configured
-or brought up by this service. Kernel receive timestamps prevent queued frames
-from becoming fresh merely because they were dequeued recently. Cached
-`engine-ecu` Redis values cannot enable this gate: unchanged fields have no
-receive timestamp there. Missing or invalid CAN evidence defers RTD admission;
-it does not disable the service or the normal parked admission path.
+When enabled, the service subscribes to direct values on `engine-ecu:motion`.
+Battery-service opens no CAN socket and contains no ECU frame decoder. The
+[versioned motion contract](MOTION_IPC.md) carries complete observations with
+source/sequence identifiers and kernel receive timestamps from ecu-service's
+existing receiver. Missing fields, stale/future observations, sequence loss,
+reconnects and clock discontinuities restart qualification. Cached `engine-ecu`
+hash values cannot enable this gate. An older ECU service without this channel
+leaves RTD admission unavailable; ordinary parked admission remains unchanged.
+Remove any obsolete `--admission-can-device` unit argument before upgrading.
 
 ### Coordinated acquisition
 

@@ -29,7 +29,6 @@ func main() {
 	flag.StringVar(&config.RedisServerAddress, "redis-server", "127.0.0.1", "Redis server address")
 	var redisPort uint
 	flag.UintVar(&redisPort, "redis-port", 6379, "Redis server port")
-	flag.StringVar(&config.AdmissionCANDevice, "admission-can-device", "can0", "Receive-only CAN interface for experimental stopped-vehicle admission")
 
 	var heartbeatTimeout, offUpdateTime uint
 	flag.UintVar(&heartbeatTimeout, "heartbeat-timeout", 40, "Heartbeat timeout for standby mode in seconds")

@@ -257,7 +257,6 @@ const (
 type ServiceConfig struct {
 	RedisServerAddress      string
 	RedisServerPort         uint16
-	AdmissionCANDevice      string
 	HeartbeatTimeout        time.Duration
 	OffUpdateTime           time.Duration
 	KeepActiveOnSeatboxOpen atomic.Bool
