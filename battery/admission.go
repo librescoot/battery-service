@@ -341,11 +341,14 @@ func (a *packAdmission) offAttempt(index int, now time.Time) {
 	}
 }
 
-func (a *packAdmission) waiting(index int, now time.Time) bool {
+func (a *packAdmission) waiting(index int, state BMSState) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s := &a.slots[index]
-	return a.coordinated && !s.held && s.fresh(now) && s.frame.State != BMSStateActive
+	// A deferred ON cannot require an active response. Freshness still gates
+	// requestOn; an outstanding supply reservation still requires recovery.
+	return a.coordinated && !s.held && !s.offPending &&
+		(state == BMSStateIdle || state == BMSStateAsleep)
 }
 
 func (a *packAdmission) needsPoll() bool {
