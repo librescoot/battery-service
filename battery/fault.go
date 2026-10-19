@@ -23,7 +23,10 @@ var faultConfigs = map[BMSFault]FaultConfig{
 	BMSFaultDsgTempOverHighProt: {BMSFaultDsgTempOverHighProt, "High temperature during discharge", 0, 0, false},
 	BMSFaultDsgTempOverLowProt:  {BMSFaultDsgTempOverLowProt, "Low temperature during discharge", 0, 0, false},
 	BMSFaultSignalWireBrokeProt: {BMSFaultSignalWireBrokeProt, "Signal wire disconnected", 0, 0, false},
-	BMSFaultSecondLvlOverTemp:   {BMSFaultSecondLvlOverTemp, "Critical temperature level", 0, 0, false},
+	// The second-level over-temperature latch is permanent and the BMS drives the
+	// fuse trigger from it, so the pack cannot deliver power again. Publish it as
+	// not present instead of leaving a present pack with a non-critical fault.
+	BMSFaultSecondLvlOverTemp:   {BMSFaultSecondLvlOverTemp, "Critical temperature level", 0, 0, true},
 	BMSFaultPackVoltHighProt:    {BMSFaultPackVoltHighProt, "Battery pack overvoltage", 0, 0, false},
 	BMSFaultMosTempOverHighProt: {BMSFaultMosTempOverHighProt, "Power transistor overheating", 0, 0, false},
 	BMSFaultCellVoltHighProt:    {BMSFaultCellVoltHighProt, "Cell overvoltage", 0, 0, false},

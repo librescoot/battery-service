@@ -180,8 +180,12 @@ const (
 	BMSFaultNum BMSFault = 64
 )
 
+// IsCritical reports whether the fault is treated as taking the pack out of
+// service. Derived from faultConfigs so the config and the predicate cannot
+// disagree.
 func (f BMSFault) IsCritical() bool {
-	return f >= BMSFaultBMSZeroData
+	config, ok := faultConfigs[f]
+	return ok && config.IsCritical
 }
 
 // sensors01Sample is the last sample whose sensor 0/1 readings were believed.
