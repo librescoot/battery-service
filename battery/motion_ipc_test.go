@@ -181,7 +181,7 @@ func TestMotionIPCIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 	socket := filepath.Join(t.TempDir(), "redis.sock")
 	cmd := exec.CommandContext(ctx, server, "--port", "0", "--save", "", "--appendonly", "no", "--unixsocket", socket, "--unixsocketperm", "700", "--loglevel", "warning")
@@ -191,11 +191,15 @@ func TestMotionIPCIntegration(t *testing.T) {
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 	client := redis.NewClient(&redis.Options{Network: "unix", Addr: socket, MaxRetries: -1})
 	defer client.Close()
+	var diagnose func()
 	wait := func(label string, fn func() bool) {
 		t.Helper()
 		until := time.Now().Add(3 * time.Second)
 		for !fn() {
 			if time.Now().After(until) {
+				if diagnose != nil {
+					diagnose()
+				}
 				t.Fatalf("timeout: %s", label)
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -205,6 +209,21 @@ func TestMotionIPCIntegration(t *testing.T) {
 	a := samplingPolicy()
 	a.motion.enabled = true
 	a.setVehicle(VehicleStateReadyToDrive)
+	diagnose = func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		t.Logf("motion source=%s sequence=%d at=%s since=%s pair=%d pairedAt=%s",
+			a.motion.source, a.motion.sequence, a.motion.at, a.motion.since,
+			a.sampling.pairedID, a.sampling.pairedAt)
+		for i, slot := range a.slots {
+			var first, last time.Time
+			if len(slot.history) > 0 {
+				first, last = slot.history[0].at, slot.history[len(slot.history)-1].at
+			}
+			t.Logf("slot=%d valid=%t held=%t active=%t offPending=%t observed=%s written=%s round=%d samples=%d first=%s last=%s",
+				i, slot.valid, slot.held, slot.active, slot.offPending, slot.observed, slot.written, slot.observedRound, len(slot.history), first, last)
+		}
+	}
 	s := &Service{ctx: ctx, redis: client, admission: a, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	s.motionWG.Add(1)
 	go s.runMotionSubscriber()
@@ -213,7 +232,7 @@ func TestMotionIPCIntegration(t *testing.T) {
 		n, err := client.PubSubNumSub(ctx, motionEvidenceChannel).Result()
 		return err == nil && n[motionEvidenceChannel] == 1
 	})
-	p := exec.CommandContext(ctx, producer, "-test.run=^TestMotionIPCProducerFixture$", "-test.timeout=20s")
+	p := exec.CommandContext(ctx, producer, "-test.run=^TestMotionIPCProducerFixture$", "-test.v", "-test.timeout=40s")
 	p.Env = append(os.Environ(), "MOTION_TEST_REDIS_SOCKET="+socket)
 	p.Stdout, p.Stderr = os.Stdout, os.Stderr
 	if err := p.Start(); err != nil {
@@ -221,16 +240,31 @@ func TestMotionIPCIntegration(t *testing.T) {
 	}
 	defer func() { _ = p.Process.Kill(); _ = p.Wait() }()
 	wait("kernel-timestamped ECU evidence", func() bool { a.mu.Lock(); defer a.mu.Unlock(); return a.motion.stopped })
-	for i := 0; i < 3; i++ {
-		if i > 0 {
-			time.Sleep(admissionPollInterval)
+	// Keep sampling after a legitimate stream/clock discontinuity, as the
+	// service scheduler does. A fixed three-pair history cannot requalify.
+	deadline := time.Now().Add(30 * time.Second)
+	nextPair := time.Now()
+	pairs := 0
+	for {
+		now := time.Now()
+		if !now.Before(nextPair) {
+			deliverPair(t, a, now, 52001+uint(pairs%2))
+			pairs++
+			nextPair = now.Add(admissionPollInterval)
+			if ok, _ := a.requestOn(1, time.Now(), 1000); ok {
+				t.Fatal("ON allowed before post-pair observation")
+			}
 		}
-		deliverPair(t, a, time.Now(), 52001+uint(i%2))
+		ok, reason := a.requestOn(1, time.Now(), 1000)
+		if ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			diagnose()
+			t.Fatalf("timeout: qualified admission after %d pairs: %s", pairs, reason)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if ok, _ := a.requestOn(1, time.Now(), 1000); ok {
-		t.Fatal("ON allowed before post-pair observation")
-	}
-	wait("qualified admission", func() bool { ok, _ := a.requestOn(1, time.Now(), 1000); return ok })
 	// Kill only this isolated Redis subscriber. Running supply must survive;
 	// reconnection must not carry over the stopped window or release reservations.
 	if err := client.ClientKillByFilter(ctx, "TYPE", "pubsub").Err(); err != nil {
