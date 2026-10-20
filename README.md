@@ -30,6 +30,13 @@ appended to `events:faults` with the corresponding battery group. The service
 subscribes to `vehicle`, `settings`, and `aux-battery`. Vehicle `state` and
 `seatbox:lock` changes control reader behavior.
 
+A closed seatbox is latched while the vehicle is `ready-to-drive`. Opening the
+seatbox during that state does not disable an enabled battery or interrupt its
+ON heartbeats, including across heartbeat restarts. On leaving `ready-to-drive`,
+an open seatbox resumes normal seatbox-open handling. This protection is always
+on, independently of the keep-active setting and experimental admission flags;
+it does not override empty-pack, voltage-difference or explicit disable decisions.
+
 ## Configuration
 
 Run `bin/battery-service -help` after building for the authoritative flag list.
