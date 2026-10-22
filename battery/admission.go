@@ -146,9 +146,9 @@ func (a *packAdmission) observeAbsent(index int, now time.Time) {
 	s.observed = now
 }
 
-// Only complete, unsubstituted NFC frames reach observe. An unchanged tag
-// cannot renew its write-evidence timestamp, even after the UI freshness
-// backstop expires. Cached Redis values never participate in admission.
+// Only complete, unsubstituted NFC reads renew acquisition freshness. Stable
+// values remain valid; payload changes are separate evidence for releasing
+// uncertain commands. Cached Redis values never participate in admission.
 func (a *packAdmission) observe(index int, data BMSData, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -163,8 +163,7 @@ func (a *packAdmission) observeLocked(index int, data BMSData, now time.Time) {
 	}
 	s.frame, s.haveFrame, s.observed, s.absent = data, true, now, false
 	s.valid = data.Present && data.Voltage > 0 &&
-		(data.State == BMSStateActive || data.State == BMSStateIdle || data.State == BMSStateAsleep) &&
-		!s.written.IsZero() && now.Sub(s.written) <= admissionMaxAge
+		(data.State == BMSStateActive || data.State == BMSStateIdle || data.State == BMSStateAsleep)
 	if !s.valid {
 		s.history = nil
 		return
@@ -175,7 +174,7 @@ func (a *packAdmission) observeLocked(index int, data BMSData, now time.Time) {
 		if e := a.isolation; e != nil && e.handover && e.offConfirmed && e.survivor == index {
 			a.isolation = nil
 		}
-	} else if (!s.offPending && ((s.active && now.Sub(s.lastOnAt) >= BMSTimeCmd) || now.Sub(s.lastOnAt) >= admissionOnSettle)) ||
+	} else if (!s.offPending && s.written.After(s.lastOnAt) && ((s.active && now.Sub(s.lastOnAt) >= BMSTimeCmd) || now.Sub(s.lastOnAt) >= admissionOnSettle)) ||
 		(s.offPending && !s.offAt.Before(s.lastOnAt) && now.Sub(s.offAt) >= BMSTimeCmd && s.written.After(s.offAt)) {
 		if s.held {
 			a.cancelRoundLocked("supply became inactive")
@@ -216,7 +215,7 @@ func (s *admissionSlot) appendHistory(data BMSData, now time.Time) {
 }
 
 func (s *admissionSlot) fresh(now time.Time) bool {
-	return s.valid && now.Sub(s.observed) <= admissionMaxAge && now.Sub(s.written) <= admissionMaxAge
+	return s.valid && now.Sub(s.observed) <= admissionMaxAge
 }
 
 func (s *admissionSlot) usable() bool {

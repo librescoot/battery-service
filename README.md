@@ -109,7 +109,7 @@ The baseline guard requires a fresh paired acquisition within the configured
 voltage limit before a second pack can join. Pending second-pack ON retries
 recheck admission and retain their reservation even when a write fails.
 With conservative qualification enabled, a second pack needs three paired
-samples over 6 seconds: data age ≤10 seconds,
+samples over 6 seconds: successful NFC acquisition age ≤10 seconds,
 STATUS0 acquisition skew ≤1 second, absolute current ≤1000 mA, and voltage
 variation ≤100 mV per pack.
 Conservative qualification also requires the voltage difference to stay within
@@ -118,9 +118,16 @@ configured limit itself. A limit of 0 disables only the voltage check.
 Inactive-role readers remain sampled so disabling a slot cannot hide a live
 supply or discard an outstanding OFF command.
 
+Unchanged measurements remain valid when complete NFC reads succeed. Read
+freshness expires when acquisition stops or fails, not when voltage, current or
+temperature stays constant. Frame-change age is diagnostic and is used separately
+to resolve uncertain commands; it is not a BMS measurement timestamp.
+
 ON writes reserve the slot before I/O. Failed writes and lost tags do not prove
 the pack is off. Reservations need inactive readings to clear; unconfirmed ON
-retries stop after 10 seconds. Tag changes retain unresolved power reservations
+retries stop after 10 seconds. An unchanged inactive payload cannot clear an
+uncertain ON or OFF: changed inactive evidence after the relevant command and
+its settling delay is required. Tag changes retain unresolved power reservations
 and their settling deadlines. Admission state is not persisted across restarts.
 
 If a fresh paired observation finds both packs already active above the limit,
@@ -180,7 +187,7 @@ in `ready-to-drive` only under all of these additional conditions:
   error or receive-queue overflow requires a new qualification window.
 - Three successful paired acquisitions span at least 6 seconds after the current
   stopped/throttle-off condition began. Existing low-load, voltage-span,
-  voltage-difference and tag-write freshness checks still apply.
+  voltage-difference and NFC acquisition freshness checks still apply.
 - The latest pair's earliest STATUS0 start is at most 3 seconds old. An ECU
   observation acquired after both complete battery frames must confirm stopped and
   throttle-off, and must be at most 500 ms old when the ON write is attempted.
@@ -301,7 +308,9 @@ combinations, startup states and a disabled voltage limit, parked/stopped
 qualification, sag, load, faults, confirmed-OFF handovers and target removal.
 It also runs 256 reproducible seeds of 256 events involving lost reads, command
 failures, role/threshold changes, tag churn and simulated heartbeat expiry.
-Failures include the event trace and seed. Run or reproduce a case with:
+Constant-value acquisitions are exercised without artificial sensor noise,
+including cold start, parallel admission, missing reads and uncertain-command
+barriers. Failures include the event trace and seed. Run or reproduce a case with:
 
 ```bash
 go test -race ./battery -run '^TestSimulation' -count=1

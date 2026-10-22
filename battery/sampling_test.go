@@ -113,7 +113,7 @@ func TestSamplingStableAdmissionAndPendingFrame(t *testing.T) {
 }
 
 func TestSamplingFailureContinuityAndCancellation(t *testing.T) {
-	for _, action := range []string{"missing", "absent", "failed", "OFF", "vehicle", "role", "tag", "shutdown", "late", "stale"} {
+	for _, action := range []string{"missing", "absent", "failed", "OFF", "vehicle", "role", "tag", "shutdown", "late", "invalid"} {
 		t.Run(action, func(t *testing.T) {
 			a := samplingPolicy()
 			now := admissionTestTime
@@ -141,10 +141,11 @@ func TestSamplingFailureContinuityAndCancellation(t *testing.T) {
 				a.stopSampling()
 			case "late":
 				a.beginRound(now.Add(samplingDeadline + admissionPollInterval))
-			case "stale":
-				a.slots[1].written = now.Add(-admissionMaxAge - time.Second)
 			}
 			peer := roundSample(1, now, now.Add(100*time.Millisecond), now.Add(200*time.Millisecond), 52000)
+			if action == "invalid" {
+				peer.data.Present = false
+			}
 			a.observeAcquisition(1, id, peer)
 			if !a.sampling.pairedAt.IsZero() {
 				t.Fatal("invalid round paired")

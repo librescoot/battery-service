@@ -18,7 +18,9 @@ type admissionSimulation struct {
 	limit       uint64
 	pack        [2]BMSData
 	generation  [2]byte
-	seen        [2]int
+	lastFrame   [2]BMSData
+	haveFrame   [2]bool
+	changedAt   [2]time.Time
 	onPending   [2]time.Time
 	offPending  [2]time.Time
 	onCommandAt [2]time.Time
@@ -57,7 +59,7 @@ func (s *admissionSimulation) fail(format string, args ...any) {
 
 func (s *admissionSimulation) insert(index int, voltage, soc uint, state BMSState) {
 	s.generation[index]++
-	s.seen[index] = 0
+	s.haveFrame[index], s.changedAt[index] = false, time.Time{}
 	s.pack[index] = admissionFrame(voltage, state)
 	s.pack[index].Charge, s.pack[index].LowSOC = soc, soc == 0
 	s.heartbeat[index] = s.now
@@ -94,11 +96,7 @@ func (s *admissionSimulation) observe() {
 			s.a.observeAbsent(i, s.now)
 			continue
 		}
-		s.seen[i]++
 		frame := s.pack[i]
-		// A small sensor change represents a new complete BMS snapshot without
-		// moving either voltage across a boundary under test.
-		frame.Temperature[0] = 20 + s.seen[i]%2
 		if id != 0 {
 			s.a.observeAcquisition(i, id, acquisition{start: s.now, end: s.now.Add(100 * time.Millisecond), complete: s.now.Add(200 * time.Millisecond), data: frame})
 		} else {
@@ -112,19 +110,23 @@ func (s *admissionSimulation) observe() {
 }
 
 func (s *admissionSimulation) noteEvidence(i int, frame BMSData, at time.Time) {
-	if s.seen[i] <= 1 {
-		return
+	previous := s.lastFrame[i]
+	if s.haveFrame[i] && (frame.State != previous.State || frame.Voltage != previous.Voltage ||
+		frame.Current != previous.Current || frame.Charge != previous.Charge || frame.FaultCode != previous.FaultCode) {
+		s.changedAt[i] = at
 	}
+	s.lastFrame[i], s.haveFrame[i] = frame, true
 	if frame.State == BMSStateActive {
 		if !s.onPending[i].IsZero() && !s.a.slots[i].held {
 			s.fail("confirmed ON lost its reservation: slot=%d", i)
 		}
 		s.onPending[i] = time.Time{}
 	} else {
-		if !s.onPending[i].IsZero() && at.Sub(s.onPending[i]) >= admissionOnSettle {
+		if !s.onPending[i].IsZero() && s.changedAt[i].After(s.onCommandAt[i]) && at.Sub(s.onPending[i]) >= admissionOnSettle {
 			s.onPending[i] = time.Time{}
 		}
-		if !s.offPending[i].IsZero() && !s.offPending[i].Before(s.onCommandAt[i]) && at.Sub(s.offPending[i]) >= BMSTimeCmd {
+		if !s.offPending[i].IsZero() && !s.offPending[i].Before(s.onCommandAt[i]) &&
+			s.changedAt[i].After(s.offPending[i]) && at.Sub(s.offPending[i]) >= BMSTimeCmd {
 			s.offPending[i], s.onPending[i] = time.Time{}, time.Time{}
 		}
 	}
@@ -206,9 +208,7 @@ func (s *admissionSimulation) expireHeartbeat(index int) {
 		return
 	}
 	s.pack[index].State = BMSStateIdle
-	s.seen[index]++
 	frame := s.pack[index]
-	frame.Temperature[0] = 20 + s.seen[index]%2
 	s.a.observe(index, frame, s.now)
 	s.noteEvidence(index, frame, s.now)
 	s.record("BMS heartbeat expired slot=%d", index)
@@ -438,7 +438,7 @@ func TestSimulationSeededEvents(t *testing.T) {
 				case 10:
 					if s.pack[i].Present {
 						s.generation[i]++
-						s.seen[i] = 0
+						s.haveFrame[i], s.changedAt[i] = false, time.Time{}
 						s.a.tag(i, []byte{byte(i + 1), s.generation[i]})
 						s.record("tag changed slot=%d", i)
 					}
@@ -451,9 +451,7 @@ func TestSimulationSeededEvents(t *testing.T) {
 					if s.pack[i].Present {
 						s.pack[i].Voltage = uint(50000 + rng.Intn(6)*1000)
 						s.pack[i].FaultCode = uint(rng.Intn(3) / 2)
-						s.seen[i]++
 						frame := s.pack[i]
-						frame.Temperature[0] = 20 + s.seen[i]%2
 						s.a.observe(i, frame, s.now)
 						s.noteEvidence(i, frame, s.now)
 						s.record("unpaired change slot=%d v=%d fault=%d", i, s.pack[i].Voltage, s.pack[i].FaultCode)

@@ -79,13 +79,8 @@ func TestAdmissionWaitsForBothReaders(t *testing.T) {
 	a := newAdmissionTestPolicy()
 	observeWritten(a, 0, admissionFrame(52000, BMSStateIdle), admissionTestTime)
 	requireAdmission(t, a, 0, admissionTestTime, false)
-	// A discovered tag with unchanged contents is not fresh evidence.
-	for i := 0; i < 12; i++ {
-		now := admissionTestTime.Add(time.Duration(i) * time.Second)
-		a.observe(0, admissionFrame(52000+uint(i), BMSStateIdle), now)
-		a.observe(1, admissionFrame(51000, BMSStateIdle), now)
-		requireAdmission(t, a, 0, now, false)
-	}
+	a.observe(1, admissionFrame(51000, BMSStateIdle), admissionTestTime)
+	requireAdmission(t, a, 0, admissionTestTime, true)
 }
 
 func TestAdmissionSinglePresentPack(t *testing.T) {
@@ -180,7 +175,7 @@ func TestAdmissionNotOnOnePassingSample(t *testing.T) {
 }
 
 func TestAdmissionRejectsSagAndStaleData(t *testing.T) {
-	for _, kind := range []string{"sag", "stale", "skew", "read failure", "unchanged tag"} {
+	for _, kind := range []string{"sag", "stale", "skew", "read failure", "tag rediscovery"} {
 		t.Run(kind, func(t *testing.T) {
 			a := newAdmissionTestPolicy()
 			stablePair(a, 0, 53000, 52500, 0, admissionTestTime)
@@ -195,12 +190,8 @@ func TestAdmissionRejectsSagAndStaleData(t *testing.T) {
 				a.observe(1, admissionFrame(52501, BMSStateIdle), now)
 			case "read failure":
 				a.invalidate(0)
-			case "unchanged tag":
-				for i := 1; i < 6; i++ {
-					now = now.Add(admissionPollInterval)
-					a.observe(0, admissionFrame(53000, BMSStateActive), now)
-					a.observe(1, admissionFrame(52500, BMSStateIdle), now)
-				}
+			case "tag rediscovery":
+				a.tag(1, []byte{2})
 			}
 			requireAdmission(t, a, 1, now, false)
 			requireAdmission(t, a, 0, now, true)

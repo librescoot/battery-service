@@ -114,7 +114,7 @@ func TestStoppedAdmissionRejectsUnsafeEvidence(t *testing.T) {
 			case "before stop":
 				a.motion.since = a.sampling.pairedAt.Add(time.Nanosecond)
 			case "stale pack":
-				a.slots[1].written = now.Add(-admissionMaxAge - time.Nanosecond)
+				a.slots[1].observed = now.Add(-admissionMaxAge - time.Nanosecond)
 			case "high load":
 				a.slots[0].history[1].data.Current = admissionMaxCurrent + 1
 			case "voltage drift":

@@ -120,7 +120,7 @@ func (a *packAdmission) maintainHandoverLocked(index int, now time.Time) bool {
 	targetInactive := (target.absent && now.Sub(target.observed) <= admissionMaxAge) ||
 		(target.fresh(now) && (target.frame.State == BMSStateIdle || target.frame.State == BMSStateAsleep))
 	return old.held && old.active && old.fresh(now) && old.frame.State == BMSStateActive &&
-		old.written.After(old.offAt) && now.Sub(old.offAt) >= BMSTimeCmd &&
+		old.observed.After(old.offAt) && now.Sub(old.offAt) >= BMSTimeCmd &&
 		!target.held && !target.offPending && targetInactive
 }
 
