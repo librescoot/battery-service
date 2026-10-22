@@ -146,9 +146,10 @@ func (a *packAdmission) observeAbsent(index int, now time.Time) {
 	s.observed = now
 }
 
-// Only complete, unsubstituted NFC reads renew acquisition freshness. Stable
-// values remain valid; payload changes are separate evidence for releasing
-// uncertain commands. Cached Redis values never participate in admission.
+// A newly selected tag needs one observed payload change: its memory may hold
+// an old snapshot from the pack's other orientation. After that confirmation,
+// complete NFC reads renew freshness even with constant values. Further changes
+// are separate evidence for resolving uncertain commands.
 func (a *packAdmission) observe(index int, data BMSData, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -163,7 +164,7 @@ func (a *packAdmission) observeLocked(index int, data BMSData, now time.Time) {
 	}
 	s.frame, s.haveFrame, s.observed, s.absent = data, true, now, false
 	s.valid = data.Present && data.Voltage > 0 &&
-		(data.State == BMSStateActive || data.State == BMSStateIdle || data.State == BMSStateAsleep)
+		(data.State == BMSStateActive || data.State == BMSStateIdle || data.State == BMSStateAsleep) && !s.written.IsZero()
 	if !s.valid {
 		s.history = nil
 		return

@@ -118,10 +118,13 @@ configured limit itself. A limit of 0 disables only the voltage check.
 Inactive-role readers remain sampled so disabling a slot cannot hide a live
 supply or discard an outstanding OFF command.
 
-Unchanged measurements remain valid when complete NFC reads succeed. Read
-freshness expires when acquisition stops or fails, not when voltage, current or
-temperature stays constant. Frame-change age is diagnostic and is used separately
-to resolve uncertain commands; it is not a BMS measurement timestamp.
+A newly selected tag needs one observed payload change to confirm that its
+memory has been refreshed; the opposite-side tag can hold an old snapshot.
+After that per-identity confirmation, unchanged measurements remain valid when
+complete NFC reads succeed. Read freshness expires when acquisition stops or
+fails, not when voltage, current or temperature stays constant. Frame-change age
+is diagnostic and is used separately to resolve uncertain commands; it is not a
+BMS measurement timestamp.
 
 ON writes reserve the slot before I/O. Failed writes and lost tags do not prove
 the pack is off. Reservations need inactive readings to clear; unconfirmed ON

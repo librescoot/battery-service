@@ -80,7 +80,9 @@ func TestAdmissionWaitsForBothReaders(t *testing.T) {
 	observeWritten(a, 0, admissionFrame(52000, BMSStateIdle), admissionTestTime)
 	requireAdmission(t, a, 0, admissionTestTime, false)
 	a.observe(1, admissionFrame(51000, BMSStateIdle), admissionTestTime)
-	requireAdmission(t, a, 0, admissionTestTime, true)
+	requireAdmission(t, a, 0, admissionTestTime, false)
+	a.observe(1, admissionFrame(51001, BMSStateIdle), admissionTestTime.Add(time.Second))
+	requireAdmission(t, a, 0, admissionTestTime.Add(time.Second), true)
 }
 
 func TestAdmissionSinglePresentPack(t *testing.T) {

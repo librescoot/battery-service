@@ -6,6 +6,31 @@ import (
 	"time"
 )
 
+func TestAdmissionUnconfirmedTagCannotBorrowFreshAcquisitions(t *testing.T) {
+	s := newAdmissionSimulation(t, "experimental")
+	s.pack = [2]BMSData{admissionFrame(53000, BMSStateActive), admissionFrame(49000, BMSStateIdle)}
+	a := s.a
+	a.tag(0, []byte{1})
+	a.tag(1, []byte{2})
+	for step := 0; step < 45; step++ {
+		at := admissionTestTime.Add(time.Duration(step) * admissionPollInterval)
+		id, _ := a.beginRound(at)
+		for slot := range a.slots {
+			a.claimRound(slot, at)
+		}
+		for slot := range a.slots {
+			// Tag memory reports a compatible voltage, while the newly inserted
+			// pack may physically differ. Only the cached observations are fed in.
+			a.observeAcquisition(slot, id, roundSample(slot, at, at.Add(100*time.Millisecond), at.Add(200*time.Millisecond), 53000))
+		}
+		s.now = at.Add(200 * time.Millisecond)
+		s.command(1, true)
+		if s.pack[1].State != BMSStateIdle {
+			t.Fatal("cached compatible tag values activated a physically mismatched pack")
+		}
+	}
+}
+
 func TestAdmissionConstantReadingsStartAndJoin(t *testing.T) {
 	for _, mode := range []string{"single", "dual", "experimental"} {
 		for _, first := range []int{0, 1} {
@@ -28,6 +53,8 @@ func TestAdmissionConstantReadingsStartAndJoin(t *testing.T) {
 
 func TestAdmissionConstantReadingsExpireWithoutAcquisition(t *testing.T) {
 	a := newAdmissionTestPolicy()
+	observeWritten(a, 0, admissionFrame(56500, BMSStateActive), admissionTestTime)
+	observeWritten(a, 1, admissionFrame(56490, BMSStateIdle), admissionTestTime)
 	for step := 0; step < 45; step++ {
 		now := admissionTestTime.Add(time.Duration(step) * admissionPollInterval)
 		a.observe(0, admissionFrame(56500, BMSStateActive), now)
@@ -46,7 +73,7 @@ func TestAdmissionConstantIdleDoesNotReleaseUncertainCommands(t *testing.T) {
 	for _, off := range []bool{false, true} {
 		a := newAdmissionTestPolicy()
 		for i := range a.slots {
-			a.observe(i, admissionFrame(53000, BMSStateIdle), admissionTestTime)
+			observeWritten(a, i, admissionFrame(53000, BMSStateIdle), admissionTestTime)
 		}
 		requireAdmission(t, a, 0, admissionTestTime, true)
 		if off {

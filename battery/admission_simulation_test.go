@@ -64,6 +64,15 @@ func (s *admissionSimulation) insert(index int, voltage, soc uint, state BMSStat
 	s.pack[index].Charge, s.pack[index].LowSOC = soc, soc == 0
 	s.heartbeat[index] = s.now
 	s.a.tag(index, []byte{byte(index + 1), s.generation[index]})
+	// The first tag snapshot predates the BMS wake/state update. Subsequent
+	// observations report the physical pack without artificial sensor noise.
+	cached := s.pack[index]
+	cached.State = BMSStateAsleep
+	if state == BMSStateAsleep {
+		cached.State = BMSStateIdle
+	}
+	s.a.observe(index, cached, s.now)
+	s.noteEvidence(index, cached, s.now)
 	s.record("insert slot=%d voltage=%d soc=%d state=%s", index, voltage, soc, state)
 }
 
