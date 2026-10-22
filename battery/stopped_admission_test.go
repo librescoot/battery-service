@@ -84,7 +84,7 @@ func TestStoppedAdmissionRejectsUnsafeEvidence(t *testing.T) {
 	for _, scenario := range []string{
 		"disabled", "no motion", "throttle or movement", "post-read motion missing", "motion gap", "motion stale", "future motion",
 		"out of order", "no pair", "mixed round", "before stop", "stale pack", "high load", "voltage drift", "voltage mismatch",
-		"no running peer", "peer OFF", "own OFF", "inactive role", "shutdown", "wrong state",
+		"no running peer", "peer OFF", "own OFF", "inactive role", "shutdown", "unknown state",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			a, now := readyStoppedPolicy(t)
@@ -134,8 +134,8 @@ func TestStoppedAdmissionRejectsUnsafeEvidence(t *testing.T) {
 				a.setRole(1, false)
 			case "shutdown":
 				a.stopSampling()
-			case "wrong state":
-				a.setVehicle(VehicleStateUpdating)
+			case "unknown state":
+				a.setVehicle(VehicleStateOther)
 			}
 			requireAdmission(t, a, 1, now, false)
 			if !a.slots[0].held {

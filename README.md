@@ -89,22 +89,25 @@ The shared rules are:
 
 - Both readers share a gate for every ON command. Slot 0 breaks an exact tie
   in experimental voltage/SOC selection.
-- Initial activation is allowed in `stand-by`, `waiting-seatbox`, or `parked`.
-  A second pack can join only in `parked` by default; a separate stopped-vehicle
-  exception is described below.
+- Initial and second-pack activation are allowed in every known non-drive
+  state: `stand-by`, `parked`, `hop-on`, `hop-on-learning`, `waiting-seatbox`,
+  `shutting-down`, `updating` and the `waiting-hibernation` variants. Missing or
+  unknown vehicle states deny new activation. `ready-to-drive` uses the separate
+  stopped-vehicle exception below. Admission never overrides reader disable,
+  seatbox handling or service shutdown.
 - A mismatched second pack cannot be added alongside the running supply.
   Stale readings alone do not withdraw a confirmed supply's heartbeat.
 - OFF commands still follow seatbox, empty-pack and disable handling. An OFF
   attempt needs a later inactive reading before ON is allowed again.
 
-Admission uses complete NFC reads with a frame change in the last 10 seconds,
-not cached Redis voltage. Missing, stale, truncated or substituted data cannot
+Admission uses complete NFC reads acquired within the last 10 seconds, after
+one-time confirmation of the selected tag, not cached Redis voltage. Missing, stale, truncated or substituted data cannot
 admit a pack. Shared sampling rounds prompt both reader FSMs at most every 3 seconds
 without interrupting commands. With both readers configured for active roles,
 rounds are attempted regardless of vehicle state, including `stand-by`, before
 and after both packs become active. Sampling alone does not authorize activation;
-the second-pack gate remains parked-only unless the stopped-vehicle exception is
-explicitly enabled.
+second-pack admission requires a known non-drive state unless the stopped-vehicle
+exception is explicitly enabled.
 The baseline guard requires a fresh paired acquisition within the configured
 voltage limit before a second pack can join. Pending second-pack ON retries
 recheck admission and retain their reservation even when a write fails.
@@ -134,7 +137,7 @@ its settling delay is required. Tag changes retain unresolved power reservations
 and their settling deadlines. Admission state is not persisted across restarts.
 
 If a fresh paired observation finds both packs already active above the limit,
-`parked`, `stand-by` and `waiting-seatbox` permit isolation of one pack. The
+known non-drive states permit isolation of one pack. The
 healthy higher-voltage running pack is retained; the other is selected once and
 commanded OFF. Voltage ordering changes cannot reverse that selection. Every OFF
 write and retry requires fresh confirmation that the retained pack is active.
@@ -144,8 +147,8 @@ Experimental handovers also permit a healthy, higher-voltage inactive pack to
 replace the sole running pack after both readings settle. The lower pack must
 be positively OFF before the target receives ON. A removed target with no ON
 reservation releases the completed handover so the old pack can resume.
-Handovers and corrective OFF commands use `parked`, `stand-by` or
-`waiting-seatbox`, not `ready-to-drive`. The stopped-motion exception below
+Handovers and corrective OFF commands are allowed in known non-drive states,
+not `ready-to-drive`. The stopped-motion exception below
 permits parallel admission, not a power-interrupting handover.
 
 If driving begins during an uncertain handover OFF, fresh post-attempt ACTIVE
@@ -208,7 +211,7 @@ source/sequence identifiers and kernel receive timestamps from ecu-service's
 existing receiver. Missing fields, stale/future observations, sequence loss,
 reconnects and clock discontinuities restart qualification. Cached `engine-ecu`
 hash values cannot enable this gate. An older ECU service without this channel
-leaves RTD admission unavailable; ordinary parked admission remains unchanged.
+leaves RTD admission unavailable; ordinary non-drive admission remains available.
 Remove any obsolete `--admission-can-device` unit argument before upgrading.
 
 ### Coordinated acquisition
@@ -282,8 +285,8 @@ logged pack voltages/currents and bus voltage. Do not infer continuity from Redi
    measure running-supply continuity, including restart behavior.
 5. With both packs active, record ongoing rounds and traffic for an extended run,
    including `stand-by`. Confirm that sampling continues across vehicle states
-   while second-pack admission remains parked-only with the stopped-vehicle
-   exception disabled.
+   while second-pack admission remains limited to known non-drive states with
+   the stopped-vehicle exception disabled.
    Compare NFC data against independently timestamped load/voltage changes to
    characterize tag refresh latency and inter-pack measurement age. Report those
    separately from the NFC acquisition bound; do not claim measurement synchronization
@@ -294,7 +297,7 @@ logged pack voltages/currents and bus voltage. Do not infer continuity from Redi
    reads and retries, stale/queued CAN frames, receive gaps, bus errors, missing
    peer power confirmation and OFF pending. Verify the pending pack stays off
    when denied and running supplies keep heartbeating. Repeat with the setting
-   disabled to confirm the default parked-only gate.
+   disabled to confirm the default non-drive-state gate.
 
 ## Build and test
 

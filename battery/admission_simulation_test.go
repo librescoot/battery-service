@@ -406,6 +406,7 @@ func TestSimulationRemovedHandoverTargetRestoresOldPack(t *testing.T) {
 }
 
 func TestSimulationSeededEvents(t *testing.T) {
+	states := append([]VehicleState{VehicleStateReadyToDrive}, nonDriveTestStates...)
 	for seed := int64(0); seed < 256; seed++ {
 		t.Run(fmt.Sprintf("seed%d", seed), func(t *testing.T) {
 			rng := rand.New(rand.NewSource(seed))
@@ -424,7 +425,7 @@ func TestSimulationSeededEvents(t *testing.T) {
 					s.a.invalidate(i)
 					s.record("read failure slot=%d", i)
 				case 5:
-					s.a.setVehicle([]VehicleState{VehicleStateParked, VehicleStateStandby, VehicleStateReadyToDrive}[rng.Intn(3)])
+					s.a.setVehicle(states[rng.Intn(len(states))])
 					s.record("vehicle=%s", s.a.vehicle)
 				case 6:
 					s.a.setRole(1, rng.Intn(2) == 0)

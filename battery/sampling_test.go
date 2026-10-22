@@ -230,7 +230,7 @@ func TestSamplingOngoingAndSinglePack(t *testing.T) {
 	}
 }
 
-func TestSamplingStandbyPairsDoNotAdmitSecondPack(t *testing.T) {
+func TestSamplingNonDriveTransitionRequiresNewWindow(t *testing.T) {
 	a := samplingPolicy()
 	a.setVehicle(VehicleStateStandby)
 	for i := 0; i < 3; i++ {
@@ -238,7 +238,7 @@ func TestSamplingStandbyPairsDoNotAdmitSecondPack(t *testing.T) {
 	}
 	now := admissionTestTime.Add(6200 * time.Millisecond)
 	requireAdmission(t, a, 0, now, true)
-	if allowed, reason := a.requestOn(1, now, DefaultMaxVoltageDeltaMV); allowed || reason != "waiting for parked" {
+	if allowed, reason := a.previewOn(1, now, DefaultMaxVoltageDeltaMV, false, a.conservative); !allowed {
 		t.Fatalf("standby admission: allowed=%t reason=%q", allowed, reason)
 	}
 	a.setVehicle(VehicleStateParked)

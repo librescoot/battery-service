@@ -45,6 +45,8 @@ type VehicleState string
 const (
 	VehicleStateStandby                    VehicleState = "stand-by"
 	VehicleStateParked                     VehicleState = "parked"
+	VehicleStateHopOn                      VehicleState = "hop-on"
+	VehicleStateHopOnLearning              VehicleState = "hop-on-learning"
 	VehicleStateReadyToDrive               VehicleState = "ready-to-drive"
 	VehicleStateWaitingSeatbox             VehicleState = "waiting-seatbox"
 	VehicleStateShuttingDown               VehicleState = "shutting-down"
@@ -55,6 +57,18 @@ const (
 	VehicleStateWaitingHibernationConfirm  VehicleState = "waiting-hibernation-confirm"
 	VehicleStateOther                      VehicleState = "other"
 )
+
+func nonDrivingVehicle(state VehicleState) bool {
+	switch state {
+	case VehicleStateStandby, VehicleStateParked, VehicleStateHopOn, VehicleStateHopOnLearning,
+		VehicleStateWaitingSeatbox, VehicleStateShuttingDown, VehicleStateUpdating,
+		VehicleStateWaitingHibernation, VehicleStateWaitingHibernationAdvanced,
+		VehicleStateWaitingHibernationSeatbox, VehicleStateWaitingHibernationConfirm:
+		return true
+	default:
+		return false
+	}
+}
 
 type BMSTemperatureState int
 

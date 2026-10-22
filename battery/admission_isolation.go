@@ -10,7 +10,7 @@ type isolationEpisode struct {
 }
 
 func isolationVehicle(state VehicleState) bool {
-	return state == VehicleStateParked || state == VehicleStateStandby || state == VehicleStateWaitingSeatbox
+	return nonDrivingVehicle(state)
 }
 
 // Select once from a fresh pair of already-running packs. A later voltage

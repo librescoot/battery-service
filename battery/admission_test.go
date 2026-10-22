@@ -234,7 +234,7 @@ func TestAdmissionPendingOnDoesNotStartWhileDriving(t *testing.T) {
 }
 
 func TestAdmissionVehicleBoundaries(t *testing.T) {
-	for _, state := range []VehicleState{VehicleStateStandby, VehicleStateReadyToDrive, VehicleStateUpdating, VehicleStateShuttingDown, VehicleStateOther, ""} {
+	for _, state := range []VehicleState{VehicleStateReadyToDrive, VehicleStateOther, ""} {
 		a := newAdmissionTestPolicy()
 		a.setVehicle(state)
 		stablePair(a, 0, 53000, 52500, 0, admissionTestTime)

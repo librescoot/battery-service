@@ -285,9 +285,9 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 	if s.held && s.active {
 		return true, "maintaining supply"
 	}
-	switch a.vehicle {
-	case VehicleStateParked, VehicleStateStandby, VehicleStateWaitingSeatbox:
-	case VehicleStateReadyToDrive:
+	switch {
+	case nonDrivingVehicle(a.vehicle):
+	case a.vehicle == VehicleStateReadyToDrive:
 		if !a.motion.enabled {
 			return false, "waiting for activation vehicle state"
 		}
@@ -322,9 +322,6 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 			}
 			if peer.frame.FaultCode != 0 || (peer.frame.LowSOC && peer.frame.Charge == 0) {
 				return false, "peer empty or faulted"
-			}
-			if a.vehicle != VehicleStateParked && a.vehicle != VehicleStateReadyToDrive {
-				return false, "waiting for parked"
 			}
 			if a.sampling.enabled && (a.sampling.pairedAt.IsZero() || now.Sub(a.sampling.pairedAt) > admissionMaxAge ||
 				s.observedRound != a.sampling.pairedID || peer.observedRound != a.sampling.pairedID) {
@@ -419,15 +416,7 @@ func (a *packAdmission) needsPollLocked() bool {
 	if a.sampling.enabled {
 		return a.slots[0].monitored && a.slots[1].monitored && (a.slots[0].eligible || a.slots[1].eligible)
 	}
-	switch a.vehicle {
-	case VehicleStateParked:
-	case VehicleStateStandby, VehicleStateWaitingSeatbox:
-		for _, s := range a.slots {
-			if s.active {
-				return false
-			}
-		}
-	default:
+	if !nonDrivingVehicle(a.vehicle) {
 		return false
 	}
 	for _, s := range a.slots {
