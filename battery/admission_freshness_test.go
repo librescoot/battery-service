@@ -7,11 +7,23 @@ import (
 )
 
 func TestAdmissionUnconfirmedTagCannotBorrowFreshAcquisitions(t *testing.T) {
+	for _, confirmedPeer := range []bool{false, true} {
+		t.Run(fmt.Sprintf("confirmedPeer=%t", confirmedPeer), func(t *testing.T) {
+			testUnconfirmedTagWithCachedVoltage(t, confirmedPeer)
+		})
+	}
+}
+
+func testUnconfirmedTagWithCachedVoltage(t *testing.T, confirmedPeer bool) {
+	t.Helper()
 	s := newAdmissionSimulation(t, "experimental")
 	s.pack = [2]BMSData{admissionFrame(53000, BMSStateActive), admissionFrame(49000, BMSStateIdle)}
 	a := s.a
 	a.tag(0, []byte{1})
 	a.tag(1, []byte{2})
+	if confirmedPeer {
+		observeWritten(a, 0, s.pack[0], admissionTestTime.Add(-time.Second))
+	}
 	for step := 0; step < 45; step++ {
 		at := admissionTestTime.Add(time.Duration(step) * admissionPollInterval)
 		id, _ := a.beginRound(at)
