@@ -12,10 +12,11 @@ import (
 func admissionTestReader(a *packAdmission, index int) *BatteryReader {
 	config := &ServiceConfig{}
 	config.MaxVoltageDelta.Store(DefaultMaxVoltageDeltaMV)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return &BatteryReader{
 		index: index, enabled: true,
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		service: &Service{config: config, admission: a},
+		logger:  logger,
+		service: &Service{config: config, admission: a, logger: logger},
 	}
 }
 

@@ -343,14 +343,15 @@ func (r *BatteryReader) readStatusLocked() (bool, bool) {
 }
 
 func (r *BatteryReader) WriteCommand(cmd fsm.BMSCommand) {
-	_ = r.writeCommand(cmd)
+	correctiveOff := cmd == fsm.BMSCmdOff && r.enabled && r.role == BatteryRoleActive && !r.isBatteryEmpty()
+	_ = r.writeCommand(cmd, correctiveOff)
 }
 
 func (r *BatteryReader) WriteOffCommand() error {
-	return r.writeCommand(fsm.BMSCmdOff)
+	return r.writeCommand(fsm.BMSCmdOff, false)
 }
 
-func (r *BatteryReader) writeCommand(cmd fsm.BMSCommand) error {
+func (r *BatteryReader) writeCommand(cmd fsm.BMSCommand, correctiveOff bool) error {
 	r.nfcMu.Lock()
 	defer r.nfcMu.Unlock()
 
@@ -378,8 +379,8 @@ func (r *BatteryReader) writeCommand(cmd fsm.BMSCommand) error {
 	for retry := 0; retry < maxRetries; retry++ {
 		// Discovery and retries can outlive stopped/throttle-off evidence.
 		// Recheck immediately before each write; denial never becomes OFF.
-		if !r.admitCommand(cmd, time.Now()) {
-			return fmt.Errorf("battery %d: activation deferred: %s", r.index, r.lastAdmissionReason)
+		if !r.admitCommandPolicy(cmd, time.Now(), correctiveOff) {
+			return fmt.Errorf("battery %d: command %s deferred: %s", r.index, cmd, r.lastAdmissionReason)
 		}
 		err := r.hal.WriteBinary(0x0330, cmdBytes)
 		if err == nil {

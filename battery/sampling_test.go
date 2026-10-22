@@ -191,7 +191,10 @@ func TestSamplingRejectsUnsafeAndStaleWindows(t *testing.T) {
 				at = at.Add(admissionMaxAge + time.Second)
 			}
 			requireAdmission(t, a, 1, at, false)
-			requireAdmission(t, a, 0, at, true)
+			requireAdmission(t, a, 0, at, kind != "voltage")
+			if kind == "voltage" && !a.shouldIsolate(0, at, DefaultMaxVoltageDeltaMV) {
+				t.Fatal("higher-voltage handover did not request the lower pack OFF")
+			}
 		})
 	}
 }
@@ -216,8 +219,8 @@ func TestSamplingOngoingAndSinglePack(t *testing.T) {
 		}
 	}
 	a.setRole(1, false)
-	if id, _ := a.beginRound(admissionTestTime); id != 0 {
-		t.Fatal("single pack round")
+	if id, _ := a.beginRound(admissionTestTime); id == 0 {
+		t.Fatal("inactive-role peer still needs sampling for OFF proof")
 	}
 	a = samplingPolicy()
 	a.sampling.enabled = false

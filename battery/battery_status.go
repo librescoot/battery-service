@@ -246,44 +246,8 @@ func (r *BatteryReader) noteFrameFreshness() {
 	r.armConfirmRead()
 }
 
-// The non-experimental voltage gate latches once per insertion. Voltage
-// drift after that decision must not disable an already-running supply.
-func (r *BatteryReader) checkActivationVoltageDelta() {
-	if r.packAdmission() != nil {
-		return
-	}
-	if r.index > 0 && r.data.Present && !r.previousData.Present {
-		r.voltageDeltaChecked = false
-		r.voltageDeltaBlocked = false
-	}
-	maxDelta := r.service.config.MaxVoltageDelta.Load()
-	if r.index > 0 && maxDelta > 0 && r.role == BatteryRoleActive &&
-		!r.voltageDeltaChecked && !r.fresh.unconfirmed && r.data.Present && r.data.Voltage > 0 {
-		v0, err := r.service.redis.HGet(r.ctx, "battery:0", "voltage").Uint64()
-		if err == nil && v0 > 0 {
-			v1 := uint64(r.data.Voltage)
-			var delta uint64
-			if v0 > v1 {
-				delta = v0 - v1
-			} else {
-				delta = v1 - v0
-			}
-			r.voltageDeltaChecked = true
-			if delta > maxDelta {
-				r.logger.Warn("Voltage delta too large; blocking battery 1 activation", "delta", delta, "limit", maxDelta)
-				r.voltageDeltaBlocked = true
-				if r.enabled {
-					r.enabled = false
-					r.triggerRestart()
-				}
-			}
-		}
-	}
-}
-
 func (r *BatteryReader) sendStatusUpdate() {
 	r.noteFrameFreshness()
-	r.checkActivationVoltageDelta()
 
 	effectivePresent := r.data.Present
 

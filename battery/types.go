@@ -305,18 +305,20 @@ type InitComplete struct {
 
 // Service represents the main battery service
 type Service struct {
-	config        *ServiceConfig
-	batteryConfig *BatteryConfiguration
-	logger        *slog.Logger
-	stdLogger     *log.Logger
-	ctx           context.Context
-	cancel        context.CancelFunc
-	debug         bool
-	redis         *redis.Client
-	vehicleState  VehicleState
-	readers       []*BatteryReader
-	admission     *packAdmission
-	motionWG      sync.WaitGroup
+	config          *ServiceConfig
+	batteryConfig   *BatteryConfiguration
+	logger          *slog.Logger
+	stdLogger       *log.Logger
+	ctx             context.Context
+	cancel          context.CancelFunc
+	debug           bool
+	redis           *redis.Client
+	vehicleState    VehicleState
+	readers         []*BatteryReader
+	admission       *packAdmission
+	admissionLogKey string
+	admissionLogAt  time.Time
+	motionWG        sync.WaitGroup
 }
 
 // BatteryReader represents a single battery reader with its own event loop
@@ -359,8 +361,6 @@ type BatteryReader struct {
 
 	// State tracking
 	enabled                  bool
-	voltageDeltaBlocked      bool
-	voltageDeltaChecked      bool
 	lastAdmissionReason      string // protected by nfcMu
 	vehicleState             VehicleState
 	seatboxLockClosed        bool

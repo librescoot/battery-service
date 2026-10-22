@@ -160,7 +160,11 @@ func TestAdmissionRequiresStableLowLoadWindow(t *testing.T) {
 				a := newAdmissionTestPolicy()
 				stablePair(a, active, tc.v0, tc.v1, tc.current, admissionTestTime)
 				requireAdmission(t, a, 1-active, admissionTestTime.Add(admissionStableTime), tc.want)
-				requireAdmission(t, a, active, admissionTestTime.Add(admissionStableTime), true)
+				handover := tc.name == "too far apart" && active == 1
+				requireAdmission(t, a, active, admissionTestTime.Add(admissionStableTime), !handover)
+				if handover && !a.shouldIsolate(active, admissionTestTime.Add(admissionStableTime), DefaultMaxVoltageDeltaMV) {
+					t.Fatal("qualified higher-voltage handover did not request OFF")
+				}
 			})
 		}
 	}
@@ -337,13 +341,15 @@ func TestAdmissionRoleChangesRetainProtection(t *testing.T) {
 	requireAdmission(t, a, 1, admissionTestTime.Add(admissionStableTime), true)
 }
 
-func TestAdmissionSingleModeUnchanged(t *testing.T) {
+func TestAdmissionSingleModeUsesObservedPeerState(t *testing.T) {
 	a := newPackAdmission(&BatteryConfiguration{Readers: []BatteryReaderConfig{
 		{Index: 0, Enabled: true, Role: BatteryRoleActive},
 		{Index: 1, Enabled: true, Role: BatteryRoleInactive},
 	}})
-	requireAdmission(t, a, 0, admissionTestTime, true)
 	a.setVehicle(VehicleStateParked)
+	observeWritten(a, 0, admissionFrame(53000, BMSStateIdle), admissionTestTime)
+	a.observeAbsent(1, admissionTestTime)
+	requireAdmission(t, a, 0, admissionTestTime, true)
 	a.setRole(1, true)
 	requireAdmission(t, a, 0, admissionTestTime, true)
 	requireAdmission(t, a, 1, admissionTestTime, false)

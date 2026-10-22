@@ -152,7 +152,16 @@ func TestDriveSeatboxLatchPreservesOffDecisions(t *testing.T) {
 			r, _ := newDriveLatchReader(0)
 			r.handleVehicleStateChange(VehicleStateReadyToDrive)
 			if reason == "voltage-delta" {
-				r.voltageDeltaBlocked = true
+				a := newAdmissionTestPolicy()
+				now := time.Now()
+				observeWritten(a, 0, admissionFrame(51000, BMSStateActive), now)
+				observeWritten(a, 1, admissionFrame(55000, BMSStateActive), now)
+				if !a.shouldIsolate(0, now, DefaultMaxVoltageDeltaMV) || !a.isolationOffAttempt(0, now) {
+					t.Fatal("failed to start parked isolation")
+				}
+				a.setVehicle(VehicleStateReadyToDrive)
+				r.service.admission = a
+				r.service.config.MaxVoltageDelta.Store(DefaultMaxVoltageDeltaMV)
 			}
 			r.handleSeatboxLockChange(false)
 			switch reason {

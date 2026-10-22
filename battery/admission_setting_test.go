@@ -85,18 +85,17 @@ func TestExperimentalAdmissionRequiresExplicitOptIn(t *testing.T) {
 			s, _ := admissionSettingService(t, values)
 			s.loadAdmissionSetting()
 			s.loadDualBatterySetting()
-			if (s.admission != nil) != (value == "true") {
-				t.Fatalf("admission enabled for value %q: %t", value, s.admission != nil)
+			if s.admission == nil || !s.admission.sampling.enabled {
+				t.Fatal("mandatory paired voltage guard was disabled")
+			}
+			if s.admission.conservative != (value == "true") {
+				t.Fatalf("conservative qualification enabled for value %q: %t", value, s.admission.conservative)
 			}
 			if s.readers[1].role != BatteryRoleActive {
 				t.Fatal("dual-battery role was not loaded")
 			}
-			if s.admission == nil {
-				if !s.readers[1].admitCommand(fsm.BMSCmdOn, time.Now()) {
-					t.Fatal("disabled admission intercepted a command")
-				}
-			} else if !s.admission.coordinated {
-				t.Fatal("enabled admission did not incorporate dual-battery setting")
+			if !s.admission.coordinated || s.readers[1].admitCommand(fsm.BMSCmdOn, time.Now()) {
+				t.Fatal("dual-battery activation allowed without fresh observations")
 			}
 		})
 	}
@@ -106,8 +105,8 @@ func TestExperimentalAdmissionReadFailureStaysDisabled(t *testing.T) {
 	s, hook := admissionSettingService(t, nil)
 	hook.err = errors.New("Redis unavailable")
 	s.loadAdmissionSetting()
-	if s.admission != nil {
-		t.Fatal("read failure enabled admission")
+	if s.admission == nil || !s.admission.sampling.enabled || s.admission.conservative {
+		t.Fatal("read failure must retain the baseline guard without enabling the experiment")
 	}
 }
 
@@ -121,10 +120,7 @@ func TestNonExperimentalStartupAndRoleChangeVoltageGate(t *testing.T) {
 			})
 			s.loadAdmissionSetting()
 			s.loadDualBatterySetting()
-			want := BatteryRoleInactive
-			if enabled {
-				want = BatteryRoleActive
-			}
+			want := BatteryRoleActive
 			if s.readers[1].role != want {
 				t.Fatalf("startup role = %v, want %v", s.readers[1].role, want)
 			}
@@ -134,50 +130,5 @@ func TestNonExperimentalStartupAndRoleChangeVoltageGate(t *testing.T) {
 				t.Fatalf("reloaded role = %v, want %v", s.readers[1].role, want)
 			}
 		})
-	}
-}
-
-func TestNonExperimentalInsertionVoltageGate(t *testing.T) {
-	for _, experimental := range []bool{false, true} {
-		for _, unconfirmed := range []bool{false, true} {
-			t.Run(fmt.Sprintf("experimental=%t/unconfirmed=%t", experimental, unconfirmed), func(t *testing.T) {
-				s, _ := admissionSettingService(t, map[string]string{
-					"settings/experimental.battery.dual-pack-admission": fmt.Sprint(experimental),
-					"battery:0/voltage": "55000",
-				})
-				s.loadAdmissionSetting()
-				r := s.readers[1]
-				r.role, r.enabled = BatteryRoleActive, true
-				r.data = admissionFrame(51000, BMSStateIdle)
-				r.fresh.unconfirmed = unconfirmed
-				r.checkActivationVoltageDelta()
-				wantBlocked := !experimental && !unconfirmed
-				if r.voltageDeltaBlocked != wantBlocked || r.enabled == wantBlocked {
-					t.Fatalf("blocked=%t enabled=%t, want blocked=%t", r.voltageDeltaBlocked, r.enabled, wantBlocked)
-				}
-			})
-		}
-	}
-}
-
-func TestNonExperimentalVoltageDecisionLatchesPerInsertion(t *testing.T) {
-	s, hook := admissionSettingService(t, map[string]string{"battery:0/voltage": "53000"})
-	r := s.readers[1]
-	r.role, r.enabled = BatteryRoleActive, true
-	r.data = admissionFrame(53000, BMSStateIdle)
-	r.checkActivationVoltageDelta()
-	if !r.voltageDeltaChecked || r.voltageDeltaBlocked {
-		t.Fatal("compatible insertion was not accepted")
-	}
-	r.previousData = r.data
-	hook.values["battery:0/voltage"] = "55000"
-	r.checkActivationVoltageDelta()
-	if !r.enabled || r.voltageDeltaBlocked {
-		t.Fatal("voltage drift disabled a supply after admission")
-	}
-	r.previousData.Present = false
-	r.checkActivationVoltageDelta()
-	if r.enabled || !r.voltageDeltaBlocked {
-		t.Fatal("new insertion did not reevaluate voltage")
 	}
 }

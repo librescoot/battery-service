@@ -132,7 +132,13 @@ func (r *BatteryReader) isBatteryEmpty() bool {
 // empty pack is sent OFF even when enabled, so we don't fight a BMS that
 // refuses to activate.
 func (r *BatteryReader) ShouldSendOn() bool {
-	return r.enabled && !r.isBatteryEmpty()
+	if !r.enabled || r.isBatteryEmpty() {
+		return false
+	}
+	if a := r.packAdmission(); a != nil && a.shouldIsolate(r.index, time.Now(), r.service.config.MaxVoltageDelta.Load()) {
+		return false
+	}
+	return true
 }
 
 func (r *BatteryReader) CheckStateCorrect() bool {

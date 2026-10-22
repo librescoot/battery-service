@@ -49,7 +49,7 @@ func (a *packAdmission) beginRound(now time.Time) (uint64, samplingReport) {
 	}
 	report := a.sampling.report
 	a.sampling.report = samplingReport{}
-	if !a.sampling.enabled || a.sampling.stopped || !a.slots[0].eligible || !a.slots[1].eligible || !a.needsPollLocked() {
+	if !a.sampling.enabled || a.sampling.stopped || !a.slots[0].monitored || !a.slots[1].monitored || !a.needsPollLocked() {
 		return 0, report
 	}
 	a.sampling.next++

@@ -14,8 +14,8 @@ battery presence, status, temperature, and faults.
 - Monitors pack temperature and derives `cold`, `ideal`, `hot`, or `unknown`
   temperature state.
 - Coordinates reader activity with vehicle and seatbox state.
-- Provides optional experimental higher-voltage pack selection and coordinated
-  admission of the second pack.
+- Serializes pack activation independently of physical slot, with mandatory
+  voltage admission and optional conservative qualification.
 
 ## Operation and Redis interface
 
@@ -70,19 +70,30 @@ behavior. Restrict their modification to trusted configuration components.
 startup; changes require a service restart. It does not enable reader 1: that
 still requires `scooter.dual-battery=true` or `--battery1-active`.
 
-With the flag off, slot 1 uses `scooter.max-voltage-delta` against the published
-slot 0 voltage. Startup and role changes check the limit. The insertion check
-waits for tag confirmation and latches until the pack is reinserted.
+The shared activation guard is always enabled, including when the experimental
+setting is false, missing or unreadable. The flag enables higher-voltage selection, confirmed-OFF handovers and the
+conservative stable-window qualification below; it cannot disable the basic
+voltage gate. The operating modes are:
 
-With the flag on:
+- Single battery: slot 0 is eligible; slot 1 is commanded off. Its possible
+  live-supply state is still tracked until OFF is confirmed.
+- Ordinary dual battery: slot 0 starts first when both packs are inactive.
+  A compatible second pack can join; a mismatched incoming pack stays off in
+  either insertion order without displacing the running supply.
+- Experimental admission: a sole pack in either slot can run. With two packs,
+  voltage takes priority, SOC breaks a voltage tie, and compatible packs can
+  run together. A higher-voltage incompatible pack can replace a lower-voltage
+  running pack through a confirmed-OFF handover.
 
-- Both readers share a gate for every ON command. The higher-voltage usable
-  pack starts first; charge breaks a voltage tie, then slot 0 breaks an exact tie.
+The shared rules are:
+
+- Both readers share a gate for every ON command. Slot 0 breaks an exact tie
+  in experimental voltage/SOC selection.
 - Initial activation is allowed in `stand-by`, `waiting-seatbox`, or `parked`.
   A second pack can join only in `parked` by default; a separate stopped-vehicle
   exception is described below.
-- Active packs keep their ON heartbeats. The service does not switch off a
-  running pack to select another, or add an inactive pack while moving.
+- A mismatched second pack cannot be added alongside the running supply.
+  Stale readings alone do not withdraw a confirmed supply's heartbeat.
 - OFF commands still follow seatbox, empty-pack and disable handling. An OFF
   attempt needs a later inactive reading before ON is allowed again.
 
@@ -94,15 +105,65 @@ rounds are attempted regardless of vehicle state, including `stand-by`, before
 and after both packs become active. Sampling alone does not authorize activation;
 the second-pack gate remains parked-only unless the stopped-vehicle exception is
 explicitly enabled.
-A second pack needs three paired samples over 6 seconds: data age ≤10 seconds,
+The baseline guard requires a fresh paired acquisition within the configured
+voltage limit before a second pack can join. Pending second-pack ON retries
+recheck admission and retain their reservation even when a write fails.
+With conservative qualification enabled, a second pack needs three paired
+samples over 6 seconds: data age ≤10 seconds,
 STATUS0 acquisition skew ≤1 second, absolute current ≤1000 mA, and voltage
 variation ≤100 mV per pack.
-The voltage difference must stay within `scooter.max-voltage-delta` minus 10%
-(capped at 100 mV). A limit of 0 disables only the voltage check.
+Conservative qualification also requires the voltage difference to stay within
+`scooter.max-voltage-delta` minus 10% (capped at 100 mV). The baseline accepts the
+configured limit itself. A limit of 0 disables only the voltage check.
+Inactive-role readers remain sampled so disabling a slot cannot hide a live
+supply or discard an outstanding OFF command.
 
 ON writes reserve the slot before I/O. Failed writes and lost tags do not prove
 the pack is off. Reservations need inactive readings to clear; unconfirmed ON
-retries stop after 10 seconds. Admission state is not persisted across restarts.
+retries stop after 10 seconds. Tag changes retain unresolved power reservations
+and their settling deadlines. Admission state is not persisted across restarts.
+
+If a fresh paired observation finds both packs already active above the limit,
+`parked`, `stand-by` and `waiting-seatbox` permit isolation of one pack. The
+healthy higher-voltage running pack is retained; the other is selected once and
+commanded OFF. Voltage ordering changes cannot reverse that selection. Every OFF
+write and retry requires fresh confirmation that the retained pack is active.
+A failed or ambiguous OFF remains reserved until a subsequent inactive reading
+confirms it. This is separate from the user enable setting and seatbox latch.
+Experimental handovers also permit a healthy, higher-voltage inactive pack to
+replace the sole running pack after both readings settle. The lower pack must
+be positively OFF before the target receives ON. A removed target with no ON
+reservation releases the completed handover so the old pack can resume.
+Handovers and corrective OFF commands use `parked`, `stand-by` or
+`waiting-seatbox`, not `ready-to-drive`. The stopped-motion exception below
+permits parallel admission, not a power-interrupting handover.
+
+If driving begins during an uncertain handover OFF, fresh post-attempt ACTIVE
+proof can maintain the old sole supply while the target remains confirmed
+inactive. Its OFF reservation is retained; another OFF after that keepalive
+and subsequent inactive confirmation are required before the target can start.
+This avoids treating a paused handover as permission to activate both packs.
+
+### Two-pack decision diagnostics
+
+While both packs have observations, the service logs decisions when their reason
+changes and at least every 30 seconds at INFO. `--log=4` logs each 3-second poll;
+it does not require `--debug` or verbose NFC protocol logging. Slot-1 reader
+logging can remain disabled with `--log1=0`.
+
+`Dual-pack decision` records include both voltages and currents, charge, faults,
+vehicle state, observation and frame-change ages, paired round, sample counts,
+stability, reservations, ON/OFF ages and pending OFF confirmations. They show:
+
+- `command_on`: permission for the current command, including maintaining an
+  existing supply; this is not evidence that a new pack would qualify.
+- `baseline_new_on`: whether the same measurements would admit this slot as a
+  new supply under the mandatory gate, with a reason.
+- `strict_new_on`: the corresponding conservative qualification decision.
+
+Each preview uses an independent snapshot and never changes live reservations,
+qualification history or sampling state. Actual activation decisions and
+isolation OFF deferrals are logged separately by the readers.
 
 ### Experimental stopped-vehicle admission
 
@@ -175,8 +236,9 @@ join a newer round. An unpaired observation can still establish supply state or
 OFF confirmation, but cannot combine with an older peer observation to admit a
 second pack. Sampling failure itself issues no OFF command and does not release
 a supply reservation. Missing packs retain the existing fresh-absence rules for
-starting the first supply. Single-reader configurations do not create rounds;
-with the experimental flag disabled, the existing path is unchanged.
+starting the first supply. Single-reader configurations do not create rounds.
+With both readers enabled, inactive-role packs also participate so that a role
+change does not conceal a possible supply or outstanding OFF confirmation.
 
 Service debug logs emit at most one round summary per scheduler tick: round ID,
 result, conservative skew, STATUS0 durations and full-frame durations from
@@ -232,6 +294,18 @@ make build-host    # local-development binary: bin/battery-service-host
 make build-native  # local-development binary: bin/battery-service
 make test
 make lint          # requires golangci-lint
+```
+
+The production-policy simulation covers 216 mode/insertion-order/voltage/SOC
+combinations, startup states and a disabled voltage limit, parked/stopped
+qualification, sag, load, faults, confirmed-OFF handovers and target removal.
+It also runs 256 reproducible seeds of 256 events involving lost reads, command
+failures, role/threshold changes, tag churn and simulated heartbeat expiry.
+Failures include the event trace and seed. Run or reproduce a case with:
+
+```bash
+go test -race ./battery -run '^TestSimulation' -count=1
+go test ./battery -run '^TestSimulationSeededEvents$/^seed42$' -count=1
 ```
 
 ## Deployment and operations

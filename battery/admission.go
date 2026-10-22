@@ -38,11 +38,13 @@ type admissionSlot struct {
 	// A command reservation counts as a possible live supply even if its
 	// write fails. Only positive OFF evidence may release it; a read error
 	// or an NFC departure is not evidence that power stopped flowing.
-	held       bool
-	active     bool
-	onAt       time.Time
-	offPending bool
-	offAt      time.Time
+	held              bool
+	active            bool
+	onAt              time.Time
+	lastOnAt          time.Time
+	offPending        bool
+	offAt             time.Time
+	identityUncertain bool
 }
 
 // packAdmission serializes the readers' decisions without holding a lock
@@ -50,16 +52,18 @@ type admissionSlot struct {
 // Once dual operation has been enabled, protection remains engaged even
 // when its setting is disabled: an OFF command still needs confirmation.
 type packAdmission struct {
-	mu          sync.Mutex
-	coordinated bool
-	vehicle     VehicleState
-	slots       [2]admissionSlot
-	sampling    samplingRounds
-	motion      stoppedAdmission
+	mu           sync.Mutex
+	coordinated  bool
+	conservative bool
+	isolation    *isolationEpisode
+	vehicle      VehicleState
+	slots        [2]admissionSlot
+	sampling     samplingRounds
+	motion       stoppedAdmission
 }
 
 func newPackAdmission(config *BatteryConfiguration) *packAdmission {
-	a := &packAdmission{}
+	a := &packAdmission{conservative: true}
 	for _, r := range config.Readers {
 		if r.Index < 0 || r.Index >= len(a.slots) {
 			continue
@@ -67,6 +71,7 @@ func newPackAdmission(config *BatteryConfiguration) *packAdmission {
 		a.slots[r.Index].monitored = r.Enabled
 		a.setRole(r.Index, r.Enabled && r.Role == BatteryRoleActive)
 	}
+	a.coordinated = a.slots[0].monitored && a.slots[1].monitored
 	return a
 }
 
@@ -101,7 +106,9 @@ func (a *packAdmission) tag(index int, uid []byte) {
 	a.cancelRoundLocked("tag changed")
 	s := &a.slots[index]
 	if s.uid != string(uid) {
-		*s = admissionSlot{monitored: s.monitored, eligible: s.eligible, uid: string(uid)}
+		// A new tag invalidates permission, not an unresolved power command.
+		*s = admissionSlot{monitored: s.monitored, eligible: s.eligible, uid: string(uid),
+			held: s.held, onAt: s.onAt, lastOnAt: s.lastOnAt, offPending: s.offPending, offAt: s.offAt, identityUncertain: s.held}
 	} else {
 		s.valid = false
 		s.haveFrame = false
@@ -164,16 +171,30 @@ func (a *packAdmission) observeLocked(index int, data BMSData, now time.Time) {
 	}
 
 	if data.State == BMSStateActive {
-		s.held, s.active = true, true
-	} else if (!s.offPending && (s.active || now.Sub(s.onAt) >= admissionOnSettle)) ||
-		(s.offPending && s.written.After(s.offAt)) {
+		s.held, s.active, s.identityUncertain = true, true, false
+		if e := a.isolation; e != nil && e.handover && e.offConfirmed && e.survivor == index {
+			a.isolation = nil
+		}
+	} else if (!s.offPending && ((s.active && now.Sub(s.lastOnAt) >= BMSTimeCmd) || now.Sub(s.lastOnAt) >= admissionOnSettle)) ||
+		(s.offPending && !s.offAt.Before(s.lastOnAt) && now.Sub(s.offAt) >= BMSTimeCmd && s.written.After(s.offAt)) {
 		if s.held {
 			a.cancelRoundLocked("supply became inactive")
 			for i := range a.slots {
 				a.slots[i].history = nil
 			}
 		}
-		s.held, s.active, s.offPending = false, false, false
+		s.held, s.active, s.offPending, s.identityUncertain = false, false, false, false
+		if e := a.isolation; e != nil {
+			if e.victim == index {
+				if e.handover {
+					e.offConfirmed = true
+				} else {
+					a.isolation = nil
+				}
+			} else if !e.handover && e.survivor == index && !e.attempted {
+				a.isolation = nil
+			}
+		}
 	}
 
 	if a.sampling.enabled && a.coordinated {
@@ -224,23 +245,42 @@ func voltageDistance(v0, v1 uint) uint64 {
 	return uint64(v1 - v0)
 }
 
-func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (bool, string) {
+func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (allowed bool, reason string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	defer func() {
+		if allowed {
+			a.slots[index].lastOnAt = now
+		}
+		a.mu.Unlock()
+	}()
+	a.reconcileLocked(now, maxDelta)
 	s, peer := &a.slots[index], &a.slots[1-index]
-	if !a.coordinated {
+	if !s.eligible {
+		return false, "inactive role"
+	}
+	if s.offPending {
+		if a.maintainHandoverLocked(index, now) {
+			return true, "maintaining sole supply; handover paused while driving"
+		}
+		return false, "waiting for OFF confirmation"
+	}
+	if e := a.isolation; e != nil && e.victim == index &&
+		(e.attempted || a.isolationReadyLocked(now) || !s.held || !s.active) {
+		return false, "isolating mismatched running pack"
+	}
+	if e := a.isolation; e != nil && e.handover && e.survivor == index && !e.offConfirmed {
+		return false, "waiting for lower-voltage pack OFF confirmation"
+	}
+	if s.identityUncertain && s.held && !s.active {
+		return false, "waiting for tag power confirmation"
+	}
+	if !a.coordinated && !peer.held && !peer.offPending {
 		// Track commands even in single mode: enabling the second slot can
 		// race the first pack's ON confirmation.
 		if !s.held || s.offPending {
 			s.held, s.active, s.onAt, s.offPending = true, false, now, false
 		}
 		return true, "single-battery mode"
-	}
-	if !s.eligible {
-		return false, "inactive role"
-	}
-	if s.offPending {
-		return false, "waiting for OFF confirmation"
 	}
 	if s.held && s.active {
 		return true, "maintaining supply"
@@ -263,9 +303,6 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (bo
 	if s.held {
 		if now.Sub(s.onAt) > admissionOnSettle {
 			return false, "waiting for ON confirmation"
-		}
-		if a.vehicle != VehicleStateReadyToDrive {
-			return true, "awaiting ON confirmation"
 		}
 	}
 	if !s.fresh(now) {
@@ -294,22 +331,33 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (bo
 				return false, "waiting for paired acquisition"
 			}
 			skew := s.observed.Sub(peer.observed)
-			if skew < -admissionMaxSkew || skew > admissionMaxSkew || !s.stable(now) || !peer.stable(now) {
-				return false, "waiting for stable low-load readings"
+			if skew < -admissionMaxSkew || skew > admissionMaxSkew {
+				return false, "waiting for aligned readings"
 			}
-			if maxDelta > 0 {
-				limit := maxDelta - min(uint64(100), maxDelta/10)
-				// The whole window must pass, not just the latest pair.
-				for _, own := range s.history {
-					for _, other := range peer.history {
-						if voltageDistance(own.data.Voltage, other.data.Voltage) > limit {
-							return false, "voltage difference too large"
+			if maxDelta > 0 && voltageDistance(s.frame.Voltage, peer.frame.Voltage) > maxDelta {
+				return false, "voltage difference too large"
+			}
+			if a.conservative {
+				if !s.stable(now) || !peer.stable(now) {
+					return false, "waiting for stable low-load readings"
+				}
+				if maxDelta > 0 {
+					limit := maxDelta - min(uint64(100), maxDelta/10)
+					for _, own := range s.history {
+						for _, other := range peer.history {
+							if voltageDistance(own.data.Voltage, other.data.Voltage) > limit {
+								return false, "voltage difference too large"
+							}
 						}
 					}
 				}
 			}
 		} else if !absent && peer.usable() {
-			if peer.frame.Voltage > s.frame.Voltage ||
+			if !a.conservative {
+				if index > 0 {
+					return false, "primary slot selected"
+				}
+			} else if peer.frame.Voltage > s.frame.Voltage ||
 				(peer.frame.Voltage == s.frame.Voltage && peer.frame.Charge > s.frame.Charge) ||
 				(peer.frame.Voltage == s.frame.Voltage && peer.frame.Charge == s.frame.Charge && index > 0) {
 				return false, "higher-voltage pack selected"
@@ -331,9 +379,16 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (bo
 func (a *packAdmission) offAttempt(index int, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.offAttemptLocked(index, now)
+}
+
+func (a *packAdmission) offAttemptLocked(index int, now time.Time) {
+	if e := a.isolation; e != nil && e.victim == index {
+		e.attempted = true
+	}
 	a.cancelRoundLocked("OFF command")
 	s := &a.slots[index]
-	if s.held && !s.offPending {
+	if s.held && (!s.offPending || s.lastOnAt.After(s.offAt)) {
 		s.offPending, s.offAt = true, now
 	}
 	for i := range a.slots {
@@ -362,7 +417,7 @@ func (a *packAdmission) needsPollLocked() bool {
 		return false
 	}
 	if a.sampling.enabled {
-		return a.slots[0].eligible && a.slots[1].eligible
+		return a.slots[0].monitored && a.slots[1].monitored && (a.slots[0].eligible || a.slots[1].eligible)
 	}
 	switch a.vehicle {
 	case VehicleStateParked:
