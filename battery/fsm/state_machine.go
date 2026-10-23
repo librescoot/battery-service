@@ -709,6 +709,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 
 		// Tag Absent transitions
 		Transition(StateTagAbsent, EvReinit, StateNFCReaderOff).
+		Transition(StateTagAbsent, EvCheckReaderTimeout, StateNFCReaderOff).
 		Transition(StateTagAbsent, EvTagArrived, StateTagPresent,
 			librefsm.WithAction(markJustInsertedAction),
 		).

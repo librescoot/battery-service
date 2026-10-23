@@ -2,6 +2,7 @@ package battery
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -210,8 +211,8 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 		}
 		lastErr = err
 
-		// Tag departed - don't retry
-		if isTagDepartedError(err) {
+		// A lost selection or stalled controller needs discovery, not more reads.
+		if isTagDepartedError(err) || isHALError(err) {
 			return nil, err
 		}
 
@@ -221,7 +222,7 @@ func (r *BatteryReader) readWithVerification(address uint16) ([]byte, error) {
 				r.logger.Debug(fmt.Sprintf("Arbiter busy at 0x%04X, calling SelectTag(0) (retry %d)", address, retry))
 			}
 			if err := r.hal.SelectTag(0); err != nil {
-				if isTagDepartedError(err) {
+				if isTagDepartedError(err) || isHALError(err) {
 					return nil, err
 				}
 				r.logger.Warn(fmt.Sprintf("SelectTag failed: %v, continuing retry", err))
@@ -406,7 +407,7 @@ func (r *BatteryReader) writeCommand(cmd fsm.BMSCommand, correctiveOff bool) err
 				r.logger.Debug(fmt.Sprintf("Arbiter busy writing command %s, calling SelectTag(0) (retry %d)", cmd, retry))
 			}
 			if err := r.hal.SelectTag(0); err != nil {
-				if isTagDepartedError(err) {
+				if isTagDepartedError(err) || isHALError(err) {
 					lastErr = err
 					break
 				}
@@ -480,8 +481,21 @@ func (r *BatteryReader) handleNFCError(err error) {
 	}
 }
 
+// pn7150 v0.1.11 labels notification/credit timeouts as tag departure.
+// A missing response is not removal evidence; reinitialize to rediscover it.
+func isNFCResponseTimeout(err error) bool {
+	var departed *hal.TagDepartedError
+	if !errors.As(err, &departed) {
+		return false
+	}
+	message := departed.Error()
+	return strings.HasPrefix(message, "timeout waiting for notification 0x") ||
+		message == "timeout waiting for response after credit notification"
+}
+
 func isTagDepartedError(err error) bool {
-	return hal.IsTagDepartedError(err)
+	var departed *hal.TagDepartedError
+	return errors.As(err, &departed) && !isNFCResponseTimeout(err)
 }
 
 func isMultipleTagsError(err error) bool {
@@ -497,5 +511,5 @@ func isTransientError(err error) bool {
 }
 
 func isHALError(err error) bool {
-	return hal.IsHALError(err)
+	return isNFCResponseTimeout(err) || hal.IsHALError(err)
 }

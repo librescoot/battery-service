@@ -37,6 +37,18 @@ an open seatbox resumes normal seatbox-open handling. This protection is always
 on, independently of the keep-active setting and experimental admission flags;
 it does not override empty-pack, voltage-difference or explicit disable decisions.
 
+### NFC recovery
+
+Notification and credit-response timeouts trigger reader reinitialization after
+a two-second delay rather than publishing pack removal. Hardware errors end the
+current read retry loop immediately. Confirmed RF departure and successful detection of no tags still clear pack presence
+without waiting for that recovery. Pack fault handling is unchanged.
+
+While waiting for a tag to return, the reader retries discovery after a
+ten-second watchdog expires, even if polling has produced no explicit error.
+Normal power-management rules still apply; recovery does not hold a permanent
+suspend inhibitor.
+
 ## Configuration
 
 Run `bin/battery-service -help` after building for the authoritative flag list.
