@@ -114,8 +114,14 @@ The shared rules are:
 
 Admission uses complete NFC reads acquired within the last 10 seconds, after
 one-time confirmation of the selected tag, not cached Redis voltage. Missing, stale, truncated or substituted data cannot
-admit a pack. Shared sampling rounds prompt both reader FSMs at most every 3 seconds
-without interrupting commands. With both readers configured for active roles,
+admit a pack. Background sampling rounds prompt both reader FSMs every 3 seconds.
+A `vehicle[drive-start-status]` value of `waiting-battery` requests an immediate
+round instead of waiting for that tick. Requests coalesce with an in-progress
+round and remain pending through BMS commands and their settling delays. Newly
+confirmed tag data and completed paired readings prompt immediate admission
+rechecks while that request remains active, for at most 30 seconds. Clearing the
+status stops these foreground retries; periodic sampling remains available.
+With both readers configured for active roles,
 rounds are attempted regardless of vehicle state, including `stand-by`, before
 and after both packs become active. Sampling alone does not authorize activation;
 second-pack admission requires a known non-drive state unless the stopped-vehicle

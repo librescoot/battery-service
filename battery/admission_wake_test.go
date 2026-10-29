@@ -80,7 +80,12 @@ func (a *admissionWakeActions) ReadStatus() error {
 		a.data.State = BMSStateActive
 		a.onPending = false
 	}
-	a.packAdmission().observe(a.index, a.data, time.Now())
+	now := time.Now()
+	policy := a.packAdmission()
+	id := policy.claimRound(a.index, now)
+	if policy.observeAcquisition(a.index, id, acquisition{start: now, end: now, complete: now, data: a.data}) {
+		a.service.notifyAdmissionReady()
+	}
 	return nil
 }
 

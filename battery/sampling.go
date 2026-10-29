@@ -116,11 +116,15 @@ func (a *packAdmission) stopSampling() {
 	a.cancelRoundLocked("shutdown")
 }
 
-func (a *packAdmission) observeAcquisition(index int, id uint64, sample acquisition) {
+func (a *packAdmission) observeAcquisition(index int, id uint64, sample acquisition) (retry bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	confirmed := !a.slots[index].written.IsZero()
 	// OFF confirmation and live-supply tracking do not depend on pairing.
 	a.observeLocked(index, sample.data, sample.complete)
+	if !confirmed && a.slots[index].valid && a.hasInactiveCandidateLocked() {
+		retry = true
+	}
 	a.slots[index].observedRound = id
 	if !a.sampling.enabled || !a.coordinated {
 		return
@@ -162,4 +166,5 @@ func (a *packAdmission) observeAcquisition(index int, id uint64, sample acquisit
 	a.sampling.pairedID = r.id
 	a.sampling.report = roundReport(r, "paired")
 	a.sampling.round = nil
+	return a.hasInactiveCandidateLocked()
 }

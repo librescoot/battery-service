@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"battery-service/battery/fsm"
-
 	"github.com/redis/go-redis/v9"
 )
 
@@ -19,15 +17,17 @@ func NewService(config *ServiceConfig, batteryConfig *BatteryConfiguration, logg
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Service{
-		config:        config,
-		batteryConfig: batteryConfig,
-		logger:        slog.New(NewServiceHandler(logger.Writer(), logLevel)),
-		stdLogger:     logger,
-		ctx:           ctx,
-		cancel:        cancel,
-		debug:         debugMode,
-		vehicleState:  VehicleStateStandby,
-		readers:       make([]*BatteryReader, len(batteryConfig.Readers)),
+		config:            config,
+		batteryConfig:     batteryConfig,
+		logger:            slog.New(NewServiceHandler(logger.Writer(), logLevel)),
+		stdLogger:         logger,
+		ctx:               ctx,
+		cancel:            cancel,
+		debug:             debugMode,
+		vehicleState:      VehicleStateStandby,
+		readers:           make([]*BatteryReader, len(batteryConfig.Readers)),
+		admissionRequests: make(chan struct{}, 1),
+		admissionReady:    make(chan struct{}, 1),
 	}
 
 	s.redis = redis.NewClient(&redis.Options{
@@ -143,7 +143,7 @@ func (s *Service) SetBatteryEnabled(index int, enabled bool) error {
 }
 
 func (s *Service) runRedisSubscriber() {
-	s.logger.Info("Starting Redis subscriber for channels: vehicle(state, seatbox:lock), settings, aux-battery(voltage)")
+	s.logger.Info("Starting Redis subscriber for channels: vehicle(state, seatbox:lock, drive-start-status), settings, aux-battery(voltage)")
 
 	pubsub := s.redis.Subscribe(s.ctx,
 		"vehicle",
@@ -158,6 +158,7 @@ func (s *Service) runRedisSubscriber() {
 		s.stdLogger.Fatal("Redis connection failed, exiting to allow systemd restart")
 	}
 	s.logger.Info("Redis subscription established successfully")
+	s.handleDriveStartStatusMessage()
 
 	ch := pubsub.Channel()
 	s.logger.Debug("Listening for Redis messages...")
@@ -178,6 +179,8 @@ func (s *Service) runRedisSubscriber() {
 					s.handleVehicleStateMessage()
 				case "seatbox:lock":
 					s.handleSeatboxUpdate()
+				case "drive-start-status":
+					s.handleDriveStartStatusMessage()
 				}
 			case "settings":
 				switch msg.Payload {
@@ -549,25 +552,23 @@ func (s *Service) loadAdmissionSetting() {
 func (s *Service) runAdmissionPoller() {
 	ticker := time.NewTicker(admissionPollInterval)
 	defer ticker.Stop()
+	s.runAdmissionRequests(ticker.C)
+}
+
+func (s *Service) runAdmissionRequests(ticks <-chan time.Time) {
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-ticker.C:
-			if s.admission == nil {
-				continue
+		case <-ticks:
+			s.pollAdmission(false)
+		case <-s.admissionRequests:
+			if s.driveStartDemandActive() {
+				s.pollAdmission(true)
 			}
-			now := time.Now()
-			s.logAdmissionDiagnostics(now)
-			id, report := s.admission.beginRound(now)
-			s.logSamplingReport(report)
-			if id == 0 {
-				continue
-			}
-			for _, reader := range s.readers {
-				if reader != nil && reader.fsm != nil {
-					reader.fsm.SendEvent(fsm.EvAdmissionPoll)
-				}
+		case <-s.admissionReady:
+			if s.driveStartDemandActive() {
+				s.pollAdmission(true)
 			}
 		}
 	}

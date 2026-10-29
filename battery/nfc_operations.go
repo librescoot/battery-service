@@ -326,9 +326,11 @@ func (r *BatteryReader) readStatusLocked() (bool, bool) {
 
 	admissionSampleOK = len(status0) >= 16 && len(status1) >= 16 && len(status2) >= 16 && artifacts == r.sensors01Artifacts
 	if a := r.packAdmission(); a != nil && admissionSampleOK {
-		a.observeAcquisition(r.index, roundID, acquisition{
+		if a.observeAcquisition(r.index, roundID, acquisition{
 			start: status0Start, end: status0End, complete: time.Now(), data: r.data,
-		})
+		}) {
+			r.service.notifyAdmissionReady()
+		}
 	}
 
 	r.logger.Debug(fmt.Sprintf("Status read on reader %d: serial=%s charge=%d%% state=%s", r.index, r.data.SerialNumber, r.data.Charge, r.data.State))

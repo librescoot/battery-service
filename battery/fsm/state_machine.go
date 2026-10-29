@@ -101,6 +101,7 @@ type fsmData struct {
 	checkPresenceCancel     context.CancelFunc
 	consecutiveReadFailures int
 	tagPresent              atomic.Bool
+	admissionPollPending    atomic.Bool
 }
 
 // StateMachine wraps librefsm.Machine to provide the same interface as before
@@ -166,6 +167,10 @@ func (sm *StateMachine) Start(ctx context.Context) error {
 
 // SendEvent sends an event to the FSM
 func (sm *StateMachine) SendEvent(id librefsm.EventID) {
+	if id == EvAdmissionPoll {
+		// Send is best-effort: a full queue must not suppress later prompts.
+		sm.data.admissionPollPending.Store(true)
+	}
 	sm.machine.Send(librefsm.Event{ID: id})
 }
 
@@ -346,7 +351,9 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 				return nil
 			}),
 			librefsm.WithOnExit(func(c *librefsm.Context) error {
-				c.Data.(*fsmData).tagPresent.Store(false)
+				d := c.Data.(*fsmData)
+				d.tagPresent.Store(false)
+				d.admissionPollPending.Store(false)
 				return nil
 			}),
 		).
@@ -551,6 +558,9 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 				// An empty pack stops cycling here and reports idle.
 				d.actions.StopTimerIfBatteryEmpty()
 				d.actions.ReleaseInhibitor()
+				if d.admissionPollPending.Load() {
+					c.Send(librefsm.Event{ID: EvAdmissionPoll})
+				}
 				// Timer is managed by parent StateHeartbeat
 				return nil
 			}),
@@ -766,10 +776,14 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 			librefsm.WithAction(readStatusAction),
 		).
 
-		// Admission polling never interrupts a command or its settling delay.
+		// Requests received during a command remain pending until this boundary.
 		// Preserve the running pack's ON heartbeat before the potentially slow
 		// status read. The command gate rejects stale admission observations.
-		Transition(StateWaitUpdate, EvAdmissionPoll, StateHeartbeat).
+		Transition(StateWaitUpdate, EvAdmissionPoll, StateHeartbeat,
+			librefsm.WithGuard(func(c *librefsm.Context) bool {
+				return c.Data.(*fsmData).admissionPollPending.Swap(false)
+			}),
+		).
 
 		// Wait Update transitions
 		// Transition to StateHeartbeat (not HeartbeatActions) to restart the timer
