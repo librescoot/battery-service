@@ -135,6 +135,9 @@ supply or discard an outstanding OFF command.
 
 A newly selected tag needs one observed payload change to confirm that its
 memory has been refreshed; the opposite-side tag can hold an old snapshot.
+An unconfirmed inactive tag continues through the insertion wake-up sequence
+while ON remains blocked. Once confirmed, a pack waiting for admission stays
+inactive without repeating that recovery sequence.
 After that per-identity confirmation, unchanged measurements remain valid when
 complete NFC reads succeed. Read freshness expires when acquisition stops or
 fails, not when voltage, current or temperature stays constant. Frame-change age

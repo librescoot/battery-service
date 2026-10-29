@@ -397,9 +397,10 @@ func (a *packAdmission) waiting(index int, state BMSState) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s := &a.slots[index]
-	// A deferred ON cannot require an active response. Freshness still gates
-	// requestOn; an outstanding supply reservation still requires recovery.
-	return a.coordinated && !s.held && !s.offPending &&
+	// A confirmed tag may remain inactive while ON is deferred. An unconfirmed
+	// tag still needs the insertion wake-up path to refresh its cached frame.
+	// Neither case bypasses requestOn or an outstanding supply reservation.
+	return a.coordinated && !s.written.IsZero() && !s.held && !s.offPending &&
 		(state == BMSStateIdle || state == BMSStateAsleep)
 }
 
