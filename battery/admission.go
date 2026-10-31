@@ -71,6 +71,9 @@ type packAdmission struct {
 	seatboxKnown   bool
 	seatboxClosed  bool
 	seatboxRecheck bool
+
+	// Reads the live atomic settings; installed before readers start.
+	keepActiveOnSeatboxOpen func() bool
 }
 
 func newPackAdmission(config *BatteryConfiguration) *packAdmission {
@@ -131,15 +134,16 @@ func (a *packAdmission) setSeatbox(closed bool) {
 func (a *packAdmission) invalidateSeatboxLocked() {
 	a.cancelRoundLocked("seatbox changed")
 	a.seatboxRecheck = a.vehicle == VehicleStateReadyToDrive
+	keepRunning := a.seatboxRecheck || (a.keepActiveOnSeatboxOpen != nil && a.keepActiveOnSeatboxOpen())
 	for i := range a.slots {
 		s := &a.slots[i]
 		s.valid, s.haveFrame = false, false
 		s.written = time.Time{}
 		s.history = nil
 		s.observedRound = 0
-		// A latch bounce must not cut an established drive supply. Its data
-		// is invalid immediately; parked requalification cannot use it either.
-		if !a.seatboxRecheck || !s.held || !s.active {
+		// Drive/keep-active heartbeats survive only for established identities.
+		// This never clears an identity-change or OFF qualification barrier.
+		if !keepRunning || !s.held || !s.active {
 			s.requiresAdmission = true
 		}
 	}

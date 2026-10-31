@@ -533,6 +533,7 @@ func (s *Service) recomputeAuxLowKeepActive(allowRestart bool) {
 // pack may be supplying power would discard command reservations.
 func (s *Service) loadAdmissionSetting() {
 	s.admission = newPackAdmission(s.batteryConfig)
+	s.admission.keepActiveOnSeatboxOpen = s.config.EffectiveKeepActiveOnSeatboxOpen
 	s.admission.conservative = false
 	s.admission.sampling.enabled = true
 	const key = "experimental.battery.dual-pack-admission"

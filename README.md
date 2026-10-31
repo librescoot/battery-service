@@ -153,11 +153,15 @@ qualification before an ON write; it cannot authorize switching off the establis
 supply merely by reporting ACTIVE. Outstanding power reservations remain held.
 
 Seatbox opening and closing invalidate both packs' measurement evidence and paired
-rounds before the reader events are queued. In non-drive states, both packs must
-qualify again. While ready-to-drive, unchanged running identities retain their
-heartbeats across latch-sensor changes; their data is invalidated immediately and
-requalification is required once parked. A changed identity never inherits that
-keepalive permission. Duplicate seatbox reports do not restart qualification.
+rounds before the reader events are queued. Unchanged running identities retain
+their heartbeats while ready-to-drive or when effective keep-active is enabled
+(explicitly or through the AUX-low override). Their measurements are still
+invalidated immediately. Otherwise, packs must qualify again, including when
+leaving ready-to-drive with keep-active disabled. The effective keep-active
+policy is read live, so an AUX override change takes effect at that boundary.
+A changed identity or a previously inactive pack never inherits the keepalive
+permission. Pending OFF commands remain pending. Duplicate seatbox reports do
+not restart qualification.
 
 A newly selected tag needs one observed payload change within the same identity
 to confirm that its memory has been refreshed; the opposite-side tag can hold an old snapshot.
