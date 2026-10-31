@@ -238,8 +238,9 @@ It is read at startup, requires `experimental.battery.dual-pack-admission=true`,
 and also requires a service restart to change. It permits second-pack admission
 in `ready-to-drive` only under all of these additional conditions:
 
-- The peer is a confirmed running supply with no pending OFF command. This
-  exception cannot start the first supply in `ready-to-drive`.
+- The peer is an already-admitted, confirmed running supply with no pending OFF
+  command. An unqualified replacement reporting ACTIVE cannot establish this
+  prerequisite. This exception cannot start the first supply in `ready-to-drive`.
 - Fresh ECU motion observations show zero RPM, zero raw speed and throttle off
   throughout the stable sampling window. Zero whole-km/h speed alone is not
   sufficient. A receive gap longer than 500 ms, movement, throttle-on, transport

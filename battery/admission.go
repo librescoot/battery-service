@@ -367,8 +367,8 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 		if !a.motion.enabled {
 			return false, "waiting for activation vehicle state"
 		}
-		if !peer.held || !peer.active || peer.offPending {
-			return false, "waiting for running peer"
+		if !peer.held || !peer.active || peer.requiresAdmission || peer.offPending {
+			return false, "waiting for qualified running peer"
 		}
 		if !a.stoppedPairReadyLocked(now) {
 			return false, "waiting for fresh stopped-vehicle pair"
