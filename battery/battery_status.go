@@ -246,6 +246,15 @@ func (r *BatteryReader) noteFrameFreshness() {
 	r.armConfirmRead()
 }
 
+// These describe the NFC acquisition, not a measurement timestamp inside the BMS.
+// State-only publications must retain the acquisition time of the data they carry.
+func (r *BatteryReader) energySampleFields() (int64, bool) {
+	if r.data.SampleTime.IsZero() {
+		return 0, false
+	}
+	return r.data.SampleTime.UnixMilli(), r.data.SampleValid && r.data.Present && !r.fresh.unconfirmed
+}
+
 func (r *BatteryReader) sendStatusUpdate() {
 	r.noteFrameFreshness()
 
@@ -254,8 +263,11 @@ func (r *BatteryReader) sendStatusUpdate() {
 	hashKey := fmt.Sprintf("battery:%d", r.index)
 	channel := fmt.Sprintf("battery:%d", r.index)
 
+	sampleTime, sampleValid := r.energySampleFields()
 	// Build fields map for all data
 	fields := map[string]any{
+		"sample:timestamp":   fmt.Sprintf("%d", sampleTime),
+		"sample:valid":       fmt.Sprintf("%v", sampleValid),
 		"present":            fmt.Sprintf("%v", effectivePresent),
 		"state":              r.data.State.String(),
 		"voltage":            fmt.Sprintf("%d", r.data.Voltage),

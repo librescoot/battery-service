@@ -25,6 +25,13 @@ charge, four temperatures, temperature state, cycle count, state of health,
 serial number, manufacture date, and firmware version. Changed fields are
 announced on the matching `battery:<index>` channel.
 
+`sample:timestamp` is the Unix-millisecond start time of the STATUS0 NFC read.
+`sample:valid` requires a complete status acquisition without a sensor artifact,
+a present pack and completed tag confirmation. These fields describe acquisition,
+not the BMS's internal measurement time. State-only publications retain the
+original timestamp; an absent acquisition is `0`/`false`. Consumers must also
+check age and identity. This metadata does not change NFC polling or activation.
+
 Active pack faults are held in `battery:<index>:fault`; fault events are also
 appended to `events:faults` with the corresponding battery group. The service
 subscribes to `vehicle`, `settings`, and `aux-battery`. Vehicle `state` and

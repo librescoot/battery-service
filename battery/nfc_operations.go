@@ -325,6 +325,8 @@ func (r *BatteryReader) readStatusLocked() (bool, bool) {
 	}
 
 	admissionSampleOK = len(status0) >= 16 && len(status1) >= 16 && len(status2) >= 16 && artifacts == r.sensors01Artifacts
+	r.data.SampleTime = status0Start
+	r.data.SampleValid = admissionSampleOK
 	if a := r.packAdmission(); a != nil && admissionSampleOK {
 		if a.observeAcquisition(r.index, roundID, acquisition{
 			start: status0Start, end: status0End, complete: time.Now(), data: r.data,

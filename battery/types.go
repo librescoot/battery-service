@@ -215,6 +215,8 @@ type sensors01Sample struct {
 }
 
 type BMSData struct {
+	SampleTime        time.Time           `json:"-"`
+	SampleValid       bool                `json:"-"`
 	Present           bool                `json:"present"`
 	Voltage           uint                `json:"voltage"`
 	Current           int                 `json:"current"`
