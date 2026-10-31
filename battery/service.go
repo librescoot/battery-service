@@ -238,6 +238,9 @@ func (s *Service) loadInitialVehicleState() {
 	} else if err != redis.Nil {
 		s.logger.Warn(fmt.Sprintf("Failed to read initial seatbox lock state: %v", err))
 	}
+	if s.admission != nil {
+		s.admission.setSeatbox(seatboxClosed)
+	}
 	s.logger.Info(fmt.Sprintf("Initial seatbox lock: closed=%t", seatboxClosed))
 
 	for _, reader := range s.readers {
@@ -278,6 +281,9 @@ func (s *Service) handleSeatboxUpdate() {
 	}
 
 	closed := (seatboxLock == "closed")
+	if s.admission != nil {
+		s.admission.setSeatbox(closed)
+	}
 	s.logger.Info(fmt.Sprintf("Seatbox lock changed: %s (closed=%t)", seatboxLock, closed))
 
 	for _, reader := range s.readers {

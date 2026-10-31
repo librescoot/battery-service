@@ -26,6 +26,7 @@ type admissionSlot struct {
 	monitored     bool
 	eligible      bool
 	uid           string
+	serial        string
 	absent        bool
 	observed      time.Time
 	observedRound uint64
@@ -45,6 +46,13 @@ type admissionSlot struct {
 	offPending        bool
 	offAt             time.Time
 	identityUncertain bool
+	requiresAdmission bool
+}
+
+func (s *admissionSlot) replaceIdentity(uid string) {
+	*s = admissionSlot{monitored: s.monitored, eligible: s.eligible, uid: uid,
+		held: s.held, onAt: s.onAt, lastOnAt: s.lastOnAt, offPending: s.offPending, offAt: s.offAt,
+		identityUncertain: s.held, requiresAdmission: s.requiresAdmission || s.uid != "" || s.serial != "" || s.haveFrame}
 }
 
 // packAdmission serializes the readers' decisions without holding a lock
@@ -52,14 +60,17 @@ type admissionSlot struct {
 // Once dual operation has been enabled, protection remains engaged even
 // when its setting is disabled: an OFF command still needs confirmation.
 type packAdmission struct {
-	mu           sync.Mutex
-	coordinated  bool
-	conservative bool
-	isolation    *isolationEpisode
-	vehicle      VehicleState
-	slots        [2]admissionSlot
-	sampling     samplingRounds
-	motion       stoppedAdmission
+	mu             sync.Mutex
+	coordinated    bool
+	conservative   bool
+	isolation      *isolationEpisode
+	vehicle        VehicleState
+	slots          [2]admissionSlot
+	sampling       samplingRounds
+	motion         stoppedAdmission
+	seatboxKnown   bool
+	seatboxClosed  bool
+	seatboxRecheck bool
 }
 
 func newPackAdmission(config *BatteryConfiguration) *packAdmission {
@@ -98,6 +109,40 @@ func (a *packAdmission) setVehicle(state VehicleState) {
 		}
 	}
 	a.vehicle = state
+	if a.seatboxRecheck && nonDrivingVehicle(state) {
+		a.invalidateSeatboxLocked()
+	}
+}
+
+func (a *packAdmission) setSeatbox(closed bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.seatboxKnown {
+		a.seatboxKnown, a.seatboxClosed = true, closed
+		return
+	}
+	if a.seatboxClosed == closed {
+		return
+	}
+	a.seatboxClosed = closed
+	a.invalidateSeatboxLocked()
+}
+
+func (a *packAdmission) invalidateSeatboxLocked() {
+	a.cancelRoundLocked("seatbox changed")
+	a.seatboxRecheck = a.vehicle == VehicleStateReadyToDrive
+	for i := range a.slots {
+		s := &a.slots[i]
+		s.valid, s.haveFrame = false, false
+		s.written = time.Time{}
+		s.history = nil
+		s.observedRound = 0
+		// A latch bounce must not cut an established drive supply. Its data
+		// is invalid immediately; parked requalification cannot use it either.
+		if !a.seatboxRecheck || !s.held || !s.active {
+			s.requiresAdmission = true
+		}
+	}
 }
 
 func (a *packAdmission) tag(index int, uid []byte) {
@@ -107,8 +152,7 @@ func (a *packAdmission) tag(index int, uid []byte) {
 	s := &a.slots[index]
 	if s.uid != string(uid) {
 		// A new tag invalidates permission, not an unresolved power command.
-		*s = admissionSlot{monitored: s.monitored, eligible: s.eligible, uid: string(uid),
-			held: s.held, onAt: s.onAt, lastOnAt: s.lastOnAt, offPending: s.offPending, offAt: s.offAt, identityUncertain: s.held}
+		s.replaceIdentity(string(uid))
 	} else {
 		s.valid = false
 		s.haveFrame = false
@@ -158,6 +202,13 @@ func (a *packAdmission) observe(index int, data BMSData, now time.Time) {
 
 func (a *packAdmission) observeLocked(index int, data BMSData, now time.Time) {
 	s := &a.slots[index]
+	if s.serial != "" && data.SerialNumber != "" && s.serial != data.SerialNumber {
+		a.cancelRoundLocked("pack identity changed")
+		s.replaceIdentity(s.uid)
+	}
+	if data.SerialNumber != "" {
+		s.serial = data.SerialNumber
+	}
 	s.observedRound = 0
 	if s.haveFrame && statusFrameChanged(s.frame, data) {
 		s.written = now
@@ -250,6 +301,7 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 	defer func() {
 		if allowed {
 			a.slots[index].lastOnAt = now
+			a.slots[index].requiresAdmission = false
 		}
 		a.mu.Unlock()
 	}()
@@ -282,7 +334,8 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 		}
 		return true, "single-battery mode"
 	}
-	if s.held && s.active {
+	// ACTIVE establishes possible power flow, not fresh admission.
+	if s.held && s.active && !s.requiresAdmission {
 		return true, "maintaining supply"
 	}
 	switch {
@@ -300,7 +353,7 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 	default:
 		return false, "waiting for activation vehicle state"
 	}
-	if s.held {
+	if s.held && !s.active {
 		if now.Sub(s.onAt) > admissionOnSettle {
 			return false, "waiting for ON confirmation"
 		}
@@ -362,6 +415,13 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 		}
 	}
 	if s.held {
+		if s.requiresAdmission {
+			a.cancelRoundLocked("activation requalified")
+			for i := range a.slots {
+				a.slots[i].history = nil
+			}
+			return true, "pack requalified"
+		}
 		return true, "awaiting ON confirmation"
 	}
 	a.cancelRoundLocked("activation reserved")
@@ -421,7 +481,7 @@ func (a *packAdmission) needsPollLocked() bool {
 		return false
 	}
 	for _, s := range a.slots {
-		if s.monitored && s.eligible && ((!s.active && !s.absent) || s.offPending) {
+		if s.monitored && s.eligible && ((!s.active && !s.absent) || s.offPending || s.requiresAdmission) {
 			return true
 		}
 	}

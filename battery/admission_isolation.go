@@ -63,6 +63,9 @@ func (a *packAdmission) reconcileLocked(now time.Time, maxDelta uint64) {
 		return
 	}
 	if target.held && target.active && target.frame.State == BMSStateActive {
+		if target.requiresAdmission {
+			return
+		}
 		a.isolation = &isolationEpisode{survivor: survivor, victim: 1 - survivor}
 		return
 	}
@@ -94,7 +97,7 @@ func (a *packAdmission) isolationReadyLocked(now time.Time) bool {
 		}
 		return e.attempted || (a.pairCurrentLocked(now) && s.stable(now) && a.slots[e.victim].stable(now))
 	}
-	return s.held && s.active && !s.offPending && s.fresh(now) && s.usable() && s.frame.State == BMSStateActive
+	return s.held && s.active && !s.requiresAdmission && !s.offPending && s.fresh(now) && s.usable() && s.frame.State == BMSStateActive
 }
 
 func (a *packAdmission) shouldIsolate(index int, now time.Time, maxDelta uint64) bool {
@@ -119,7 +122,7 @@ func (a *packAdmission) maintainHandoverLocked(index int, now time.Time) bool {
 	old, target := &a.slots[e.victim], &a.slots[e.survivor]
 	targetInactive := (target.absent && now.Sub(target.observed) <= admissionMaxAge) ||
 		(target.fresh(now) && (target.frame.State == BMSStateIdle || target.frame.State == BMSStateAsleep))
-	return old.held && old.active && old.fresh(now) && old.frame.State == BMSStateActive &&
+	return old.held && old.active && !old.requiresAdmission && old.fresh(now) && old.frame.State == BMSStateActive &&
 		old.observed.After(old.offAt) && now.Sub(old.offAt) >= BMSTimeCmd &&
 		!target.held && !target.offPending && targetInactive
 }

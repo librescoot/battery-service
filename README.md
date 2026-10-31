@@ -146,8 +146,21 @@ configured limit itself. A limit of 0 disables only the voltage check.
 Inactive-role readers remain sampled so disabling a slot cannot hide a live
 supply or discard an outstanding OFF command.
 
-A newly selected tag needs one observed payload change to confirm that its
-memory has been refreshed; the opposite-side tag can hold an old snapshot.
+A changed tag UID or a changed nonempty pack serial invalidates measurement
+confirmation and the previous pack's ON permission. The serial identity survives
+measurement invalidation. A replacement reporting ACTIVE still needs fresh
+qualification before an ON write; it cannot authorize switching off the established
+supply merely by reporting ACTIVE. Outstanding power reservations remain held.
+
+Seatbox opening and closing invalidate both packs' measurement evidence and paired
+rounds before the reader events are queued. In non-drive states, both packs must
+qualify again. While ready-to-drive, unchanged running identities retain their
+heartbeats across latch-sensor changes; their data is invalidated immediately and
+requalification is required once parked. A changed identity never inherits that
+keepalive permission. Duplicate seatbox reports do not restart qualification.
+
+A newly selected tag needs one observed payload change within the same identity
+to confirm that its memory has been refreshed; the opposite-side tag can hold an old snapshot.
 An unconfirmed inactive tag continues through the insertion wake-up sequence
 while ON remains blocked. Once confirmed, a pack waiting for admission stays
 inactive without repeating that recovery sequence.
