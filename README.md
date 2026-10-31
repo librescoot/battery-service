@@ -161,7 +161,15 @@ leaving ready-to-drive with keep-active disabled. The effective keep-active
 policy is read live, so an AUX override change takes effect at that boundary.
 A changed identity or a previously inactive pack never inherits the keepalive
 permission. Pending OFF commands remain pending. Duplicate seatbox reports do
-not restart qualification.
+not restart qualification. Seatbox changes retain identity-bound tag-refresh
+confirmation, so new acquisitions with unchanged values can qualify. They do
+not retain usable measurements or completed measurement pairs.
+
+Detected tag absence requires requalification even if the same UID and serial
+return. Possible power and pending OFF reservations remain held. During
+ready-to-drive, known running identities retain heartbeats across RF loss; this
+requalification is deferred until a non-driving state. A changed identity is
+never covered by that exception.
 
 A newly selected tag needs one observed payload change within the same identity
 to confirm that its memory has been refreshed; the opposite-side tag can hold an old snapshot.

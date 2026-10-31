@@ -336,7 +336,7 @@ func (r *BatteryReader) makeLogCallback() hal.LogCallback {
 
 func (r *BatteryReader) handleDeparture(reason string) {
 	if a := r.packAdmission(); a != nil {
-		a.invalidate(r.index)
+		a.observeAbsent(r.index, time.Now())
 	}
 	r.logger.Info(fmt.Sprintf("Tag departed (%s): UID=%X, last serial=%s",
 		reason, r.currentTagUID, r.data.SerialNumber))

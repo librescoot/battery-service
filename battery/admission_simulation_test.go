@@ -61,6 +61,7 @@ func (s *admissionSimulation) insert(index int, voltage, soc uint, state BMSStat
 	s.generation[index]++
 	s.haveFrame[index], s.changedAt[index] = false, time.Time{}
 	s.pack[index] = admissionFrame(voltage, state)
+	s.pack[index].SerialNumber = fmt.Sprintf("slot-%d-pack-%d", index, s.generation[index])
 	s.pack[index].Charge, s.pack[index].LowSOC = soc, soc == 0
 	s.heartbeat[index] = s.now
 	s.a.tag(index, []byte{byte(index + 1), s.generation[index]})

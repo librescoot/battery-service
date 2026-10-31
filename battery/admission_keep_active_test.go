@@ -41,7 +41,7 @@ func TestSeatboxKeepActivePreservesOnlyEstablishedIdentities(t *testing.T) {
 					values["vehicle/seatbox:lock"] = state
 					s.handleSeatboxUpdate()
 					for i := range a.slots {
-						if a.slots[i].valid || a.slots[i].haveFrame || !a.slots[i].written.IsZero() {
+						if a.slots[i].valid || a.slots[i].observedRound != 0 || len(a.slots[i].history) != 0 {
 							t.Fatal("keep-active retained stale measurement evidence")
 						}
 						requireAdmission(t, a, i, admissionTestTime.Add(time.Second), mode != "disabled")

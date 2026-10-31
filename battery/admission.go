@@ -39,14 +39,15 @@ type admissionSlot struct {
 	// A command reservation counts as a possible live supply even if its
 	// write fails. Only positive OFF evidence may release it; a read error
 	// or an NFC departure is not evidence that power stopped flowing.
-	held              bool
-	active            bool
-	onAt              time.Time
-	lastOnAt          time.Time
-	offPending        bool
-	offAt             time.Time
-	identityUncertain bool
-	requiresAdmission bool
+	held                bool
+	active              bool
+	onAt                time.Time
+	lastOnAt            time.Time
+	offPending          bool
+	offAt               time.Time
+	identityUncertain   bool
+	requiresAdmission   bool
+	absenceAwaitingStop bool
 }
 
 func (s *admissionSlot) replaceIdentity(uid string) {
@@ -112,6 +113,14 @@ func (a *packAdmission) setVehicle(state VehicleState) {
 		}
 	}
 	a.vehicle = state
+	if nonDrivingVehicle(state) {
+		for i := range a.slots {
+			if a.slots[i].absenceAwaitingStop {
+				a.slots[i].requiresAdmission = true
+				a.slots[i].absenceAwaitingStop = false
+			}
+		}
+	}
 	if a.seatboxRecheck && nonDrivingVehicle(state) {
 		a.invalidateSeatboxLocked()
 	}
@@ -137,8 +146,9 @@ func (a *packAdmission) invalidateSeatboxLocked() {
 	keepRunning := a.seatboxRecheck || (a.keepActiveOnSeatboxOpen != nil && a.keepActiveOnSeatboxOpen())
 	for i := range a.slots {
 		s := &a.slots[i]
-		s.valid, s.haveFrame = false, false
-		s.written = time.Time{}
+		// Require new acquisitions without forgetting that this identity has
+		// already refreshed its tag. Constant new readings remain usable.
+		s.valid = false
 		s.history = nil
 		s.observedRound = 0
 		// Drive/keep-active heartbeats survive only for established identities.
@@ -187,8 +197,17 @@ func (a *packAdmission) observeAbsent(index int, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s := &a.slots[index]
-	s.valid = false
+	s.valid, s.haveFrame = false, false
+	s.written = time.Time{}
+	s.observedRound = 0
 	s.history = nil
+	// RF absence does not prove electrical OFF, but a reinserted pack must
+	// not inherit keepalive permission, even with the same UID and serial.
+	if nonDrivingVehicle(a.vehicle) {
+		s.requiresAdmission = true
+	} else {
+		s.absenceAwaitingStop = true
+	}
 	a.cancelRoundLocked("pack absent")
 	s.absent = !s.held
 	s.observed = now
@@ -485,7 +504,7 @@ func (a *packAdmission) needsPollLocked() bool {
 		return false
 	}
 	for _, s := range a.slots {
-		if s.monitored && s.eligible && ((!s.active && !s.absent) || s.offPending || s.requiresAdmission) {
+		if s.monitored && s.eligible && ((!s.active || s.requiresAdmission) && !s.absent || s.offPending) {
 			return true
 		}
 	}

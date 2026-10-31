@@ -87,7 +87,7 @@ func TestSeatboxInvalidatesAdmissionBeforeReadersRun(t *testing.T) {
 		s.handleSeatboxUpdate()
 		for i := range s.admission.slots {
 			slot := &s.admission.slots[i]
-			if slot.valid || slot.haveFrame || !slot.written.IsZero() || len(slot.history) != 0 {
+			if slot.valid || slot.observedRound != 0 || len(slot.history) != 0 {
 				t.Fatalf("seatbox %s retained measurement evidence for slot %d", state, i)
 			}
 			if !slot.held || !slot.requiresAdmission {
