@@ -5,6 +5,16 @@ import (
 	"time"
 )
 
+func TestEnergyAcquisitionDoesNotConfirmPayloadChanges(t *testing.T) {
+	before := BMSData{Present: true, Voltage: 53000, State: BMSStateActive, SampleTime: time.Unix(1700000000, 0)}
+	after := before
+	after.SampleTime = before.SampleTime.Add(time.Second)
+	after.SampleValid = true
+	if statusFrameChanged(before, after) {
+		t.Fatal("local acquisition metadata masquerades as a BMS payload change")
+	}
+}
+
 func TestEnergySampleRequiresAcquisition(t *testing.T) {
 	r := &BatteryReader{}
 	if at, valid := r.energySampleFields(); at != 0 || valid {
