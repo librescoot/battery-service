@@ -32,7 +32,7 @@ func readyStoppedPolicy(t *testing.T) (*packAdmission, time.Time) {
 	return a, admissionTestTime.Add(6200 * time.Millisecond)
 }
 
-func TestStoppedAdmissionRequiresBothSettings(t *testing.T) {
+func TestStationaryQualificationCannotBeDisabledBySettings(t *testing.T) {
 	for _, base := range []string{"false", "true"} {
 		for _, stopped := range []string{"", "false", "true", "TRUE", "1", "invalid"} {
 			t.Run(base+"/"+stopped, func(t *testing.T) {
@@ -42,18 +42,17 @@ func TestStoppedAdmissionRequiresBothSettings(t *testing.T) {
 				})
 				s.loadAdmissionSetting()
 				got := s.admission != nil && s.admission.motion.enabled
-				if got != (base == "true" && stopped == "true") {
+				if !got {
 					t.Fatalf("stopped admission=%t", got)
 				}
 			})
 		}
 	}
 	s, hook := admissionSettingService(t, nil)
-	s.admission = samplingPolicy()
 	hook.err = errors.New("Redis unavailable")
-	s.loadStoppedAdmissionSetting()
-	if s.admission.motion.enabled {
-		t.Fatal("read failure enabled stopped admission")
+	s.loadAdmissionSetting()
+	if !s.admission.motion.enabled {
+		t.Fatal("read failure disabled stationary qualification")
 	}
 }
 
@@ -84,7 +83,7 @@ func TestStoppedAdmissionRejectsUnsafeEvidence(t *testing.T) {
 	for _, scenario := range []string{
 		"disabled", "no motion", "throttle or movement", "post-read motion missing", "motion gap", "motion stale", "future motion",
 		"out of order", "no pair", "mixed round", "before stop", "stale pack", "high load", "voltage drift", "voltage mismatch",
-		"no running peer", "peer OFF", "own OFF", "inactive role", "shutdown", "unknown state",
+		"no running peer", "peer OFF", "own OFF", "inactive role", "shutdown",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			a, now := readyStoppedPolicy(t)
@@ -134,8 +133,6 @@ func TestStoppedAdmissionRejectsUnsafeEvidence(t *testing.T) {
 				a.setRole(1, false)
 			case "shutdown":
 				a.stopSampling()
-			case "unknown state":
-				a.setVehicle(VehicleStateOther)
 			}
 			requireAdmission(t, a, 1, now, false)
 			if !a.slots[0].held {

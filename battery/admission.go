@@ -39,15 +39,14 @@ type admissionSlot struct {
 	// A command reservation counts as a possible live supply even if its
 	// write fails. Only positive OFF evidence may release it; a read error
 	// or an NFC departure is not evidence that power stopped flowing.
-	held                bool
-	active              bool
-	onAt                time.Time
-	lastOnAt            time.Time
-	offPending          bool
-	offAt               time.Time
-	identityUncertain   bool
-	requiresAdmission   bool
-	absenceAwaitingStop bool
+	held              bool
+	active            bool
+	onAt              time.Time
+	lastOnAt          time.Time
+	offPending        bool
+	offAt             time.Time
+	identityUncertain bool
+	requiresAdmission bool
 }
 
 func (s *admissionSlot) replaceIdentity(uid string) {
@@ -61,20 +60,16 @@ func (s *admissionSlot) replaceIdentity(uid string) {
 // Once dual operation has been enabled, protection remains engaged even
 // when its setting is disabled: an OFF command still needs confirmation.
 type packAdmission struct {
-	mu             sync.Mutex
-	coordinated    bool
-	conservative   bool
-	isolation      *isolationEpisode
-	vehicle        VehicleState
-	slots          [2]admissionSlot
-	sampling       samplingRounds
-	motion         stoppedAdmission
-	seatboxKnown   bool
-	seatboxClosed  bool
-	seatboxRecheck bool
-
-	// Reads the live atomic settings; installed before readers start.
-	keepActiveOnSeatboxOpen func() bool
+	mu            sync.Mutex
+	coordinated   bool
+	conservative  bool
+	isolation     *isolationEpisode
+	vehicle       VehicleState
+	slots         [2]admissionSlot
+	sampling      samplingRounds
+	motion        stoppedAdmission
+	seatboxKnown  bool
+	seatboxClosed bool
 }
 
 func newPackAdmission(config *BatteryConfiguration) *packAdmission {
@@ -104,26 +99,19 @@ func (a *packAdmission) setRole(index int, eligible bool) {
 }
 
 func (a *packAdmission) setVehicle(state VehicleState) {
+	a.setVehicleAt(state, time.Now())
+}
+
+func (a *packAdmission) setVehicleAt(state VehicleState, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.vehicle != state {
+	if a.vehicle != state && !(nonDrivingVehicle(a.vehicle) && nonDrivingVehicle(state)) && !a.stoppedMotionFreshLocked(now) {
 		a.cancelRoundLocked("vehicle changed")
 		for i := range a.slots {
 			a.slots[i].history = nil
 		}
 	}
 	a.vehicle = state
-	if nonDrivingVehicle(state) {
-		for i := range a.slots {
-			if a.slots[i].absenceAwaitingStop {
-				a.slots[i].requiresAdmission = true
-				a.slots[i].absenceAwaitingStop = false
-			}
-		}
-	}
-	if a.seatboxRecheck && nonDrivingVehicle(state) {
-		a.invalidateSeatboxLocked()
-	}
 }
 
 func (a *packAdmission) setSeatbox(closed bool) {
@@ -142,8 +130,6 @@ func (a *packAdmission) setSeatbox(closed bool) {
 
 func (a *packAdmission) invalidateSeatboxLocked() {
 	a.cancelRoundLocked("seatbox changed")
-	a.seatboxRecheck = a.vehicle == VehicleStateReadyToDrive
-	keepRunning := a.seatboxRecheck || (a.keepActiveOnSeatboxOpen != nil && a.keepActiveOnSeatboxOpen())
 	for i := range a.slots {
 		s := &a.slots[i]
 		// Require new acquisitions without forgetting that this identity has
@@ -151,9 +137,9 @@ func (a *packAdmission) invalidateSeatboxLocked() {
 		s.valid = false
 		s.history = nil
 		s.observedRound = 0
-		// Drive/keep-active heartbeats survive only for established identities.
-		// This never clears an identity-change or OFF qualification barrier.
-		if !keepRunning || !s.held || !s.active {
+		// Reader seatbox policy issues OFF when required. Invalid measurements
+		// cannot revoke an established supply's heartbeat permission.
+		if !s.held || !s.active {
 			s.requiresAdmission = true
 		}
 	}
@@ -172,6 +158,9 @@ func (a *packAdmission) tag(index int, uid []byte) {
 		s.haveFrame = false
 		s.written = time.Time{}
 		s.history = nil
+		if nonDrivingVehicle(a.vehicle) {
+			s.requiresAdmission = true
+		}
 	}
 	s.absent = false
 }
@@ -205,8 +194,6 @@ func (a *packAdmission) observeAbsent(index int, now time.Time) {
 	// not inherit keepalive permission, even with the same UID and serial.
 	if nonDrivingVehicle(a.vehicle) {
 		s.requiresAdmission = true
-	} else {
-		s.absenceAwaitingStop = true
 	}
 	a.cancelRoundLocked("pack absent")
 	s.absent = !s.held
@@ -349,32 +336,12 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 	if s.identityUncertain && s.held && !s.active {
 		return false, "waiting for tag power confirmation"
 	}
-	if !a.coordinated && !peer.held && !peer.offPending {
-		// Track commands even in single mode: enabling the second slot can
-		// race the first pack's ON confirmation.
-		if !s.held || s.offPending {
-			s.held, s.active, s.onAt, s.offPending = true, false, now, false
-		}
-		return true, "single-battery mode"
-	}
 	// ACTIVE establishes possible power flow, not fresh admission.
 	if s.held && s.active && !s.requiresAdmission {
 		return true, "maintaining supply"
 	}
-	switch {
-	case nonDrivingVehicle(a.vehicle):
-	case a.vehicle == VehicleStateReadyToDrive:
-		if !a.motion.enabled {
-			return false, "waiting for activation vehicle state"
-		}
-		if !peer.held || !peer.active || peer.requiresAdmission || peer.offPending {
-			return false, "waiting for qualified running peer"
-		}
-		if !a.stoppedPairReadyLocked(now) {
-			return false, "waiting for fresh stopped-vehicle pair"
-		}
-	default:
-		return false, "waiting for activation vehicle state"
+	if a.sampling.stopped {
+		return false, "service shutting down"
 	}
 	if s.held && !s.active {
 		if now.Sub(s.onAt) > admissionOnSettle {
@@ -393,6 +360,12 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 			return false, "waiting for fresh peer data"
 		}
 		if peer.held {
+			if !a.secondPackStationaryLocked(now) {
+				return false, "waiting for stationary second-pack qualification"
+			}
+			if !nonDrivingVehicle(a.vehicle) && peer.requiresAdmission {
+				return false, "waiting for qualified running peer"
+			}
 			if !peer.active || peer.offPending {
 				return false, "waiting for peer power confirmation"
 			}
@@ -410,7 +383,7 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 			if maxDelta > 0 && voltageDistance(s.frame.Voltage, peer.frame.Voltage) > maxDelta {
 				return false, "voltage difference too large"
 			}
-			if a.conservative {
+			if a.conservative || !nonDrivingVehicle(a.vehicle) {
 				if !s.stable(now) || !peer.stable(now) {
 					return false, "waiting for stable low-load readings"
 				}

@@ -44,7 +44,7 @@ func TestSeatboxKeepActivePreservesOnlyEstablishedIdentities(t *testing.T) {
 						if a.slots[i].valid || a.slots[i].observedRound != 0 || len(a.slots[i].history) != 0 {
 							t.Fatal("keep-active retained stale measurement evidence")
 						}
-						requireAdmission(t, a, i, admissionTestTime.Add(time.Second), mode != "disabled")
+						requireAdmission(t, a, i, admissionTestTime.Add(time.Second), true)
 					}
 				}
 				if mode == "disabled" {
@@ -61,7 +61,7 @@ func TestSeatboxKeepActivePreservesOnlyEstablishedIdentities(t *testing.T) {
 	}
 }
 
-func TestSeatboxKeepActiveUsesCurrentPolicyWhenParking(t *testing.T) {
+func TestSeatboxDoesNotRevokeRunningPermissionWhenParking(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
 			s, values := keepActiveAdmissionService(t, true)
@@ -79,7 +79,7 @@ func TestSeatboxKeepActiveUsesCurrentPolicyWhenParking(t *testing.T) {
 				if a.slots[i].valid {
 					t.Fatal("parking reused pre-seatbox measurement evidence")
 				}
-				requireAdmission(t, a, i, admissionTestTime.Add(2*time.Second), enabled)
+				requireAdmission(t, a, i, admissionTestTime.Add(2*time.Second), true)
 			}
 		})
 	}

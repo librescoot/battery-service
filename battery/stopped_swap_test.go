@@ -17,7 +17,7 @@ func stoppedSwapPolicy(t *testing.T, strict, stopped bool, keep string, target i
 	s.config.AuxLowKeepActive.Store(keep == "aux")
 	s.loadAdmissionSetting()
 	a := s.admission
-	if a.motion.enabled != (strict && stopped) {
+	if !a.motion.enabled {
 		t.Fatal("incorrect combined experimental settings")
 	}
 	a.setVehicle(VehicleStateParked)
@@ -90,7 +90,7 @@ func TestStoppedSwapSettingsMatrix(t *testing.T) {
 					for _, change := range []string{"seatbox", "tag", "serial"} {
 						t.Run(fmt.Sprintf("strict=%t/stopped=%t/keep=%s/slot%d/%s", strict, stopped, keep, target, change), func(t *testing.T) {
 							a, now := stoppedSwapPolicy(t, strict, stopped, keep, target, change)
-							requireAdmission(t, a, target, now, strict && stopped)
+							requireAdmission(t, a, target, now, true)
 							requireAdmission(t, a, 1-target, now, true)
 						})
 					}

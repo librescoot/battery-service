@@ -1,37 +1,12 @@
 package battery
 
-import (
-	"fmt"
-	"time"
-
-	"github.com/redis/go-redis/v9"
-)
+import "time"
 
 const (
 	stoppedAdmissionSetting = "experimental.battery.dual-pack-admission-while-stopped"
 	stoppedMotionMaxAge     = 500 * time.Millisecond
 	stoppedPairMaxAge       = admissionPollInterval
 )
-
-func (s *Service) loadStoppedAdmissionSetting() {
-	if s.admission == nil {
-		return
-	}
-	raw, err := s.redis.HGet(s.ctx, "settings", stoppedAdmissionSetting).Result()
-	if err != nil {
-		if err != redis.Nil {
-			s.logger.Warn(fmt.Sprintf("Failed to load %s: %v", stoppedAdmissionSetting, err))
-		}
-		return
-	}
-	enabled, valid := parseBoolSetting(raw)
-	if !valid {
-		s.logger.Warn(fmt.Sprintf("Invalid %s value: %q", stoppedAdmissionSetting, raw))
-		return
-	}
-	s.admission.motion.enabled = enabled
-	s.logger.Info(fmt.Sprintf("Experimental stopped-vehicle admission: enabled=%t", enabled))
-}
 
 type stoppedAdmission struct {
 	enabled   bool
@@ -62,6 +37,12 @@ func (a *packAdmission) observeMotionLocked(stopped bool, received, now time.Tim
 		m.at, m.since, m.stopped = time.Time{}, time.Time{}, false
 		return
 	}
+	if m.at.IsZero() || m.stopped != stopped {
+		a.cancelRoundLocked("motion qualification changed")
+		for i := range a.slots {
+			a.slots[i].history = nil
+		}
+	}
 	if !stopped {
 		m.since = time.Time{}
 	} else if !m.stopped || received.Sub(m.at) > stoppedMotionMaxAge {
@@ -88,15 +69,29 @@ func motionClockJump(previous, now time.Time) bool {
 	return delta > 5*time.Millisecond || delta < -5*time.Millisecond
 }
 
-func (a *packAdmission) stoppedPairReadyLocked(now time.Time) bool {
+func (a *packAdmission) secondPackStationaryLocked(now time.Time) bool {
+	if nonDrivingVehicle(a.vehicle) {
+		// A fresh movement/throttle report overrides the stationary state.
+		m := &a.motion
+		return m.at.IsZero() || now.Before(m.at) || now.Sub(m.at) > stoppedMotionMaxAge || m.stopped
+	}
+	return a.stoppedPairReadyLocked(now)
+}
+
+func (a *packAdmission) stoppedMotionFreshLocked(now time.Time) bool {
 	m := &a.motion
 	if motionClockJump(m.lastCheck, now) {
 		a.invalidateMotionLocked()
 		return false
 	}
-	if !m.enabled || !m.stopped || m.since.IsZero() || now.Before(m.at) || now.Sub(m.at) > stoppedMotionMaxAge {
+	return m.enabled && m.stopped && !m.since.IsZero() && !now.Before(m.at) && now.Sub(m.at) <= stoppedMotionMaxAge
+}
+
+func (a *packAdmission) stoppedPairReadyLocked(now time.Time) bool {
+	if !a.stoppedMotionFreshLocked(now) {
 		return false
 	}
+	m := &a.motion
 	p := &a.sampling
 	if !p.enabled || p.stopped || p.pairedID == 0 || p.pairedAt.Before(m.since) ||
 		now.Before(p.pairedAt) || now.Sub(p.pairedAt) > stoppedPairMaxAge {

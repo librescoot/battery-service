@@ -90,9 +90,9 @@ startup; changes require a service restart. It does not enable reader 1: that
 still requires `scooter.dual-battery=true` or `--battery1-active`.
 
 The shared activation guard is always enabled, including when the experimental
-setting is false, missing or unreadable. The flag enables higher-voltage selection, confirmed-OFF handovers and the
-conservative stable-window qualification below; it cannot disable the basic
-voltage gate. The operating modes are:
+setting is false, missing or unreadable. The flag enables higher-voltage selection,
+confirmed-OFF handovers and conservative qualification in known non-drive states.
+It cannot disable the voltage or stationary-second-pack guards. The operating modes are:
 
 - Single battery: slot 0 is eligible; slot 1 is commanded off. Its possible
   live-supply state is still tracked until OFF is confirmed.
@@ -108,12 +108,12 @@ The shared rules are:
 
 - Both readers share a gate for every ON command. Slot 0 breaks an exact tie
   in experimental voltage/SOC selection.
-- Initial and second-pack activation are allowed in every known non-drive
-  state: `stand-by`, `parked`, `hop-on`, `hop-on-learning`, `waiting-seatbox`,
-  `shutting-down`, `updating` and the `waiting-hibernation` variants. Missing or
-  unknown vehicle states deny new activation. `ready-to-drive` uses the separate
-  stopped-vehicle exception below. Admission never overrides reader disable,
-  seatbox handling or service shutdown.
+- A qualified first supply can start regardless of vehicle state. A second pack
+  requires stationary evidence: a known non-drive state such as `stand-by` or
+  `parked`, or the fresh ECU/stable-window proof below. A fresh movement or
+  throttle report overrides a stationary vehicle state. Missing motion data is
+  not a zero-speed reading. Admission never overrides reader disable, seatbox
+  OFF handling or service shutdown.
 - A mismatched second pack cannot be added alongside the running supply.
   Stale readings alone do not withdraw a confirmed supply's heartbeat.
 - OFF commands still follow seatbox, empty-pack and disable handling. An OFF
@@ -131,12 +131,13 @@ status stops these foreground retries; periodic sampling remains available.
 With both readers configured for active roles,
 rounds are attempted regardless of vehicle state, including `stand-by`, before
 and after both packs become active. Sampling alone does not authorize activation;
-second-pack admission requires a known non-drive state unless the stopped-vehicle
-exception is explicitly enabled.
+second-pack admission always requires stationary qualification. Vehicle state
+alone is not an activation veto, including in `ready-to-drive`.
 The baseline guard requires a fresh paired acquisition within the configured
 voltage limit before a second pack can join. Pending second-pack ON retries
 recheck admission and retain their reservation even when a write fails.
-With conservative qualification enabled, a second pack needs three paired
+With conservative qualification enabled, or when relying on ECU motion evidence,
+a second pack needs three paired
 samples over 6 seconds: successful NFC acquisition age ≤10 seconds,
 STATUS0 acquisition skew ≤1 second, absolute current ≤1000 mA, and voltage
 variation ≤100 mV per pack.
@@ -153,23 +154,22 @@ qualification before an ON write; it cannot authorize switching off the establis
 supply merely by reporting ACTIVE. Outstanding power reservations remain held.
 
 Seatbox opening and closing invalidate both packs' measurement evidence and paired
-rounds before the reader events are queued. Unchanged running identities retain
-their heartbeats while ready-to-drive or when effective keep-active is enabled
-(explicitly or through the AUX-low override). Their measurements are still
-invalidated immediately. Otherwise, packs must qualify again, including when
-leaving ready-to-drive with keep-active disabled. The effective keep-active
-policy is read live, so an AUX override change takes effect at that boundary.
-A changed identity or a previously inactive pack never inherits the keepalive
-permission. Pending OFF commands remain pending. Duplicate seatbox reports do
-not restart qualification. Seatbox changes retain identity-bound tag-refresh
-confirmation, so new acquisitions with unchanged values can qualify. They do
-not retain usable measurements or completed measurement pairs.
+rounds before reader events are queued. This does not revoke an established
+identity's heartbeat permission. The reader still issues OFF for an open seatbox
+unless effective keep-active (manual or AUX-low) or the drive latch protects it.
+Pending OFF commands remain pending, and changed identities or previously inactive
+packs cannot inherit heartbeat permission. Duplicate seatbox reports do not
+restart qualification. Identity-bound tag-refresh confirmation survives seatbox
+changes, so new acquisitions with unchanged values can qualify.
 
-Detected tag absence requires requalification even if the same UID and serial
-return. Possible power and pending OFF reservations remain held. During
-ready-to-drive, known running identities retain heartbeats across RF loss; this
-requalification is deferred until a non-driving state. A changed identity is
-never covered by that exception.
+Detected tag absence or same-identity rediscovery in a known non-drive state
+requires requalification, even with the same UID and serial. Possible power and
+OFF reservations remain held. Known running identities retain heartbeats across
+RF loss outside those states. A later vehicle-state change alone does not revoke
+that permission; a different identity never inherits it. Vehicle changes retain
+qualification windows between known non-drive states or when fresh ECU evidence
+still confirms stopped/throttle-off.
+Movement and throttle transitions invalidate measurement pairs and histories.
 
 A newly selected tag needs one observed payload change within the same identity
 to confirm that its memory has been refreshed; the opposite-side tag can hold an old snapshot.
@@ -201,8 +201,8 @@ replace the sole running pack after both readings settle. The lower pack must
 be positively OFF before the target receives ON. A removed target with no ON
 reservation releases the completed handover so the old pack can resume.
 Handovers and corrective OFF commands are allowed in known non-drive states,
-not `ready-to-drive`. The stopped-motion exception below
-permits parallel admission, not a power-interrupting handover.
+not `ready-to-drive`. The motion-qualified path below permits parallel
+admission, not a power-interrupting handover.
 
 If driving begins during an uncertain handover OFF, fresh post-attempt ACTIVE
 proof can maintain the old sole supply while the target remains confirmed
@@ -231,16 +231,16 @@ Each preview uses an independent snapshot and never changes live reservations,
 qualification history or sampling state. Actual activation decisions and
 isolation OFF deferrals are logged separately by the readers.
 
-### Experimental stopped-vehicle admission
+### Stationary second-pack admission
 
-`experimental.battery.dual-pack-admission-while-stopped` defaults to **false**.
-It is read at startup, requires `experimental.battery.dual-pack-admission=true`,
-and also requires a service restart to change. It permits second-pack admission
-in `ready-to-drive` only under all of these additional conditions:
+`experimental.battery.dual-pack-admission-while-stopped` is obsolete and ignored.
+Stationary qualification cannot be disabled by either experimental setting.
+The first qualified supply does not need motion evidence. When a stationary
+vehicle-state proof is unavailable, adding a second pack requires all of these:
 
 - The peer is an already-admitted, confirmed running supply with no pending OFF
   command. An unqualified replacement reporting ACTIVE cannot establish this
-  prerequisite. This exception cannot start the first supply in `ready-to-drive`.
+  prerequisite.
 - Fresh ECU motion observations show zero RPM, zero raw speed and throttle off
   throughout the stable sampling window. Zero whole-km/h speed alone is not
   sufficient. A receive gap longer than 500 ms, movement, throttle-on, transport
@@ -254,18 +254,21 @@ in `ready-to-drive` only under all of these additional conditions:
 
 The gate is checked immediately before every command write attempt, including
 arbiter retries. An ON reservation consumes its pairing evidence; an unconfirmed
-RTD activation needs a new qualified window before another ON attempt. A failed
+second-pack activation relying on motion needs a new qualified window before
+another ON attempt. A failed
 gate never substitutes OFF or releases a supply reservation. Already-confirmed
 running packs continue their heartbeats even if motion telemetry disappears.
 
-When enabled, the service subscribes to direct values on `engine-ecu:motion`.
+The service subscribes to direct values on `engine-ecu:motion` independently of
+experimental settings.
 Battery-service opens no CAN socket and contains no ECU frame decoder. The
 [versioned motion contract](MOTION_IPC.md) carries complete observations with
 source/sequence identifiers and kernel receive timestamps from ecu-service's
 existing receiver. Missing fields, stale/future observations, sequence loss,
 reconnects and clock discontinuities restart qualification. Cached `engine-ecu`
 hash values cannot enable this gate. An older ECU service without this channel
-leaves RTD admission unavailable; ordinary non-drive admission remains available.
+leaves motion-dependent second-pack admission unavailable; first-supply and
+ordinary non-drive admission remain available.
 Remove any obsolete `--admission-can-device` unit argument before upgrading.
 
 ### Coordinated acquisition
@@ -339,19 +342,19 @@ logged pack voltages/currents and bus voltage. Do not infer continuity from Redi
    measure running-supply continuity, including restart behavior.
 5. With both packs active, record ongoing rounds and traffic for an extended run,
    including `stand-by`. Confirm that sampling continues across vehicle states
-   while second-pack admission remains limited to known non-drive states with
-   the stopped-vehicle exception disabled.
+   while second-pack admission always requires stationary evidence.
    Compare NFC data against independently timestamped load/voltage changes to
    characterize tag refresh latency and inter-pack measurement age. Report those
    separately from the NFC acquisition bound; do not claim measurement synchronization
    from successful rounds alone.
-6. On the protected bench, separately enable the stopped-vehicle setting. Verify
-   RTD admission only after a full stopped/throttle-off stable window and a fresh
-   pair. Exercise nonzero RPM with zero rounded speed, throttle pulses during
+6. On the protected bench, verify motion-dependent second-pack admission only
+   after a full stopped/throttle-off stable window and a fresh pair. Exercise nonzero RPM with zero rounded speed, throttle pulses during
    reads and retries, stale/queued CAN frames, receive gaps, bus errors, missing
    peer power confirmation and OFF pending. Verify the pending pack stays off
-   when denied and running supplies keep heartbeating. Repeat with the setting
-   disabled to confirm the default non-drive-state gate.
+   when denied and running supplies keep heartbeating. Repeat with both legacy
+   setting values to confirm they cannot disable stationary qualification.
+   Verify that a qualified first supply starts independently of vehicle state,
+   and that rapid stand/state cycles do not revoke running-supply heartbeats.
 
 ## Build and test
 

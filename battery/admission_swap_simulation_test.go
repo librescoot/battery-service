@@ -6,10 +6,9 @@ import (
 	"time"
 )
 
-func runningDualSimulation(t *testing.T, mode string, keep bool) *admissionSimulation {
+func runningDualSimulation(t *testing.T, mode string) *admissionSimulation {
 	t.Helper()
 	s := newAdmissionSimulation(t, mode)
-	s.a.keepActiveOnSeatboxOpen = func() bool { return keep }
 	s.a.setSeatbox(true)
 	s.insert(0, 55000, 80, BMSStateIdle)
 	s.insert(1, 55000, 80, BMSStateIdle)
@@ -25,7 +24,7 @@ func TestSimulationSameIdentityReinsertCannotReuseOn(t *testing.T) {
 		for index := 0; index < 2; index++ {
 			for _, voltage := range []uint{50000, 54500, 60000} {
 				t.Run(fmt.Sprintf("%s/slot%d/v%d", mode, index, voltage), func(t *testing.T) {
-					s := runningDualSimulation(t, mode, true)
+					s := runningDualSimulation(t, mode)
 					cached := s.pack[index]
 					s.a.setSeatbox(false)
 					s.pack[index].Present = false
@@ -61,11 +60,11 @@ func TestSimulationSameIdentityReinsertCannotReuseOn(t *testing.T) {
 	}
 }
 
-func TestSimulationDriveContactLossDefersRequalification(t *testing.T) {
+func TestSimulationDriveContactLossPreservesEstablishedSupply(t *testing.T) {
 	for _, mode := range []string{"dual", "experimental"} {
 		for index := 0; index < 2; index++ {
 			t.Run(fmt.Sprintf("%s/slot%d", mode, index), func(t *testing.T) {
-				s := runningDualSimulation(t, mode, true)
+				s := runningDualSimulation(t, mode)
 				s.a.setVehicle(VehicleStateReadyToDrive)
 				// RF loss is not evidence of electrical disconnection.
 				s.a.observeAbsent(index, s.now)
@@ -81,11 +80,10 @@ func TestSimulationDriveContactLossDefersRequalification(t *testing.T) {
 					}
 				}
 				s.a.setVehicle(VehicleStateParked)
-				if ok, _ := s.a.requestOn(index, s.now, s.limit); ok {
-					s.fail("parked contact-loss slot skipped requalification")
+				if ok, _ := s.a.requestOn(index, s.now, s.limit); !ok {
+					s.fail("parking revoked established supply permission")
 				}
-				// A post-return BMS update establishes a refreshed tag, then
-				// complete matching pairs can requalify without another restart.
+				// A later BMS update also restores measurement confirmation.
 				s.pack[index].Voltage++
 				s.run(8)
 				if s.a.slots[index].requiresAdmission {
@@ -100,7 +98,11 @@ func TestSeatboxCancelsInFlightPairWithoutErasingIdentityConfirmation(t *testing
 	a := runningSwapPolicy()
 	a.sampling.enabled = true
 	a.setSeatbox(true)
-	now := admissionTestTime.Add(time.Second)
+	a.offAttempt(1, admissionTestTime)
+	idle := a.slots[1].frame
+	idle.State = BMSStateIdle
+	observeWritten(a, 1, idle, admissionTestTime.Add(time.Second))
+	now := admissionTestTime.Add(2 * time.Second)
 	id, _ := a.beginRound(now)
 	for i := range a.slots {
 		if a.claimRound(i, now) != id || id == 0 {
@@ -118,16 +120,15 @@ func TestSeatboxCancelsInFlightPairWithoutErasingIdentityConfirmation(t *testing
 	if !a.sampling.pairedAt.IsZero() {
 		t.Fatal("pre-seatbox round survived its boundary")
 	}
-	for i := range a.slots {
-		requireAdmission(t, a, i, now.Add(300*time.Millisecond), false)
-	}
+	requireAdmission(t, a, 1, now.Add(300*time.Millisecond), false)
+	requireAdmission(t, a, 0, now.Add(300*time.Millisecond), true)
 }
 
 func TestSimulationReplacementWithMissingOrLatePeer(t *testing.T) {
 	for _, mode := range []string{"dual", "experimental"} {
 		for _, failure := range []string{"missing-pair", "read-error", "stale-peer"} {
 			t.Run(mode+"/"+failure, func(t *testing.T) {
-				s := runningDualSimulation(t, mode, true)
+				s := runningDualSimulation(t, mode)
 				s.a.setSeatbox(false)
 				s.insert(1, 50000, 20, BMSStateIdle)
 				// Even a changing cached ACTIVE report must not cause ON to an
@@ -161,7 +162,7 @@ func TestSimulationSwapScenarioMatrix(t *testing.T) {
 				for _, voltage := range []uint{50000, 54500, 55500, 60000} {
 					for _, deliveredOff := range []bool{false, true} {
 						t.Run(fmt.Sprintf("%s/keep=%t/slot%d/v%d/off=%t", mode, keep, index, voltage, deliveredOff), func(t *testing.T) {
-							s := runningDualSimulation(t, mode, keep)
+							s := runningDualSimulation(t, mode)
 							s.a.setSeatbox(false)
 							if !keep {
 								for i := range s.pack {

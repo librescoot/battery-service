@@ -61,13 +61,16 @@ window after discontinuity; it cannot continue the previous window.
 
 ## Battery admission
 
-The optional stopped-RTD admission gate consumes these observations. It retains
-all battery-side freshness, voltage/load, paired-round and reservation checks.
-Its latest motion observation must be acquired at or after both complete battery
-frames, not merely delivered after them. Motion loss blocks new optional RTD
-admission, never the heartbeat of an established supply or ordinary parked
-admission. An older ECU service without this channel leaves the exception
-unavailable. The two existing experimental settings remain default-off.
+Second-pack admission requires stationary evidence independently of experimental
+settings. Known non-drive states provide such evidence unless contradicted by a
+fresh movement/throttle report; otherwise this motion stream is required, along
+with battery-side freshness, low load, stability, voltage and reservation checks.
+The latest motion observation must be acquired at or after both complete battery
+frames, not merely delivered after them. Movement/throttle transitions discard
+old paired measurements. Motion loss blocks motion-dependent second-pack admission,
+never an established supply's heartbeat or a qualified first supply. An older ECU
+without this channel still supports first-supply and known-non-drive admission.
+The legacy `experimental.battery.dual-pack-admission-while-stopped` key is ignored.
 
 The 500 ms budget needs cadence/jitter validation on each supported controller;
 no controller broadcast rate is changed by this interface.

@@ -533,9 +533,9 @@ func (s *Service) recomputeAuxLowKeepActive(allowRestart bool) {
 // pack may be supplying power would discard command reservations.
 func (s *Service) loadAdmissionSetting() {
 	s.admission = newPackAdmission(s.batteryConfig)
-	s.admission.keepActiveOnSeatboxOpen = s.config.EffectiveKeepActiveOnSeatboxOpen
 	s.admission.conservative = false
 	s.admission.sampling.enabled = true
+	s.admission.motion.enabled = true
 	const key = "experimental.battery.dual-pack-admission"
 	raw, err := s.redis.HGet(s.ctx, "settings", key).Result()
 	if err != nil {
@@ -550,9 +550,6 @@ func (s *Service) loadAdmissionSetting() {
 		return
 	}
 	s.admission.conservative = enabled
-	if enabled {
-		s.loadStoppedAdmissionSetting()
-	}
 	s.logger.Info(fmt.Sprintf("Slot-independent activation guard enabled; conservative qualification=%t", enabled))
 }
 

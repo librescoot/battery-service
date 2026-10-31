@@ -90,8 +90,8 @@ func TestSeatboxInvalidatesAdmissionBeforeReadersRun(t *testing.T) {
 			if slot.valid || slot.observedRound != 0 || len(slot.history) != 0 {
 				t.Fatalf("seatbox %s retained measurement evidence for slot %d", state, i)
 			}
-			if !slot.held || !slot.requiresAdmission {
-				t.Fatal("lost power reservation or retained permission")
+			if !slot.held || slot.requiresAdmission {
+				t.Fatal("lost established power reservation or permission")
 			}
 			observeWritten(s.admission, i, frames[i], admissionTestTime.Add(2*time.Second))
 		}
@@ -103,7 +103,7 @@ func TestSeatboxInvalidatesAdmissionBeforeReadersRun(t *testing.T) {
 	}
 }
 
-func TestSeatboxInvalidationPreservesDriveSupplyUntilParked(t *testing.T) {
+func TestSeatboxInvalidationPreservesSupplyAcrossParking(t *testing.T) {
 	values := map[string]string{"vehicle/seatbox:lock": "closed"}
 	s, _ := admissionSettingService(t, values)
 	a := runningSwapPolicy()
@@ -123,7 +123,7 @@ func TestSeatboxInvalidationPreservesDriveSupplyUntilParked(t *testing.T) {
 	}
 	a.setVehicle(VehicleStateParked)
 	for i := range a.slots {
-		requireAdmission(t, a, i, admissionTestTime.Add(2*time.Second), false)
+		requireAdmission(t, a, i, admissionTestTime.Add(2*time.Second), true)
 	}
 }
 
