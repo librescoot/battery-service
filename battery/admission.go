@@ -343,7 +343,8 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 	if a.sampling.stopped {
 		return false, "service shutting down"
 	}
-	if !nonDrivingVehicle(a.vehicle) {
+	// An uncertain or pending peer still counts as possible parallel power.
+	if !nonDrivingVehicle(a.vehicle) && (a.vehicle != VehicleStateReadyToDrive || peer.held || peer.offPending) {
 		return false, "waiting for non-drive vehicle state"
 	}
 	if s.held && !s.active {

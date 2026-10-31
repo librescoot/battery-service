@@ -62,7 +62,7 @@ func TestRunningSupplySurvivesRapidVehicleReentry(t *testing.T) {
 							replacement := admissionFrame(50000, BMSStateActive)
 							replacement.SerialNumber = "replacement"
 							observeWritten(a, slot, replacement, now.Add(time.Second))
-							requireAdmission(t, a, slot, now.Add(time.Second), false)
+							requireAdmission(t, a, slot, now.Add(time.Second), !both)
 							a.setVehicleAt(VehicleStateParked, now.Add(time.Second))
 							requireAdmission(t, a, slot, now.Add(time.Second), !both)
 						})

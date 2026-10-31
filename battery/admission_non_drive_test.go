@@ -35,7 +35,7 @@ func TestDriveStateGateAtReaderCommandBoundary(t *testing.T) {
 	}
 }
 
-func TestNewSupplyWaitsForParkedDespiteQualifiedStoppedEvidence(t *testing.T) {
+func TestOnlyAdditionalSupplyWaitsForParked(t *testing.T) {
 	for _, strict := range []bool{false, true} {
 		for _, legacy := range []bool{false, true} {
 			for _, keep := range []string{"off", "manual", "aux"} {
@@ -63,15 +63,15 @@ func TestNewSupplyWaitsForParkedDespiteQualifiedStoppedEvidence(t *testing.T) {
 								a.observeMotion(true, admissionTestTime, admissionTestTime)
 								now = admissionTestTime
 							}
-							requireAdmission(t, a, target, now, false)
-							if a.slots[target].held {
-								t.Fatal("drive-state rejection created an ON reservation")
+							requireAdmission(t, a, target, now, !second)
+							if a.slots[target].held != !second {
+								t.Fatal("unexpected ON reservation for first/additional supply")
 							}
 							a.setVehicleAt(VehicleStateParked, now)
 							requireAdmission(t, a, target, now, true)
-							// A reserved but unconfirmed ON cannot be retried after entering drive.
+							// Only the sole supply can retry an unconfirmed ON in drive.
 							a.setVehicleAt(VehicleStateReadyToDrive, now)
-							requireAdmission(t, a, target, now, false)
+							requireAdmission(t, a, target, now, !second)
 							if !a.slots[target].held {
 								t.Fatal("drive-state rejection dropped possible power")
 							}

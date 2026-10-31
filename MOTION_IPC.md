@@ -61,10 +61,12 @@ window after discontinuity; it cannot continue the previous window.
 
 ## Battery admission
 
-New activation requires a known non-drive state, for both first and second
-supplies in either slot. Stopped ECU evidence never enables a new ON or pending
-ON retry in `ready-to-drive` or an unknown state. Established supplies retain
-their heartbeat permission across state changes and motion loss.
+The first qualified supply may start in `ready-to-drive`, in either slot, without
+motion evidence. Adding another supply requires a known non-drive state. Neither
+stopped ECU evidence nor an earlier ON reservation permits that addition or retry
+in `ready-to-drive` while the peer is possibly live. Unknown states block new
+activation. Established supplies retain heartbeats across state changes and
+motion loss.
 
 Second-pack admission additionally requires stationary evidence independently of
 experimental settings. Known non-drive states provide such evidence unless
@@ -92,6 +94,7 @@ ECU_MOTION_TEST_BINARY=/tmp/ecu-motion.test GOTOOLCHAIN=go1.25.7 \
 This launches isolated Redis on a temporary Unix socket. Kernel-timestamped Unix
 datagrams carry CAN-shaped frames through the actual receive adapter, decoder,
 JSON publisher and battery subscriber, with synthetic NFC acquisitions. The test
-checks stationary evidence and its post-pair timing, denial of new ON in
-`ready-to-drive`, activation after returning to `parked`, and disconnect behavior. It opens no
+checks stationary evidence and its post-pair timing, denial of second-pack ON in
+`ready-to-drive`, second-pack activation after returning to `parked`, and disconnect
+behavior. It opens no
 CAN interface and does not replace controller-specific hardware validation.

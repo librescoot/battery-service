@@ -108,9 +108,11 @@ The shared rules are:
 
 - Both readers share a gate for every ON command. Slot 0 breaks an exact tie
   in experimental voltage/SOC selection.
-- New activation requires a known non-drive state such as `parked` or `stand-by`,
-  for the first supply as well as a second pack, in either slot. No new ON is
-  permitted in `ready-to-drive`, even with qualified stopped/throttle-off evidence.
+- The first qualified supply may start in `ready-to-drive`, in either slot,
+  provided the peer is not a possible live supply. A pending/uncertain peer ON or
+  OFF still counts as possible power. Unknown vehicle states block new activation.
+- Adding another supply requires a known non-drive state such as `parked` or
+  `stand-by`; stopped/throttle-off evidence cannot permit this in `ready-to-drive`.
   Established supplies retain their heartbeat permission across state changes.
 - A second pack also requires stationary evidence and fresh voltage qualification.
   A fresh movement or throttle report overrides the stationary non-drive state.
@@ -133,8 +135,8 @@ status stops these foreground retries; periodic sampling remains available.
 With both readers configured for active roles,
 rounds are attempted regardless of vehicle state, including `stand-by`, before
 and after both packs become active. Sampling alone does not authorize activation;
-new activation remains blocked in `ready-to-drive` and unknown states, and
-second-pack admission always requires stationary qualification.
+adding another supply remains blocked in `ready-to-drive`; unknown states block
+new activation. Second-pack admission always requires stationary qualification.
 The baseline guard requires a fresh paired acquisition within the configured
 voltage limit before a second pack can join. Pending second-pack ON retries
 recheck admission and retain their reservation even when a write fails.
@@ -236,16 +238,19 @@ isolation OFF deferrals are logged separately by the readers.
 
 `experimental.battery.dual-pack-admission-while-stopped` is obsolete and ignored.
 Stationary qualification cannot be disabled by either experimental setting.
-New activation requires a known non-drive vehicle state. A stopped ECU report
-cannot enable activation in `ready-to-drive` or an unknown state. In a known
-non-drive state, a fresh movement/throttle report (at most 500 ms old) blocks
+Adding another supply requires a known non-drive vehicle state. A stopped ECU
+report cannot enable parallel activation in `ready-to-drive` or an unknown state.
+The first qualified supply does not require motion evidence, including in
+`ready-to-drive`. In a known non-drive state, a fresh movement/throttle report
+(at most 500 ms old) blocks
 second-pack admission. Movement and throttle transitions discard old paired
 measurements; the voltage and optional conservative stability checks above
 still apply when the vehicle returns to `parked`.
 
 The gate is checked immediately before every command write attempt, including
-arbiter retries. A pending ON cannot be retried in `ready-to-drive`, even if its
-reservation was made while parked. A failed gate never substitutes OFF or
+arbiter retries. A pending ON cannot be retried in `ready-to-drive` while the
+peer remains a possible live supply. A sole supply can retry within the existing
+confirmation limits. A failed gate never substitutes OFF or
 releases a supply reservation. Once positively confirmed active, an admitted
 supply keeps its heartbeats across state changes and motion telemetry loss.
 
@@ -258,7 +263,7 @@ existing receiver. Missing fields, stale/future observations, sequence loss,
 reconnects and clock discontinuities restart qualification. Cached `engine-ecu`
 hash values cannot supply motion evidence. Non-drive admission remains available
 with an older ECU service without this channel; no ECU version or experimental
-setting permits new activation in `ready-to-drive`.
+setting permits adding another supply in `ready-to-drive`.
 Remove any obsolete `--admission-can-device` unit argument before upgrading.
 
 ### Coordinated acquisition
@@ -337,13 +342,13 @@ logged pack voltages/currents and bus voltage. Do not infer continuity from Redi
    characterize tag refresh latency and inter-pack measurement age. Report those
    separately from the NFC acquisition bound; do not claim measurement synchronization
    from successful rounds alone.
-6. On the protected bench, verify that neither a first nor a second supply starts
-   in `ready-to-drive`, including with complete stopped/throttle-off evidence and
-   either legacy setting value. Return to `parked` and verify activation after
-   qualification, in both slots. Exercise fresh movement/throttle reports, missing
-   peer power confirmation and pending OFF. Confirm that pending ON retries stop
-   on entering `ready-to-drive`, while confirmed running supplies keep heartbeating
-   through rapid stand/state cycles.
+6. On the protected bench, verify that a qualified first supply can start in
+   `ready-to-drive` in either slot, but no second supply joins, including with
+   complete stopped/throttle-off evidence and either legacy setting value. Return
+   to `parked` and verify second-pack activation after qualification. Exercise
+   fresh movement/throttle reports, uncertain peer power and pending OFF. Confirm
+   that ON retries for an additional supply stop in `ready-to-drive`, while a sole
+   supply can retry and running supplies keep heartbeating through state cycles.
 
 ## Build and test
 

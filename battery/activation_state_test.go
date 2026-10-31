@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func TestFirstQualifiedSupplyRequiresNonDriveVehicleState(t *testing.T) {
+func TestFirstQualifiedSupplyAllowsReadyToDrive(t *testing.T) {
 	states := append([]VehicleState{VehicleStateReadyToDrive, VehicleStateOther, ""}, nonDriveTestStates...)
 	for _, state := range states {
 		for slot := 0; slot < 2; slot++ {
@@ -17,18 +17,18 @@ func TestFirstQualifiedSupplyRequiresNonDriveVehicleState(t *testing.T) {
 				a.tag(slot, []byte{byte(slot + 1)})
 				observeWritten(a, slot, admissionFrame(55000, BMSStateIdle), admissionTestTime)
 				a.observeAbsent(1-slot, admissionTestTime)
-				requireAdmission(t, a, slot, admissionTestTime, nonDrivingVehicle(state))
+				requireAdmission(t, a, slot, admissionTestTime, nonDrivingVehicle(state) || state == VehicleStateReadyToDrive)
 			})
 		}
 	}
 }
 
-func TestParkedFirstSupplyStillRequiresQualification(t *testing.T) {
+func TestRTDFirstSupplyStillRequiresQualification(t *testing.T) {
 	for _, failure := range []string{"unconfirmed", "stale", "faulted", "empty", "disabled", "shutdown", "pending-off"} {
 		t.Run(failure, func(t *testing.T) {
 			a := newAdmissionTestPolicy()
 			a.sampling.enabled = true
-			a.setVehicle(VehicleStateParked)
+			a.setVehicle(VehicleStateReadyToDrive)
 			data := admissionFrame(55000, BMSStateIdle)
 			a.tag(0, []byte{1})
 			observeWritten(a, 0, data, admissionTestTime)
@@ -65,7 +65,7 @@ func TestSingleReaderStillRequiresOwnQualifiedData(t *testing.T) {
 		{Index: 0, Enabled: true, Role: BatteryRoleActive},
 		{Index: 1, Enabled: false, Role: BatteryRoleInactive},
 	}})
-	a.setVehicle(VehicleStateParked)
+	a.setVehicle(VehicleStateReadyToDrive)
 	requireAdmission(t, a, 0, admissionTestTime, false)
 	a.tag(0, []byte{1})
 	observeWritten(a, 0, admissionFrame(55000, BMSStateIdle), admissionTestTime)
