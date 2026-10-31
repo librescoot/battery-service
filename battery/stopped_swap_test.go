@@ -90,6 +90,9 @@ func TestStoppedSwapSettingsMatrix(t *testing.T) {
 					for _, change := range []string{"seatbox", "tag", "serial"} {
 						t.Run(fmt.Sprintf("strict=%t/stopped=%t/keep=%s/slot%d/%s", strict, stopped, keep, target, change), func(t *testing.T) {
 							a, now := stoppedSwapPolicy(t, strict, stopped, keep, target, change)
+							requireAdmission(t, a, target, now, false)
+							requireAdmission(t, a, 1-target, now, true)
+							a.setVehicleAt(VehicleStateParked, now)
 							requireAdmission(t, a, target, now, true)
 							requireAdmission(t, a, 1-target, now, true)
 						})

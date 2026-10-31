@@ -110,7 +110,13 @@ func TestMotionIPCDiscontinuityRestartsQualification(t *testing.T) {
 				payload = "{"
 			}
 			a.receiveMotionEvidence(payload, at)
-			requireAdmission(t, a, 1, at, kind == "continuous")
+			a.mu.Lock()
+			ready := a.stoppedPairReadyLocked(at)
+			a.mu.Unlock()
+			if ready != (kind == "continuous") {
+				t.Fatalf("stopped evidence after %s = %t", kind, ready)
+			}
+			requireAdmission(t, a, 1, at, false)
 			requireAdmission(t, a, 0, at, true)
 			if kind != "continuous" && a.slots[1].held {
 				t.Fatal("invalid evidence reserved new supply")
@@ -137,6 +143,12 @@ func TestMotionIPCPreservesAcquisitionTimeAndUnchangedRefreshes(t *testing.T) {
 	a.motion.sequence = 100
 	a.motion.at = now.Add(-200 * time.Millisecond)
 	a.receiveMotionEvidence(motionTestPayload(now.Add(-time.Millisecond), 101, nil), now.Add(time.Millisecond))
+	a.mu.Lock()
+	ready := a.stoppedPairReadyLocked(now.Add(time.Millisecond))
+	a.mu.Unlock()
+	if ready {
+		t.Fatal("post-read delivery substituted for post-read acquisition")
+	}
 	requireAdmission(t, a, 1, now.Add(time.Millisecond), false)
 }
 
@@ -245,19 +257,40 @@ func TestMotionIPCIntegration(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	nextPair := time.Now()
 	pairs := 0
+	parked := false
 	for {
 		now := time.Now()
 		if !now.Before(nextPair) {
 			deliverPair(t, a, now, 52001+uint(pairs%2))
 			pairs++
 			nextPair = now.Add(admissionPollInterval)
-			if ok, _ := a.requestOn(1, time.Now(), 1000); ok {
-				t.Fatal("ON allowed before post-pair observation")
+			a.mu.Lock()
+			ready := a.stoppedPairReadyLocked(time.Now())
+			a.mu.Unlock()
+			if ready {
+				t.Fatal("stopped evidence ready before post-pair observation")
 			}
 		}
-		ok, reason := a.requestOn(1, time.Now(), 1000)
-		if ok {
-			break
+		if !parked {
+			if ok, _ := a.requestOn(1, time.Now(), 1000); ok {
+				t.Fatal("new ON allowed in ready-to-drive")
+			}
+			a.mu.Lock()
+			at := time.Now()
+			ready := a.stoppedPairReadyLocked(at) && a.slots[0].stable(at) && a.slots[1].stable(at)
+			a.mu.Unlock()
+			if ready {
+				a.setVehicleAt(VehicleStateParked, time.Now())
+				parked = true
+			}
+		}
+		reason := "waiting for stopped evidence"
+		if parked {
+			var ok bool
+			ok, reason = a.requestOn(1, time.Now(), 1000)
+			if ok {
+				break
+			}
 		}
 		if time.Now().After(deadline) {
 			diagnose()

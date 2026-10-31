@@ -311,9 +311,12 @@ func TestSimulationConvergenceAndStoppedQualification(t *testing.T) {
 				if s.pack[1].State == BMSStateActive {
 					s.fail("stopped gate skipped its qualification window")
 				}
-			} else {
-				s.a.setVehicle(VehicleStateParked)
 			}
+			s.run(9)
+			if s.pack[1].State == BMSStateActive {
+				s.fail("second pack joined in ready-to-drive despite state gate")
+			}
+			s.a.setVehicle(VehicleStateParked)
 			s.run(9)
 			if s.pack[0].State != BMSStateActive || s.pack[1].State != BMSStateActive {
 				s.fail("compatible settled pair did not activate")

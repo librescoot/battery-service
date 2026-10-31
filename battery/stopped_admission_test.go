@@ -56,8 +56,10 @@ func TestStationaryQualificationCannotBeDisabledBySettings(t *testing.T) {
 	}
 }
 
-func TestStoppedAdmissionAllowsFreshQualifiedPair(t *testing.T) {
+func TestStoppedAdmissionWaitsForParkedWithFreshQualifiedPair(t *testing.T) {
 	a, now := readyStoppedPolicy(t)
+	requireAdmission(t, a, 1, now, false)
+	a.setVehicleAt(VehicleStateParked, now)
 	requireAdmission(t, a, 1, now, true)
 	if !a.slots[1].held || a.slots[1].active {
 		t.Fatal("ON was not reserved pending confirmation")
@@ -79,9 +81,9 @@ func TestStoppedSettingDoesNotRequireMotionForParkedAdmission(t *testing.T) {
 	requireAdmission(t, a, 1, admissionTestTime.Add(6200*time.Millisecond), true)
 }
 
-func TestStoppedAdmissionRejectsUnsafeEvidence(t *testing.T) {
+func TestDriveStateRejectsNewSupplyAcrossEvidenceFailures(t *testing.T) {
 	for _, scenario := range []string{
-		"disabled", "no motion", "throttle or movement", "post-read motion missing", "motion gap", "motion stale", "future motion",
+		"qualified", "disabled", "no motion", "throttle or movement", "post-read motion missing", "motion gap", "motion stale", "future motion",
 		"out of order", "no pair", "mixed round", "before stop", "stale pack", "high load", "voltage drift", "voltage mismatch",
 		"no running peer", "peer OFF", "own OFF", "inactive role", "shutdown",
 	} {
@@ -142,7 +144,7 @@ func TestStoppedAdmissionRejectsUnsafeEvidence(t *testing.T) {
 	}
 }
 
-func TestStoppedAdmissionTimingBoundaries(t *testing.T) {
+func TestStoppedPairEvidenceTimingBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		age    time.Duration
@@ -162,13 +164,20 @@ func TestStoppedAdmissionTimingBoundaries(t *testing.T) {
 				now = a.sampling.pairedAt.Add(tc.age)
 				feedStoppedMotion(a, now)
 			}
-			requireAdmission(t, a, 1, now, tc.want)
+			a.mu.Lock()
+			ready := a.stoppedPairReadyLocked(now)
+			a.mu.Unlock()
+			if ready != tc.want {
+				t.Fatalf("stopped pair evidence = %t, want %t", ready, tc.want)
+			}
+			requireAdmission(t, a, 1, now, false)
 		})
 	}
 }
 
 func TestStoppedAdmissionRequalifiesAfterThrottlePulse(t *testing.T) {
 	a, now := readyStoppedPolicy(t)
+	a.setVehicleAt(VehicleStateParked, now)
 	a.observeMotion(false, now.Add(100*time.Millisecond), now.Add(100*time.Millisecond))
 	a.observeMotion(true, now.Add(200*time.Millisecond), now.Add(200*time.Millisecond))
 	requireAdmission(t, a, 1, now.Add(200*time.Millisecond), false)
@@ -205,8 +214,10 @@ func TestStoppedAdmissionConcurrentMotionAndGate(t *testing.T) {
 
 func TestStoppedAdmissionDoesNotInterruptExistingSupply(t *testing.T) {
 	a, now := readyStoppedPolicy(t)
+	a.setVehicleAt(VehicleStateParked, now)
 	requireAdmission(t, a, 1, now, true)
 	a.slots[1].active = true
+	a.setVehicleAt(VehicleStateReadyToDrive, now)
 	a.invalidateMotion()
 	a.invalidate(0)
 	a.invalidate(1)

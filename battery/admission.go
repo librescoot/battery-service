@@ -343,6 +343,9 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 	if a.sampling.stopped {
 		return false, "service shutting down"
 	}
+	if !nonDrivingVehicle(a.vehicle) {
+		return false, "waiting for non-drive vehicle state"
+	}
 	if s.held && !s.active {
 		if now.Sub(s.onAt) > admissionOnSettle {
 			return false, "waiting for ON confirmation"

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func TestFirstQualifiedSupplyDoesNotDependOnVehicleState(t *testing.T) {
+func TestFirstQualifiedSupplyRequiresNonDriveVehicleState(t *testing.T) {
 	states := append([]VehicleState{VehicleStateReadyToDrive, VehicleStateOther, ""}, nonDriveTestStates...)
 	for _, state := range states {
 		for slot := 0; slot < 2; slot++ {
@@ -17,18 +17,18 @@ func TestFirstQualifiedSupplyDoesNotDependOnVehicleState(t *testing.T) {
 				a.tag(slot, []byte{byte(slot + 1)})
 				observeWritten(a, slot, admissionFrame(55000, BMSStateIdle), admissionTestTime)
 				a.observeAbsent(1-slot, admissionTestTime)
-				requireAdmission(t, a, slot, admissionTestTime, true)
+				requireAdmission(t, a, slot, admissionTestTime, nonDrivingVehicle(state))
 			})
 		}
 	}
 }
 
-func TestStateIndependentFirstSupplyStillRequiresQualification(t *testing.T) {
+func TestParkedFirstSupplyStillRequiresQualification(t *testing.T) {
 	for _, failure := range []string{"unconfirmed", "stale", "faulted", "empty", "disabled", "shutdown", "pending-off"} {
 		t.Run(failure, func(t *testing.T) {
 			a := newAdmissionTestPolicy()
 			a.sampling.enabled = true
-			a.setVehicle(VehicleStateReadyToDrive)
+			a.setVehicle(VehicleStateParked)
 			data := admissionFrame(55000, BMSStateIdle)
 			a.tag(0, []byte{1})
 			observeWritten(a, 0, data, admissionTestTime)
@@ -65,7 +65,7 @@ func TestSingleReaderStillRequiresOwnQualifiedData(t *testing.T) {
 		{Index: 0, Enabled: true, Role: BatteryRoleActive},
 		{Index: 1, Enabled: false, Role: BatteryRoleInactive},
 	}})
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicle(VehicleStateParked)
 	requireAdmission(t, a, 0, admissionTestTime, false)
 	a.tag(0, []byte{1})
 	observeWritten(a, 0, admissionFrame(55000, BMSStateIdle), admissionTestTime)
@@ -103,7 +103,7 @@ func TestFreshMotionOverridesStationaryVehicleState(t *testing.T) {
 	}
 }
 
-func TestStationarySecondSupplyDoesNotNeedReadyVehicleState(t *testing.T) {
+func TestStationarySecondSupplyCannotBypassVehicleState(t *testing.T) {
 	for _, state := range []VehicleState{VehicleStateReadyToDrive, VehicleStateOther, ""} {
 		t.Run(string(state), func(t *testing.T) {
 			a := samplingPolicy()
@@ -116,7 +116,10 @@ func TestStationarySecondSupplyDoesNotNeedReadyVehicleState(t *testing.T) {
 				deliverPair(t, a, at, 52001+uint(i%2))
 				feedStoppedMotion(a, at.Add(200*time.Millisecond))
 			}
-			requireAdmission(t, a, 1, admissionTestTime.Add(6200*time.Millisecond), true)
+			now := admissionTestTime.Add(6200 * time.Millisecond)
+			requireAdmission(t, a, 1, now, false)
+			a.setVehicleAt(VehicleStateParked, now)
+			requireAdmission(t, a, 1, now, true)
 		})
 	}
 }
@@ -130,7 +133,7 @@ func TestQualifiedStationaryWindowSurvivesVehicleChanges(t *testing.T) {
 			if a.sampling.pairedID != id {
 				t.Fatal("vehicle state discarded valid stationary qualification")
 			}
-			requireAdmission(t, a, 1, now, true)
+			requireAdmission(t, a, 1, now, nonDrivingVehicle(state))
 		})
 	}
 }

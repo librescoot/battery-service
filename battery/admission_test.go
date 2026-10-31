@@ -222,13 +222,13 @@ func TestAdmissionFaultedSupplyDoesNotAcceptAnotherPack(t *testing.T) {
 	requireAdmission(t, a, 0, now, true)
 }
 
-func TestAdmissionFirstSupplyPendingOnSurvivesVehicleChange(t *testing.T) {
+func TestAdmissionPendingOnWaitsForNonDriveStateOrConfirmation(t *testing.T) {
 	a := newAdmissionTestPolicy()
 	observeWritten(a, 0, admissionFrame(53000, BMSStateIdle), admissionTestTime)
 	a.observeAbsent(1, admissionTestTime)
 	requireAdmission(t, a, 0, admissionTestTime, true)
 	a.setVehicle(VehicleStateReadyToDrive)
-	requireAdmission(t, a, 0, admissionTestTime.Add(time.Second), true)
+	requireAdmission(t, a, 0, admissionTestTime.Add(time.Second), false)
 	a.observe(0, admissionFrame(53000, BMSStateActive), admissionTestTime.Add(time.Second))
 	requireAdmission(t, a, 0, admissionTestTime.Add(time.Second), true)
 }

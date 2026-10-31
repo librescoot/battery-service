@@ -61,16 +61,18 @@ window after discontinuity; it cannot continue the previous window.
 
 ## Battery admission
 
-Second-pack admission requires stationary evidence independently of experimental
-settings. Known non-drive states provide such evidence unless contradicted by a
-fresh movement/throttle report; otherwise this motion stream is required, along
-with battery-side freshness, low load, stability, voltage and reservation checks.
-The latest motion observation must be acquired at or after both complete battery
-frames, not merely delivered after them. Movement/throttle transitions discard
-old paired measurements. Motion loss blocks motion-dependent second-pack admission,
-never an established supply's heartbeat or a qualified first supply. An older ECU
-without this channel still supports first-supply and known-non-drive admission.
-The legacy `experimental.battery.dual-pack-admission-while-stopped` key is ignored.
+New activation requires a known non-drive state, for both first and second
+supplies in either slot. Stopped ECU evidence never enables a new ON or pending
+ON retry in `ready-to-drive` or an unknown state. Established supplies retain
+their heartbeat permission across state changes and motion loss.
+
+Second-pack admission additionally requires stationary evidence independently of
+experimental settings. Known non-drive states provide such evidence unless
+contradicted by a fresh movement/throttle report. Movement/throttle transitions
+discard old paired measurements. Battery-side freshness, voltage, optional
+conservative stability and reservation checks still apply. An older ECU without
+this channel supports non-drive admission. The legacy
+`experimental.battery.dual-pack-admission-while-stopped` key is ignored.
 
 The 500 ms budget needs cadence/jitter validation on each supported controller;
 no controller broadcast rate is changed by this interface.
@@ -90,5 +92,6 @@ ECU_MOTION_TEST_BINARY=/tmp/ecu-motion.test GOTOOLCHAIN=go1.25.7 \
 This launches isolated Redis on a temporary Unix socket. Kernel-timestamped Unix
 datagrams carry CAN-shaped frames through the actual receive adapter, decoder,
 JSON publisher and battery subscriber, with synthetic NFC acquisitions. The test
-checks qualification, the post-pair barrier and disconnect behavior. It opens no
+checks stationary evidence and its post-pair timing, denial of new ON in
+`ready-to-drive`, activation after returning to `parked`, and disconnect behavior. It opens no
 CAN interface and does not replace controller-specific hardware validation.
