@@ -27,7 +27,8 @@ func (*driveLatchActions) Deinitialize()                          {}
 func (*driveLatchActions) StartDiscovery() error                  { return nil }
 func (*driveLatchActions) StopDiscovery()                         {}
 func (*driveLatchActions) SelectTag()                             {}
-func (*driveLatchActions) PollForTagArrival() bool                { return false }
+func (*driveLatchActions) PollForTagArrival(context.Context) bool { return false }
+func (*driveLatchActions) FinishDiscovery()                       {}
 func (*driveLatchActions) ReadStatus() error                      { return nil }
 func (*driveLatchActions) StartHeartbeatTimer()                   {}
 func (*driveLatchActions) ClearHeartbeatTimer()                   {}

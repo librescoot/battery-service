@@ -48,13 +48,24 @@ it does not override empty-pack, voltage-difference or explicit disable decision
 
 Notification and credit-response timeouts trigger reader reinitialization after
 a two-second delay rather than publishing pack removal. Hardware errors end the
-current read retry loop immediately. Confirmed RF departure and successful detection of no tags still clear pack presence
-without waiting for that recovery. Pack fault handling is unchanged.
+current read retry loop immediately. RF deactivation and a quiet notification
+wait request rediscovery without clearing the cached battery snapshot.
 
-While waiting for a tag to return, the reader retries discovery after a
-ten-second watchdog expires, even if polling has produced no explicit error.
-Normal power-management rules still apply; recovery does not hold a permanent
-suspend inhibitor.
+A discovery search uses the existing ten-second watchdog. The PN7150 library
+separates quiet receive waits, pending notifications, available tags, RF
+deactivation and errors. At watchdog expiry, the service clears cached presence,
+identity and measurements only if polling was quiet throughout, with no error or
+ambiguous notification, and a final receive check is still quiet. Otherwise it
+retains the snapshot and retries discovery. A cancelled poll cannot update the
+next search. Failed Redis publication is retried after a subsequent quiet search.
+
+Ten seconds is the host's search/recovery budget, not a hardware guarantee of
+physical removal. PN7150 notification waits are shorter than an RF polling cycle;
+absence of one notification is not an empty-slot result. RF absence also does
+not establish electrical OFF: admission retains possible running supplies and
+unresolved power commands. No OFF command is sent by discovery cleanup.
+Pack fault handling and power-management rules are unchanged; recovery does not
+hold a permanent suspend inhibitor.
 
 ## Configuration
 

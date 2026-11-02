@@ -340,6 +340,11 @@ type Service struct {
 	motionWG           sync.WaitGroup
 }
 
+type nfcController interface {
+	hal.HAL
+	hal.DiscoveryPoller
+}
+
 // BatteryReader represents a single battery reader with its own event loop
 type BatteryReader struct {
 	// Basic configuration
@@ -352,7 +357,7 @@ type BatteryReader struct {
 	ctx        context.Context
 
 	// NFC HAL - owned exclusively by this reader's goroutine
-	hal *hal.PN7150
+	hal nfcController
 
 	// Serializes NFC operations to prevent concurrent access
 	nfcMu sync.Mutex
@@ -389,6 +394,7 @@ type BatteryReader struct {
 	initCompleteSent         bool // EvInitComplete already dispatched; suppresses duplicates
 	previousTagPresent       bool
 	tagsDiscovered           bool
+	discovery                discoveryEvidence // protected by nfcMu
 	// UID of the tag currently selected on this reader. A pack carries a tag
 	// on each side and only the one facing this slot's reader is ever seen, so
 	// the UID identifies the side as well as the pack.

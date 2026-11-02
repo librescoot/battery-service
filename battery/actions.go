@@ -1,6 +1,7 @@
 package battery
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -44,8 +45,8 @@ func (r *BatteryReader) SelectTag() {
 	}
 }
 
-func (r *BatteryReader) PollForTagArrival() bool {
-	return r.pollForTagArrival()
+func (r *BatteryReader) PollForTagArrival(ctx context.Context) bool {
+	return r.pollForTagArrival(ctx)
 }
 
 func (r *BatteryReader) Initialize() error {

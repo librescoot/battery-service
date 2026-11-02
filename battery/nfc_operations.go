@@ -2,6 +2,7 @@ package battery
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -21,6 +22,7 @@ func (r *BatteryReader) deinitializeNFC() {
 func (r *BatteryReader) startDiscovery() bool {
 	// Starting discovery invalidates any previous tag selection
 	r.tagsDiscovered = false
+	r.discovery = discoveryEvidence{}
 
 	pollPeriod := uint(DiscoveryPollFast)
 	if r.seatboxLockClosed {
@@ -80,33 +82,22 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 		return false
 	}
 
-	// Synchronous blocking wait for tag
-	tags, err := r.hal.DetectTags()
+	result, err := r.hal.PollDiscovery()
 	if err != nil {
 		r.logger.Warn(fmt.Sprintf("Failed to detect tags: %v", err))
 		r.handleNFCError(err)
 		return false
 	}
-
-	if len(tags) == 0 {
-		if a := r.packAdmission(); a != nil {
-			a.observeAbsent(r.index, time.Now())
-		}
-		r.logger.Warn("DetectTags returned no tags")
-		r.logger.Debug(fmt.Sprintf("No tags on reader %d (previousTagPresent=%v)", r.index, r.previousTagPresent))
-		// If we previously had a tag present and now detect no tags, treat as tag departure
-		if r.previousTagPresent {
-			r.previousTagPresent = false
-			r.tagsDiscovered = false
-			r.handleDeparture("no tags detected")
-			r.fsm.SendEvent(fsm.EvTagDeparted) // Always send, let FSM decide what to do
-		}
+	if result.Kind != hal.DiscoveryTags || len(result.Tags) == 0 {
+		// A receive wait is shorter than a slow RF discovery cycle. Continue
+		// discovery without treating pending work or silence as pack removal.
+		r.fsm.SendEvent(fsm.EvTagDeparted)
 		return false
 	}
 
 	r.previousTagPresent = true
 	r.tagsDiscovered = true
-	r.noteTagPresent(tags[0].ID)
+	r.noteTagPresent(result.Tags[0].ID)
 
 	return true
 }
@@ -118,31 +109,56 @@ func (r *BatteryReader) discoverBatteryTag() bool {
 // EvReinit before the FSM leaves tag_absent (a stray EvReinit in NFCReaderOff
 // would cut the reinit settle short). Transient errors are logged and polling
 // continues.
-func (r *BatteryReader) pollForTagArrival() bool {
+func (r *BatteryReader) pollForTagArrival(ctx context.Context) bool {
 	r.nfcMu.Lock()
 	defer r.nfcMu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+	result, err := r.hal.PollDiscovery()
+	if ctx.Err() != nil {
+		// The watchdog may cancel an in-flight receive before checking the
+		// completed search. Do not turn its error or late notification into
+		// silence. nfcMu prevents a new search from starting until we return.
+		if err != nil || result.Kind != hal.DiscoveryQuiet {
+			r.discovery.uncertain = true
+		}
+		return false
+	}
+	return r.processTagArrivalPoll(result, err)
+}
 
-	tags, err := r.hal.DetectTags()
+// Caller holds nfcMu; observations belong to the current discovery search.
+func (r *BatteryReader) processTagArrivalPoll(result hal.DiscoveryResult, err error) bool {
 	if err != nil {
+		r.discovery.uncertain = true
 		if isHALError(err) {
 			r.commFailureCount++
-			r.logger.Warn(fmt.Sprintf("DetectTags HAL error in tag_absent (failure %d), reinitializing: %v", r.commFailureCount, err))
+			r.logger.Warn(fmt.Sprintf("PollDiscovery HAL error in tag_absent (failure %d), reinitializing: %v", r.commFailureCount, err))
 			r.fsm.SendEvent(fsm.EvReinit)
 			return false
 		}
-		r.logger.Debug(fmt.Sprintf("DetectTags transient error in tag_absent, retrying: %v", err))
+		r.logger.Debug(fmt.Sprintf("PollDiscovery transient error in tag_absent, retrying: %v", err))
 		return true
 	}
-	if len(tags) == 0 {
+	switch result.Kind {
+	case hal.DiscoveryQuiet:
+		r.discovery.quiet = true
 		if a := r.packAdmission(); a != nil {
 			a.observeAbsent(r.index, time.Now())
 		}
-	}
-	if len(tags) > 0 {
-		r.previousTagPresent = true
-		r.tagsDiscovered = true
-		r.noteTagPresent(tags[0].ID)
-		r.fsm.SendEvent(fsm.EvTagArrived)
+	case hal.DiscoveryTags:
+		r.discovery.uncertain = true
+		if len(result.Tags) > 0 {
+			r.previousTagPresent = true
+			r.tagsDiscovered = true
+			r.noteTagPresent(result.Tags[0].ID)
+			r.fsm.SendEvent(fsm.EvTagArrived)
+		}
+	default:
+		// Partial discovery, other notifications and RF deactivation cannot
+		// establish an empty slot, even if later receive waits are quiet.
+		r.discovery.uncertain = true
 	}
 	return true
 }
@@ -462,11 +478,10 @@ func (r *BatteryReader) handleNFCError(err error) {
 	r.logger.Warn(fmt.Sprintf("Error type: isHALError=%t, isI2CError=%t, isNCIError=%t, isTransient=%t, isTagDeparted=%t",
 		isHALError(err), hal.IsI2CError(err), hal.IsNCIError(err), isTransientError(err), isTagDepartedError(err)))
 
-	// Handle tag departure - no fault, clean transition
+	// RF deactivation is loss of selection, not proof of physical removal.
 	if isTagDepartedError(err) {
-		r.previousTagPresent = false
-		r.handleDeparture("reader reported departure")
-		r.fsm.SendEvent(fsm.EvTagDeparted) // Always send, let FSM decide what to do
+		r.tagsDiscovered = false
+		r.fsm.SendEvent(fsm.EvTagDeparted)
 		return
 	}
 

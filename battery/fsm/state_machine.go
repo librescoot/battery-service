@@ -62,7 +62,8 @@ type BatteryActions interface {
 	StartDiscovery() error
 	StopDiscovery()
 	SelectTag()
-	PollForTagArrival() bool
+	PollForTagArrival(context.Context) bool
+	FinishDiscovery()
 	Initialize() error
 	Deinitialize()
 	ReadStatus() error
@@ -317,7 +318,7 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 						case <-pollCtx.Done():
 							return
 						case <-ticker.C:
-							if !d.actions.PollForTagArrival() {
+							if !d.actions.PollForTagArrival(pollCtx) {
 								return
 							}
 						}
@@ -719,7 +720,12 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 
 		// Tag Absent transitions
 		Transition(StateTagAbsent, EvReinit, StateNFCReaderOff).
-		Transition(StateTagAbsent, EvCheckReaderTimeout, StateNFCReaderOff).
+		Transition(StateTagAbsent, EvCheckReaderTimeout, StateNFCReaderOff,
+			librefsm.WithAction(func(c *librefsm.Context) error {
+				c.Data.(*fsmData).actions.FinishDiscovery()
+				return nil
+			}),
+		).
 		Transition(StateTagAbsent, EvTagArrived, StateTagPresent,
 			librefsm.WithAction(markJustInsertedAction),
 		).
