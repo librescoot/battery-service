@@ -58,8 +58,9 @@ func newDriveLatchReader(index int) (*BatteryReader, *driveLatchActions) {
 		index: index, role: BatteryRoleActive, enabled: true,
 		vehicleState: VehicleStateParked, initCompleteSent: true,
 		service: &Service{config: &ServiceConfig{}}, logger: logger,
-		restartChan: make(chan struct{}, 1),
-		data:        BMSData{Present: true, State: BMSStateActive, Charge: 80},
+		restartChan:    make(chan struct{}, 1),
+		keepActiveChan: make(chan struct{}, 1),
+		data:           BMSData{Present: true, State: BMSStateActive, Charge: 80},
 	}
 	a := &driveLatchActions{BatteryReader: r}
 	r.fsm = fsm.New(a, logger)

@@ -586,6 +586,12 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		ConditionState(StateCondJustInserted,
 			func(c *librefsm.Context) librefsm.StateID {
 				d := c.Data.(*fsmData)
+				// Restarts and close/open bounces also enter here with an
+				// established pack, without setting justInserted again.
+				if d.actions.ShouldKeepActiveOnSeatboxOpen() && !d.actions.IsInactive() {
+					d.justInserted = false
+					return StateHeartbeat
+				}
 				if d.justInserted {
 					return StateCondOff
 				}
@@ -601,12 +607,6 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 				if d.actions.IsInactive() {
 					d.justOpened = true
 					return StateSendOpened
-				}
-				// With keep-active-on-seatbox-open, a running battery skips
-				// StateSendOff (which would deactivate it) and goes to heartbeat.
-				if d.actions.ShouldKeepActiveOnSeatboxOpen() {
-					d.justInserted = false
-					return StateHeartbeat
 				}
 				return StateSendOff
 			},

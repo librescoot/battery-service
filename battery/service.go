@@ -408,25 +408,25 @@ func (s *Service) reloadUint64Setting(spec redisUint64Setting) {
 
 // ----- Setting specs -----
 
-// keepActiveOnSeatboxOpenSettingSpec keeps a running battery powered across
-// a seatbox open. Reloading deliberately restarts any mid-cycle active reader
-// so the new value takes effect at once, unlike the latch-change restart
-// suppression over in reader.go which protects a running battery from being
-// bounced through StateSendOff.
+// Keep-active changes are applied by the reader loop so enabled is updated
+// before the FSM restarts, and an unchanged effective policy keeps cycling.
 func (s *Service) keepActiveOnSeatboxOpenSettingSpec() redisBoolSetting {
 	return redisBoolSetting{
 		key:    "scooter.battery-keep-active-on-seatbox-open",
 		target: &s.config.KeepActiveOnSeatboxOpen,
 		onChange: func(_, _ bool) {
-			s.restartActiveReaders()
+			s.refreshKeepActiveReaders()
 		},
 	}
 }
 
-func (s *Service) restartActiveReaders() {
+func (s *Service) refreshKeepActiveReaders() {
 	for _, reader := range s.readers {
 		if reader != nil && reader.role == BatteryRoleActive {
-			reader.triggerRestart()
+			select {
+			case reader.keepActiveChan <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
@@ -486,10 +486,9 @@ func auxLowKeepActiveLatch(was, haveHistory bool, mv, enter, exit uint64) bool {
 // the AuxLowKeepActive override using a Schmitt-trigger over the configured
 // enter/exit thresholds. The first reading applied since start is judged by
 // auxLowKeepActiveLatch; the latch is not persisted, so that reading is what
-// establishes it. On a state change it restarts active readers so the FSM
-// walks through the wake-up sequence the same way it does when the user
-// setting is toggled. allowRestart=false suppresses the restart on startup
-// where readers have not been started yet.
+// establishes it. State changes notify active readers to reapply the effective
+// policy, just like a user setting change. allowRestart=false suppresses that
+// notification on startup, before readers have started.
 func (s *Service) recomputeAuxLowKeepActive(allowRestart bool) {
 	raw, err := s.redis.HGet(s.ctx, "aux-battery", "voltage").Result()
 	if err != nil {
@@ -525,7 +524,7 @@ func (s *Service) recomputeAuxLowKeepActive(allowRestart bool) {
 		s.logger.Info(fmt.Sprintf("aux-low keep-active disengaged (mv=%d enter=%d exit=%d first=%t)", mv, enter, exit, !haveHistory))
 	}
 	if engaged != was && allowRestart {
-		s.restartActiveReaders()
+		s.refreshKeepActiveReaders()
 	}
 }
 

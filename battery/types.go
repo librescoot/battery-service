@@ -382,6 +382,7 @@ type BatteryReader struct {
 	vehicleStateChan chan VehicleState
 	seatboxLockChan  chan bool
 	enabledChan      chan bool
+	keepActiveChan   chan struct{}
 
 	// State tracking
 	enabled                  bool

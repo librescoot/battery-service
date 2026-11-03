@@ -26,6 +26,7 @@ func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel i
 		vehicleStateChan: make(chan VehicleState, 1),
 		seatboxLockChan:  make(chan bool, 1),
 		enabledChan:      make(chan bool, 1),
+		keepActiveChan:   make(chan struct{}, 1),
 
 		data: BMSData{
 			Present: false,
@@ -143,6 +144,9 @@ func (r *BatteryReader) run() {
 
 		case enabled := <-r.enabledChan:
 			r.handleEnabledChange(enabled)
+
+		case <-r.keepActiveChan:
+			r.handleKeepActiveChange()
 		}
 	}
 }
@@ -243,6 +247,14 @@ func (r *BatteryReader) handleSeatboxLockChange(closed bool) {
 	}
 
 	r.checkInitComplete()
+}
+
+func (r *BatteryReader) handleKeepActiveChange() {
+	if r.role == BatteryRoleActive {
+		// Reapply policy on the reader loop before requesting any restart.
+		// An unchanged effective policy must not interrupt a command cycle.
+		r.handleSeatboxLockChange(r.seatboxLockClosed)
+	}
 }
 
 func (r *BatteryReader) handleEnabledChange(enabled bool) {

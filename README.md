@@ -44,6 +44,14 @@ an open seatbox resumes normal seatbox-open handling. This protection is always
 on, independently of the keep-active setting and experimental admission flags;
 it does not override empty-pack, voltage-difference or explicit disable decisions.
 
+With `scooter.battery-keep-active-on-seatbox-open` enabled or the AUX-low override
+engaged, active-role readers also preserve a running pack across an open seatbox,
+NFC heartbeat recovery, and close/open sensor changes outside `ready-to-drive`.
+Runtime changes reapply the effective policy on the reader loop before restarting
+affected readers. Changes that leave the reader enabled do not restart its cycle.
+Empty-pack and activation-admission checks still apply; inactive-role readers do
+not use keep-active.
+
 ### NFC recovery
 
 Notification and credit-response timeouts trigger reader reinitialization after
