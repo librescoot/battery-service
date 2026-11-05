@@ -144,6 +144,13 @@ func (a *packAdmission) observeAcquisition(index int, id uint64, sample acquisit
 		a.cancelRoundLocked("slow or stale acquisition")
 		return
 	}
+	peer := &a.slots[1-index]
+	if !peer.powerTracked && !peer.held && !peer.offPending {
+		// A failed storage reader must not stretch retries beyond the own
+		// data's freshness limit. This completes a read, not a paired sample.
+		a.cancelRoundLocked("single supply acquired")
+		return a.hasInactiveCandidateLocked()
+	}
 	other := r.samples[1-index]
 	if other.complete.IsZero() {
 		return

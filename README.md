@@ -174,7 +174,11 @@ Inactive-role readers remain sampled so disabling a slot cannot hide a live
 supply or discard an outstanding OFF command. Even an unconfirmed ACTIVE frame
 ends the storage-only exemption. A storage pack with unreadable or zero status
 data still reports its communication fault; this exemption does not fabricate
-battery data or authorize ON for that pack.
+battery data or authorize ON for that pack. A successful eligible-pack acquisition
+completes the sampling round without waiting for a storage-only reader. This keeps
+activation retries within the 10-second freshness limit even if that reader cannot
+initialize. Foreground drive-start demand also receives an immediate retry signal;
+no paired acquisition is claimed without both readings.
 
 A changed tag UID or a changed nonempty pack serial invalidates measurement
 confirmation and the previous pack's ON permission. The serial identity survives
