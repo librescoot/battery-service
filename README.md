@@ -113,8 +113,12 @@ setting is false, missing or unreadable. The flag enables higher-voltage selecti
 confirmed-OFF handovers and conservative qualification in known non-drive states.
 It cannot disable the voltage or stationary-second-pack guards. The operating modes are:
 
-- Single battery: slot 0 is eligible; slot 1 is commanded off. Its possible
-  live-supply state is still tracked until OFF is confirmed.
+- Single battery: slot 0 is eligible; slot 1 is commanded off. A reader that
+  has never been eligible or reported ACTIVE is used only for storage-pack
+  monitoring. Missing data from that reader does not block slot 0. Once a
+  reader has been eligible or reported ACTIVE, it remains part of the power
+  checks for the service lifetime, including after role or tag changes.
+  Possible live supplies and pending OFF commands still require confirmation.
 - Ordinary dual battery: slot 0 starts first when both packs are inactive.
   A compatible second pack can join; a mismatched incoming pack stays off in
   either insertion order without displacing the running supply.
@@ -167,7 +171,10 @@ Conservative qualification also requires the voltage difference to stay within
 `scooter.max-voltage-delta` minus 10% (capped at 100 mV). The baseline accepts the
 configured limit itself. A limit of 0 disables only the voltage check.
 Inactive-role readers remain sampled so disabling a slot cannot hide a live
-supply or discard an outstanding OFF command.
+supply or discard an outstanding OFF command. Even an unconfirmed ACTIVE frame
+ends the storage-only exemption. A storage pack with unreadable or zero status
+data still reports its communication fault; this exemption does not fabricate
+battery data or authorize ON for that pack.
 
 A changed tag UID or a changed nonempty pack serial invalidates measurement
 confirmation and the previous pack's ON permission. The serial identity survives

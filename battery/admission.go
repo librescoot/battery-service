@@ -23,8 +23,11 @@ type admissionSample struct {
 }
 
 type admissionSlot struct {
-	monitored     bool
-	eligible      bool
+	monitored bool
+	eligible  bool
+	// Retain power tracking across role and identity changes. A storage-only
+	// reader must not gate ON until enabled or observed reporting ACTIVE.
+	powerTracked  bool
 	uid           string
 	serial        string
 	absent        bool
@@ -50,7 +53,7 @@ type admissionSlot struct {
 }
 
 func (s *admissionSlot) replaceIdentity(uid string) {
-	*s = admissionSlot{monitored: s.monitored, eligible: s.eligible, uid: uid,
+	*s = admissionSlot{monitored: s.monitored, eligible: s.eligible, powerTracked: s.powerTracked, uid: uid,
 		held: s.held, onAt: s.onAt, lastOnAt: s.lastOnAt, offPending: s.offPending, offAt: s.offAt,
 		identityUncertain: s.held, requiresAdmission: s.requiresAdmission || s.uid != "" || s.serial != "" || s.haveFrame}
 }
@@ -90,6 +93,7 @@ func (a *packAdmission) setRole(index int, eligible bool) {
 	defer a.mu.Unlock()
 	a.cancelRoundLocked("role changed")
 	a.slots[index].eligible = eligible
+	a.slots[index].powerTracked = a.slots[index].powerTracked || eligible
 	if a.slots[0].eligible && a.slots[1].eligible {
 		a.coordinated = true
 	}
@@ -212,6 +216,11 @@ func (a *packAdmission) observe(index int, data BMSData, now time.Time) {
 
 func (a *packAdmission) observeLocked(index int, data BMSData, now time.Time) {
 	s := &a.slots[index]
+	// Even an unconfirmed ACTIVE frame prevents treating this reader as
+	// storage-only; missing data afterwards cannot establish electrical OFF.
+	if data.State == BMSStateActive {
+		s.powerTracked = true
+	}
 	if s.serial != "" && data.SerialNumber != "" && s.serial != data.SerialNumber {
 		a.cancelRoundLocked("pack identity changed")
 		s.replaceIdentity(s.uid)
@@ -358,7 +367,7 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 	if !s.usable() {
 		return false, "pack empty or faulted"
 	}
-	if peer.monitored {
+	if peer.monitored && (peer.powerTracked || peer.held || peer.offPending) {
 		absent := peer.absent && now.Sub(peer.observed) <= admissionMaxAge
 		if !absent && !peer.fresh(now) {
 			return false, "waiting for fresh peer data"
