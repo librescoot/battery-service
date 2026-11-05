@@ -42,6 +42,7 @@ var faultConfigs = map[BMSFault]FaultConfig{
 	BMSFaultBMSZeroData:        {BMSFaultBMSZeroData, "Battery data unavailable", 0, 0, true},
 	BMSFaultBMSCommsError:      {BMSFaultBMSCommsError, "Battery communication failed", 5 * time.Second, 10 * time.Second, true},
 	BMSFaultNFCReaderError:     {BMSFaultNFCReaderError, "NFC reader malfunction", 30 * time.Second, 0, true},
+	BMSFaultUnexpectedPowerOff: {BMSFaultUnexpectedPowerOff, "Battery switched off unexpectedly", 0, 0, false},
 }
 
 func (r *BatteryReader) initializeFaultManagement() {
@@ -191,6 +192,37 @@ func (r *BatteryReader) clearNFCReaderError() {
 	r.setFault(BMSFaultNFCReaderError, false)
 }
 
+// observePowerState runs only after a complete, artifact-free NFC acquisition.
+// Detect the loss before admission consumes the new idle state and requalifies it.
+func (r *BatteryReader) observePowerState() {
+	if !r.data.Present || !r.data.SampleValid {
+		return
+	}
+	if r.data.State != BMSStateActive && r.data.State != BMSStateIdle && r.data.State != BMSStateAsleep {
+		return
+	}
+	previous := r.powerSample
+	expectedOn := r.role == BatteryRoleActive && r.ShouldSendOn()
+	r.powerSample = BMSData{}
+	if expectedOn {
+		r.powerSample = r.data
+	}
+	if r.data.State == BMSStateActive {
+		r.setFault(BMSFaultUnexpectedPowerOff, false)
+		return
+	}
+	if previous.State != BMSStateActive || previous.SerialNumber != r.data.SerialNumber ||
+		!expectedOn {
+		return
+	}
+	r.logger.Error("Battery switched off unexpectedly",
+		"previous_state", previous.State, "state", r.data.State,
+		"voltage_mv", r.data.Voltage, "current_ma", r.data.Current,
+		"charge", r.data.Charge, "bms_fault_code", r.data.FaultCode,
+		"serial", r.data.SerialNumber, "vehicle", r.vehicleState)
+	r.setFault(BMSFaultUnexpectedPowerOff, true)
+}
+
 func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present bool) {
 	batteryName := fmt.Sprintf("battery:%d", r.index)
 	faultSetKey := fmt.Sprintf("battery:%d:fault", r.index)
@@ -200,14 +232,22 @@ func (r *BatteryReader) reportFault(fault BMSFault, config FaultConfig, present 
 			r.logger.Warn(fmt.Sprintf("Failed to add fault to set: %v", err))
 		}
 
+		values := map[string]any{
+			"group": batteryName, "code": fmt.Sprintf("%d", fault), "description": config.Description,
+		}
+		if fault == BMSFaultUnexpectedPowerOff {
+			values["state"] = r.data.State.String()
+			values["voltage-mv"] = r.data.Voltage
+			values["current-ma"] = r.data.Current
+			values["charge"] = r.data.Charge
+			values["bms-fault-code"] = r.data.FaultCode
+			values["serial-number"] = r.data.SerialNumber
+			values["vehicle-state"] = string(r.vehicleState)
+		}
 		if err := r.service.redis.XAdd(r.ctx, &redis.XAddArgs{
 			Stream: "events:faults",
 			MaxLen: 1000,
-			Values: map[string]any{
-				"group":       batteryName,
-				"code":        fmt.Sprintf("%d", fault),
-				"description": config.Description,
-			},
+			Values: values,
 		}).Err(); err != nil {
 			r.logger.Warn(fmt.Sprintf("Failed to add fault event to stream: %v", err))
 		}

@@ -356,6 +356,8 @@ func (r *BatteryReader) handleDeparture(reason string) {
 	r.fresh.stopTimer()
 	r.fresh = tagFreshness{}
 	r.data = BMSData{Present: false}
+	r.powerSample = BMSData{}
+	r.setFault(BMSFaultUnexpectedPowerOff, false)
 
 	// The pack is gone, so clear every pack-reported fault below the
 	// reader-error fault, whether already active (remove it from Redis) or

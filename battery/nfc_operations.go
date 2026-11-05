@@ -179,6 +179,7 @@ func (r *BatteryReader) noteTagPresent(uid []byte) {
 	if a := r.packAdmission(); a != nil {
 		a.tag(r.index, uid)
 	}
+	r.powerSample = BMSData{}
 	r.currentTagUID = append([]byte(nil), uid...)
 	r.logger.Info(fmt.Sprintf("Tag arrived: UID=%X", uid))
 
@@ -343,6 +344,7 @@ func (r *BatteryReader) readStatusLocked() (bool, bool) {
 	admissionSampleOK = len(status0) >= 16 && len(status1) >= 16 && len(status2) >= 16 && artifacts == r.sensors01Artifacts
 	r.data.SampleTime = status0Start
 	r.data.SampleValid = admissionSampleOK
+	r.observePowerState()
 	if a := r.packAdmission(); a != nil && admissionSampleOK {
 		if a.observeAcquisition(r.index, roundID, acquisition{
 			start: status0Start, end: status0End, complete: time.Now(), data: r.data,
@@ -405,6 +407,9 @@ func (r *BatteryReader) writeCommand(cmd fsm.BMSCommand, correctiveOff bool) err
 		}
 		err := r.hal.WriteBinary(0x0330, cmdBytes)
 		if err == nil {
+			if cmd == fsm.BMSCmdOff {
+				r.powerSample = BMSData{}
+			}
 			r.updateLastCmdTime()
 			r.commFailureCount = 0
 			r.lastSuccessfulComm = time.Now()

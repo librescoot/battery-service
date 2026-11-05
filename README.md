@@ -33,8 +33,20 @@ original timestamp; an absent acquisition is `0`/`false`. Consumers must also
 check age and identity. This metadata does not change NFC polling or activation.
 
 Active pack faults are held in `battery:<index>:fault`; fault events are also
-appended to `events:faults` with the corresponding battery group. The service
-subscribes to `vehicle`, `settings`, and `aux-battery`. Vehicle `state` and
+appended to `events:faults` with the corresponding battery group.
+
+Software fault **B36**, "Battery switched off unexpectedly", records a complete,
+artifact-free acquisition changing from `active` to `idle` or `asleep` for the
+same pack while its active-role reader still requests ON. It is independent of
+the BMS's `fault-code`, which can remain zero. Successful OFF writes, tag changes,
+inactive roles, disabled readers and empty-pack shutdowns do not trigger it.
+The event includes state, voltage, signed reported current, charge, BMS fault
+code, serial number and vehicle state. It does not identify a protection cause.
+Repeated inactive readings do not duplicate the event. A valid `active` reading
+or confirmed pack departure clears the active fault; history remains in the
+bounded stream. The fault does not mark the pack absent or change power policy.
+
+The service subscribes to `vehicle`, `settings`, and `aux-battery`. Vehicle `state` and
 `seatbox:lock` changes control reader behavior.
 
 A closed seatbox is latched while the vehicle is `ready-to-drive`. Opening the

@@ -190,6 +190,7 @@ const (
 	BMSFaultBMSZeroData        BMSFault = 33
 	BMSFaultBMSCommsError      BMSFault = 34
 	BMSFaultNFCReaderError     BMSFault = 35
+	BMSFaultUnexpectedPowerOff BMSFault = 36
 
 	BMSFaultNum BMSFault = 64
 )
@@ -369,6 +370,7 @@ type BatteryReader struct {
 	data           BMSData
 	previousData   BMSData
 	previousFields map[string]any
+	powerSample    BMSData // last valid acquisition since tag change or successful OFF
 
 	// Event loop control
 	stopChan    chan struct{}
