@@ -21,7 +21,7 @@ func TestHardwareDiscoveryObservations(t *testing.T) {
 		t.Fatal("NFC_HARDWARE_TEST_EXPECTED must be present or absent")
 	}
 	r, published := absenceReader(t, 1)
-	controller, err := hal.NewPN7150(device, func(level hal.LogLevel, message string) { t.Logf("NCI level=%d %s", level, message) }, nil, true, false, true)
+	controller, err := hal.NewPN7150(device, func(level hal.LogLevel, message string) { t.Logf("NCI level=%d %s", level, message) }, nil, true, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -42,7 +42,7 @@ func NewBatteryReader(index int, role BatteryRole, deviceName string, logLevel i
 	reader.logger = slog.New(NewFSMHandler(service.stdLogger.Writer(), LogLevel(logLevel), index))
 
 	var err error
-	reader.hal, err = hal.NewPN7150(deviceName, reader.makeLogCallback(), nil, true, false, service.debug)
+	reader.hal, err = hal.NewPN7150(deviceName, reader.makeLogCallback(), nil, true, true, service.debug)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create NFC HAL for reader %d: %v", index, err)
 	}
