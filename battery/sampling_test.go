@@ -353,3 +353,23 @@ func TestSamplingExpiredClaimAndFailureDiagnostics(t *testing.T) {
 		t.Fatalf("failure diagnostics=%+v", report)
 	}
 }
+
+// deliverForcedPair reads both packs in a round opened regardless of whether the
+// scheduler would open one, to exercise the admission gate on its own.
+func deliverForcedPair(t *testing.T, a *packAdmission, now time.Time, voltage uint) {
+	t.Helper()
+	a.mu.Lock()
+	a.sampling.next++
+	id := a.sampling.next
+	a.sampling.round = &samplingRound{id: id, opened: now}
+	a.mu.Unlock()
+	for i := 0; i < 2; i++ {
+		if a.claimRound(i, now) != id {
+			t.Fatal("claim failed")
+		}
+		a.observeAcquisition(i, id, roundSample(i, now, now.Add(100*time.Millisecond), now.Add(200*time.Millisecond), voltage))
+	}
+	if a.sampling.pairedID != id {
+		t.Fatalf("round failed: %+v", a.sampling.report)
+	}
+}

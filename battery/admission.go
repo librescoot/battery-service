@@ -349,8 +349,13 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 		return false, "service shutting down"
 	}
 	// An uncertain or pending peer still counts as possible parallel power.
-	if !nonDrivingVehicle(a.vehicle) && (a.vehicle != VehicleStateReadyToDrive || peer.held || peer.offPending) {
-		return false, "waiting for non-drive vehicle state"
+	if !nonDrivingVehicle(a.vehicle) {
+		if a.vehicle != VehicleStateReadyToDrive {
+			return false, "waiting for non-drive vehicle state"
+		}
+		if (peer.held || peer.offPending) && !a.stationaryLocked(now) {
+			return false, "waiting for stand-still"
+		}
 	}
 	if s.held && !s.active {
 		if now.Sub(s.onAt) > admissionOnSettle {
@@ -369,7 +374,7 @@ func (a *packAdmission) requestOn(index int, now time.Time, maxDelta uint64) (al
 			return false, "waiting for fresh peer data"
 		}
 		if peer.held {
-			if !a.secondPackStationaryLocked(now) {
+			if !a.stationaryLocked(now) {
 				return false, "waiting for stationary second-pack qualification"
 			}
 			if !nonDrivingVehicle(a.vehicle) && peer.requiresAdmission {
@@ -504,21 +509,28 @@ func (a *packAdmission) decisionOpenLocked(now time.Time) bool {
 // until an event invalidates it. Conservative qualification needs several
 // paired samples and keeps sampling until the pack joins.
 func (a *packAdmission) candidateWantsRoundLocked(now time.Time) bool {
+	wants, _ := a.candidateStateLocked(now)
+	return wants
+}
+
+// candidateStateLocked reports whether an idle pack wants a round now, and
+// whether it would except that the vehicle has not stood still long enough.
+func (a *packAdmission) candidateStateLocked(now time.Time) (wants, needsStill bool) {
 	for i := range a.slots {
 		c, peer := &a.slots[i], &a.slots[1-i]
 		if !c.eligible || c.absent || c.held || c.offPending || c.active || a.sampling.stopped {
 			continue
 		}
 		if !c.valid || !c.haveFrame {
-			return true
+			return true, needsStill
 		}
 		if !peer.held || !peer.active || !peer.haveFrame {
 			// First supply: nothing is running yet.
-			return true
+			return true, needsStill
 		}
 		if a.conservative && c.frame.Voltage > peer.frame.Voltage {
 			// Experimental selection can hand the supply to a higher-voltage pack.
-			return true
+			return true, needsStill
 		}
 		limit := uint64(DefaultMaxVoltageDeltaMV)
 		if a.maxDelta != nil {
@@ -527,17 +539,18 @@ func (a *packAdmission) candidateWantsRoundLocked(now time.Time) bool {
 		if limit != 0 && voltageDistance(peer.frame.Voltage, c.frame.Voltage) > limit {
 			continue
 		}
-		// A second supply is read once the vehicle has stood still for a moment.
-		if now.Sub(a.vehicleSince) < admissionStillTime {
+		// One reading decides, once the vehicle has stood still for a moment. A
+		// pack that was read and still did not join (load, fault, a pending
+		// command) is looked at again later.
+		if a.sampling.pairedID != 0 && now.Sub(a.sampling.pairedAt) < admissionRetryInterval {
 			continue
 		}
-		// One reading decides. A pack that was read and still did not join
-		// (load, fault, a pending command) is looked at again later.
-		if a.sampling.pairedID == 0 || now.Sub(a.sampling.pairedAt) >= admissionRetryInterval {
-			return true
+		if a.stationaryLocked(now) {
+			return true, needsStill
 		}
+		needsStill = true
 	}
-	return false
+	return false, needsStill
 }
 
 func (a *packAdmission) needsPollLocked(now time.Time) bool {

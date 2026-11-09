@@ -52,6 +52,9 @@ func (s *Service) pollAdmission(demanded bool) {
 		return
 	}
 	now := time.Now()
+	if s.admission.wantsStandstillSample(now) {
+		s.sampleECUMotion(now)
+	}
 	s.logAdmissionDiagnostics(now)
 	id, report := s.admission.beginRound(now)
 	s.logSamplingReport(report)

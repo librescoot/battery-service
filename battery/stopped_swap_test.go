@@ -32,30 +32,21 @@ func stoppedSwapPolicy(t *testing.T, strict, stopped bool, keep string, target i
 	}
 	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	now := admissionTestTime.Add(time.Second)
-	a.observeMotion(true, now.Add(-100*time.Millisecond), now.Add(-100*time.Millisecond))
-	window := func(start time.Time, checkEarly bool) time.Time {
+	// One reading of both packs, after the ECU has reported standstill. The
+	// evidence is withdrawn again so callers see the drive-state gate.
+	window := func(start time.Time, _ bool) time.Time {
 		t.Helper()
-		var end time.Time
-		for tick := 0; tick < 3; tick++ {
-			at := start.Add(time.Duration(tick) * admissionPollInterval)
-			feedStoppedMotion(a, at)
-			a.sampling.pairedID = 0
-			id, _ := a.beginRound(at)
-			for i := range frames {
-				if id == 0 || a.claimRound(i, at) != id {
-					t.Fatal("pair not claimed")
-				}
-				data := frames[i]
-				data.Voltage += uint(tick % 2)
-				a.observeAcquisition(i, id, acquisition{start: at, end: at.Add(100 * time.Millisecond), complete: at.Add(200 * time.Millisecond), data: data})
+		standstillBefore(a, start, 2*admissionStillTime)
+		a.sampling.pairedID = 0
+		id, _ := a.beginRound(start)
+		for i := range frames {
+			if id == 0 || a.claimRound(i, start) != id {
+				t.Fatal("pair not claimed")
 			}
-			end = at.Add(200 * time.Millisecond)
-			feedStoppedMotion(a, end)
-			if checkEarly && tick < 2 {
-				requireAdmission(t, a, target, end, false)
-			}
+			a.observeAcquisition(i, id, acquisition{start: start, end: start.Add(100 * time.Millisecond), complete: start.Add(200 * time.Millisecond), data: frames[i]})
 		}
-		return end
+		a.invalidateMotion()
+		return start.Add(200 * time.Millisecond)
 	}
 	now = window(now, false)
 	a.setSeatbox(false)
@@ -77,6 +68,8 @@ func stoppedSwapPolicy(t *testing.T, strict, stopped bool, keep string, target i
 	a.setSeatbox(true)
 	requireAdmission(t, a, target, now, false)
 	now = window(now.Add(time.Second), true)
+	// No standstill evidence is left for the callers' drive-state checks.
+	a.invalidateMotion()
 	return a, now
 }
 

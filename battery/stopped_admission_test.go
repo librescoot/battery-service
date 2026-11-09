@@ -10,6 +10,10 @@ import (
 const stoppedAdmissionSetting = "experimental.battery.dual-pack-admission-while-stopped"
 
 func feedStoppedMotion(a *packAdmission, until time.Time) {
+	if a.motion.at.IsZero() {
+		a.observeMotion(true, until, until)
+		return
+	}
 	for at := a.motion.at.Add(100 * time.Millisecond); !at.After(until); at = at.Add(100 * time.Millisecond) {
 		a.observeMotion(true, at, at)
 	}
@@ -18,12 +22,18 @@ func feedStoppedMotion(a *packAdmission, until time.Time) {
 	}
 }
 
+// standstillBefore reports the ECU stopped every 100 ms for d up to end.
+func standstillBefore(a *packAdmission, end time.Time, d time.Duration) {
+	for at := end.Add(-d); !at.After(end); at = at.Add(100 * time.Millisecond) {
+		a.observeMotion(true, at, at)
+	}
+}
+
 func readyStoppedPolicy(t *testing.T) (*packAdmission, time.Time) {
 	t.Helper()
 	a := samplingPolicy()
 	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
-	at := admissionTestTime.Add(-100 * time.Millisecond)
-	a.observeMotion(true, at, at)
+	standstillBefore(a, admissionTestTime, 2*admissionStillTime)
 	for i := 0; i < 3; i++ {
 		start := admissionTestTime.Add(time.Duration(i) * admissionPollInterval)
 		feedStoppedMotion(a, start)
@@ -33,10 +43,8 @@ func readyStoppedPolicy(t *testing.T) (*packAdmission, time.Time) {
 	return a, admissionTestTime.Add(6200 * time.Millisecond)
 }
 
-func TestStoppedAdmissionWaitsForParkedWithFreshQualifiedPair(t *testing.T) {
+func TestReadyToDriveAdmitsSecondPackAfterStandstill(t *testing.T) {
 	a, now := readyStoppedPolicy(t)
-	requireAdmission(t, a, 1, now, false)
-	now = requalifyAfterParking(t, a, now)
 	requireAdmission(t, a, 1, now, true)
 	if !a.slots[1].held || a.slots[1].active {
 		t.Fatal("ON was not reserved pending confirmation")
@@ -49,6 +57,27 @@ func TestStoppedAdmissionWaitsForParkedWithFreshQualifiedPair(t *testing.T) {
 	}
 }
 
+func TestReadyToDriveNeedsFiveSecondsOfStandstill(t *testing.T) {
+	for _, d := range []time.Duration{admissionStillTime - 100*time.Millisecond, admissionStillTime} {
+		a := samplingPolicy()
+		a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
+		a.maxDelta = nil
+		start := admissionTestTime.Add(-d)
+		for at := start; !at.After(admissionTestTime); at = at.Add(100 * time.Millisecond) {
+			a.observeMotion(true, at, at)
+		}
+		if d < admissionStillTime {
+			if id, _ := a.beginRound(admissionTestTime); id != 0 {
+				t.Fatalf("round opened after only %v of standstill", d)
+			}
+			requireAdmission(t, a, 1, admissionTestTime, false)
+			continue
+		}
+		deliverPair(t, a, admissionTestTime, 52001)
+		requireAdmission(t, a, 1, admissionTestTime.Add(200*time.Millisecond), true)
+	}
+}
+
 func TestStoppedSettingDoesNotRequireMotionForParkedAdmission(t *testing.T) {
 	a := samplingPolicy()
 	for i := 0; i < 3; i++ {
@@ -57,32 +86,24 @@ func TestStoppedSettingDoesNotRequireMotionForParkedAdmission(t *testing.T) {
 	requireAdmission(t, a, 1, admissionTestTime.Add(6200*time.Millisecond), true)
 }
 
-func TestDriveStateRejectsNewSupplyAcrossEvidenceFailures(t *testing.T) {
+func TestReadyToDriveRejectsSecondPackWithoutCompleteEvidence(t *testing.T) {
 	for _, scenario := range []string{
-		"qualified", "disabled", "no motion", "throttle or movement", "post-read motion missing", "motion gap", "motion stale", "future motion",
-		"out of order", "no pair", "mixed round", "stale pack", "high load", "voltage mismatch",
+		"no motion", "throttle or movement", "motion stale", "future motion",
+		"no pair", "mixed round", "stale pack", "high load", "voltage mismatch",
 		"no running peer", "peer OFF", "own OFF", "inactive role", "shutdown",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			a, now := readyStoppedPolicy(t)
 			switch scenario {
-			case "disabled":
 			case "no motion":
 				a.invalidateMotion()
 			case "throttle or movement":
 				a.observeMotion(false, now.Add(time.Millisecond), now.Add(time.Millisecond))
 				now = now.Add(time.Millisecond)
-			case "post-read motion missing":
-				a.motion.at = now.Add(-time.Millisecond)
-			case "motion gap":
-				now = now.Add(stoppedMotionMaxAge + time.Nanosecond)
-				a.observeMotion(true, now, now)
 			case "motion stale":
-				now = now.Add(stoppedMotionMaxAge + time.Nanosecond)
+				now = now.Add(ecuSampleMaxAge + time.Nanosecond)
 			case "future motion":
 				a.observeMotion(true, now.Add(time.Second), now)
-			case "out of order":
-				a.observeMotion(true, now.Add(-time.Millisecond), now)
 			case "no pair":
 				a.sampling.pairedID = 0
 			case "mixed round":

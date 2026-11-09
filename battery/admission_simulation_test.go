@@ -316,8 +316,8 @@ func TestSimulationConvergenceAndStoppedQualification(t *testing.T) {
 				}
 			}
 			s.run(9)
-			if s.pack[1].State == BMSStateActive {
-				s.fail("second pack joined in ready-to-drive despite state gate")
+			if joined := s.pack[1].State == BMSStateActive; joined != stoppedGate {
+				s.fail("second pack joined=%t in ready-to-drive with stoppedGate=%t", joined, stoppedGate)
 			}
 			s.a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 			s.run(9)

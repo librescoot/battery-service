@@ -187,3 +187,35 @@ func TestUnadmittedIdlePackIsReadAgainAfterTheRetryInterval(t *testing.T) {
 	requireBeginRound(t, a, now.Add(admissionRetryInterval-time.Second), false)
 	requireBeginRound(t, a, now.Add(admissionRetryInterval+time.Second), true)
 }
+
+// In ready-to-drive the ECU is only sampled while an idle pack within reach is
+// waiting for standstill; once standstill holds, the round runs instead.
+func TestReadyToDriveSamplesTheECUOnlyWhileWaitingForStandstill(t *testing.T) {
+	a := runningPair(t)
+	a.conservative = false
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
+	a.slots[1].held, a.slots[1].active = false, false
+	a.slots[1].frame.State = BMSStateIdle
+	now := admissionTestTime.Add(time.Second)
+	if !a.wantsStandstillSample(now) {
+		t.Fatal("idle pack within reach did not ask for a standstill sample")
+	}
+	requireBeginRound(t, a, now, false)
+	standstillBefore(a, now, 2*admissionStillTime)
+	if a.wantsStandstillSample(now) {
+		t.Fatal("sampling continued after standstill was established")
+	}
+	requireBeginRound(t, a, now, true)
+
+	far := runningPair(t)
+	far.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
+	far.slots[1].held, far.slots[1].active = false, false
+	far.slots[1].frame.Voltage = 40000
+	if far.wantsStandstillSample(now) {
+		t.Fatal("pack far out of reach caused ECU sampling")
+	}
+	a.setVehicleAt(VehicleStateParked, now)
+	if a.wantsStandstillSample(now) {
+		t.Fatal("non-drive state asked for ECU sampling")
+	}
+}

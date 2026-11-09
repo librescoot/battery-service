@@ -102,20 +102,28 @@ func TestFreshMotionOverridesStationaryVehicleState(t *testing.T) {
 	}
 }
 
-func TestStationarySecondSupplyCannotBypassVehicleState(t *testing.T) {
+// Only ready-to-drive can admit a second supply outside the non-drive states,
+// and only after the ECU has reported standstill; other states never do.
+func TestSecondSupplyOutsideNonDriveStatesNeedsReadyToDriveStandstill(t *testing.T) {
 	for _, state := range []VehicleState{VehicleStateReadyToDrive, VehicleStateOther, ""} {
 		t.Run(string(state), func(t *testing.T) {
 			a := samplingPolicy()
 			a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
-			a.observeMotion(true, admissionTestTime.Add(-time.Millisecond), admissionTestTime.Add(-time.Millisecond))
-			for i := 0; i < 3; i++ {
-				at := admissionTestTime.Add(time.Duration(i) * admissionPollInterval)
-				feedStoppedMotion(a, at)
-				deliverPair(t, a, at, 52001+uint(i%2))
-				feedStoppedMotion(a, at.Add(200*time.Millisecond))
-			}
+			standstillBefore(a, admissionTestTime.Add(6*time.Second), 2*admissionStillTime)
+			deliverForcedPair(t, a, admissionTestTime.Add(6*time.Second), 52001)
 			now := admissionTestTime.Add(6200 * time.Millisecond)
-			requireAdmission(t, a, 1, now, false)
+			requireAdmission(t, a, 1, now, state == VehicleStateReadyToDrive)
+		})
+	}
+}
+
+func TestParkingRequalifiesAfterStandstillInOtherStates(t *testing.T) {
+	for _, state := range []VehicleState{VehicleStateOther, ""} {
+		t.Run(string(state), func(t *testing.T) {
+			a := samplingPolicy()
+			a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
+			deliverForcedPair(t, a, admissionTestTime, 52001)
+			now := admissionTestTime.Add(time.Second)
 			a.setVehicleAt(VehicleStateParked, now)
 			requireAdmission(t, a, 1, now, false)
 			now = requalifyAfterParking(t, a, now)
