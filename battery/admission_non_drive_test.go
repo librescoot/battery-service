@@ -20,7 +20,8 @@ func TestDriveStateGateAtReaderCommandBoundary(t *testing.T) {
 			if !r.ShouldSendOn() || !r.CheckStateCorrect() {
 				t.Fatal("state denial selected OFF or mismatch recovery")
 			}
-			a.setVehicleAt(VehicleStateParked, now)
+			now = requalifyAfterParking(t, a, now)
+			r.data = a.slots[target].frame
 			if !r.admitCommand(fsm.BMSCmdOn, now) {
 				t.Fatal("reader did not admit qualified pack after parking")
 			}
@@ -67,7 +68,11 @@ func TestOnlyAdditionalSupplyWaitsForParked(t *testing.T) {
 							if a.slots[target].held != !second {
 								t.Fatal("unexpected ON reservation for first/additional supply")
 							}
-							a.setVehicleAt(VehicleStateParked, now)
+							if second {
+								now = requalifyAfterParking(t, a, now)
+							} else {
+								a.setVehicleAt(VehicleStateParked, now)
+							}
 							requireAdmission(t, a, target, now, true)
 							// Only the sole supply can retry an unconfirmed ON in drive.
 							a.setVehicleAt(VehicleStateReadyToDrive, now)

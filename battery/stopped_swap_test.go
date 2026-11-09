@@ -17,9 +17,6 @@ func stoppedSwapPolicy(t *testing.T, strict, stopped bool, keep string, target i
 	s.config.AuxLowKeepActive.Store(keep == "aux")
 	s.loadAdmissionSetting()
 	a := s.admission
-	if !a.motion.enabled {
-		t.Fatal("incorrect combined experimental settings")
-	}
 	a.setVehicle(VehicleStateParked)
 	a.setSeatbox(true)
 	var frames [2]BMSData
@@ -93,6 +90,8 @@ func TestStoppedSwapSettingsMatrix(t *testing.T) {
 							requireAdmission(t, a, target, now, false)
 							requireAdmission(t, a, 1-target, now, true)
 							a.setVehicleAt(VehicleStateParked, now)
+							requireAdmission(t, a, target, now, false)
+							now = requalifyAfterParking(t, a, now)
 							requireAdmission(t, a, target, now, true)
 							requireAdmission(t, a, 1-target, now, true)
 						})
@@ -151,4 +150,32 @@ func TestStoppedSwapKeepActiveCannotBypassEvidence(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Qualification gathered in a drive state does not carry over to parking: the
+// vehicle change discards it and a fresh paired window must be read.
+func requalifyAfterParking(t *testing.T, a *packAdmission, now time.Time) time.Time {
+	t.Helper()
+	a.setVehicleAt(VehicleStateParked, now)
+	for i := range a.slots {
+		if a.slots[i].history != nil {
+			t.Fatal("vehicle change kept pre-park measurements")
+		}
+	}
+	frames := [2]BMSData{a.slots[0].frame, a.slots[1].frame}
+	var end time.Time
+	for tick := 0; tick < 3; tick++ {
+		at := now.Add(time.Duration(tick+1) * admissionPollInterval)
+		id, _ := a.beginRound(at)
+		for i := range frames {
+			if id == 0 || a.claimRound(i, at) != id {
+				t.Fatal("fresh pair not claimed after parking")
+			}
+			data := frames[i]
+			data.Voltage += uint(tick % 2)
+			a.observeAcquisition(i, id, acquisition{start: at, end: at.Add(100 * time.Millisecond), complete: at.Add(200 * time.Millisecond), data: data})
+		}
+		end = at.Add(200 * time.Millisecond)
+	}
+	return end
 }

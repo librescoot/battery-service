@@ -12,7 +12,6 @@ func TestFirstSupplyAtReaderBoundaryInRTD(t *testing.T) {
 		for _, moving := range []bool{false, true} {
 			t.Run(fmt.Sprintf("slot%d/moving=%t", slot, moving), func(t *testing.T) {
 				a := newAdmissionTestPolicy()
-				a.motion.enabled = true
 				a.setVehicle(VehicleStateReadyToDrive)
 				a.tag(slot, []byte{byte(slot + 1)})
 				data := admissionFrame(55000, BMSStateIdle)

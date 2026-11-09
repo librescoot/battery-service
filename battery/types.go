@@ -338,7 +338,6 @@ type Service struct {
 	admissionRequests  chan struct{}
 	admissionReady     chan struct{}
 	driveStartDeadline atomic.Pointer[time.Time]
-	motionWG           sync.WaitGroup
 }
 
 type nfcController interface {

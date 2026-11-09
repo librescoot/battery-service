@@ -160,7 +160,12 @@ The shared rules are:
 
 Admission uses complete NFC reads acquired within the last 10 seconds, after
 one-time confirmation of the selected tag, not cached Redis voltage. Missing, stale, truncated or substituted data cannot
-admit a pack. Background sampling rounds prompt both reader FSMs every 3 seconds.
+admit a pack. While a decision is open, sampling rounds prompt both reader FSMs
+every 3 seconds. A decision is open while a pack is inactive and eligible, an OFF
+command or isolation is pending, a pack awaits (re)qualification, or two running
+packs have not yet been paired since the last tag, role, vehicle-state or OFF
+event. Two running, paired packs and a single pack are not sampled in between;
+their regular heartbeats continue.
 A `vehicle[drive-start-status]` value of `waiting-battery` requests an immediate
 round instead of waiting for that tick. Requests coalesce with an in-progress
 round and remain pending through BMS commands and their settling delays. Newly
@@ -168,8 +173,8 @@ confirmed tag data and completed paired readings prompt immediate admission
 rechecks while that request remains active, for at most 30 seconds. Clearing the
 status stops these foreground retries; periodic sampling remains available.
 With both readers configured for active roles,
-rounds are attempted regardless of vehicle state, including `stand-by`, before
-and after both packs become active. Sampling alone does not authorize activation;
+rounds are attempted regardless of vehicle state, including `stand-by`, while a
+decision is open. Sampling alone does not authorize activation;
 adding another supply remains blocked in `ready-to-drive`; unknown states block
 new activation. Second-pack admission always requires stationary qualification.
 The baseline guard requires a fresh paired acquisition within the configured
@@ -296,16 +301,14 @@ confirmation limits. A failed gate never substitutes OFF or
 releases a supply reservation. Once positively confirmed active, an admitted
 supply keeps its heartbeats across state changes and motion telemetry loss.
 
-The service subscribes to direct values on `engine-ecu:motion` independently of
-experimental settings.
-Battery-service opens no CAN socket and contains no ECU frame decoder. The
-[versioned motion contract](MOTION_IPC.md) carries complete observations with
-source/sequence identifiers and kernel receive timestamps from ecu-service's
-existing receiver. Missing fields, stale/future observations, sequence loss,
-reconnects and clock discontinuities restart qualification. Cached `engine-ecu`
-hash values cannot supply motion evidence. Non-drive admission remains available
-with an older ECU service without this channel; no ECU version or experimental
-setting permits adding another supply in `ready-to-drive`.
+Movement evidence comes from the ECU's published `engine-ecu` state (`rpm`,
+`raw-speed`, `throttle`). It is read once whenever an ON command is considered,
+and only while `vehicle[engine-power]` is `on`; the hash keeps its last values
+while the ECU is unpowered. Unreadable, missing or malformed values are no
+evidence and do not block in a known non-drive state. Battery-service opens no
+CAN socket and has no live motion subscription.
+Measurements gathered in a drive state do not carry over: changing between a
+drive and a non-drive state discards the pairing and a fresh paired window is read.
 Remove any obsolete `--admission-can-device` unit argument before upgrading.
 
 ### Coordinated acquisition
@@ -315,8 +318,8 @@ A 10-second round deadline leaves room for command settling and discovery before
 acquisition. Each complete frame must also finish within 2 seconds of its STATUS0
 start. The scheduler checks every 3 seconds and skips ticks while a round remains
 in flight; there are no overlapping rounds or repeated prompts within a round.
-A healthy pair can therefore be sampled every 3 seconds, while busy readers slow
-the cadence. An unanswered round is retired on the first tick after its deadline,
+While a decision is open a healthy pair can be sampled every 3 seconds, while
+busy readers slow the cadence. An unanswered round is retired on the first tick after its deadline,
 normally at 12 seconds. This bounds extra NFC traffic. Readers execute
 concurrently on their independent NFC controllers through the existing FSMs and
 `nfcMu` locks. A poll starts a normal heartbeat only in `wait_update`: commands,
@@ -377,16 +380,17 @@ logged pack voltages/currents and bus voltage. Do not infer continuity from Redi
 4. Test voltage mismatch, load above 1000 mA, moving vehicle state, OFF in progress,
    role changes, shutdown and restart. Confirm no unsafe second-pack admission and
    measure running-supply continuity, including restart behavior.
-5. With both packs active, record ongoing rounds and traffic for an extended run,
-   including `stand-by`. Confirm that sampling continues across vehicle states
-   while second-pack admission always requires stationary evidence.
+5. With both packs active, record NFC traffic for an extended run, including
+   `stand-by`. Confirm that rounds stop once the pair is read and resume after a
+   tag, role, vehicle-state or OFF event, while second-pack admission always
+   requires stationary evidence.
    Compare NFC data against independently timestamped load/voltage changes to
    characterize tag refresh latency and inter-pack measurement age. Report those
    separately from the NFC acquisition bound; do not claim measurement synchronization
    from successful rounds alone.
 6. On the protected bench, verify that a qualified first supply can start in
    `ready-to-drive` in either slot, but no second supply joins, including with
-   complete stopped/throttle-off evidence and either legacy setting value. Return
+   stopped/throttle-off ECU state and either legacy setting value. Return
    to `parked` and verify second-pack activation after qualification. Exercise
    fresh movement/throttle reports, uncertain peer power and pending OFF. Confirm
    that ON retries for an additional supply stop in `ready-to-drive`, while a sole

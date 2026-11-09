@@ -26,6 +26,7 @@ type admissionSimulation struct {
 	onCommandAt [2]time.Time
 	heartbeat   [2]time.Time
 	stationary  bool
+	motion      bool
 	trace       []string
 }
 
@@ -81,7 +82,7 @@ func (s *admissionSimulation) advance(d time.Duration) {
 	end := s.now.Add(d)
 	for s.now.Before(end) {
 		s.now = s.now.Add(min(100*time.Millisecond, end.Sub(s.now)))
-		if s.a.motion.enabled {
+		if s.motion {
 			s.a.observeMotion(s.stationary, s.now, s.now)
 		}
 	}
@@ -295,7 +296,7 @@ func TestSimulationConvergenceAndStoppedQualification(t *testing.T) {
 	for _, stoppedGate := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stoppedGate=%t", stoppedGate), func(t *testing.T) {
 			s := newAdmissionSimulation(t, "experimental")
-			s.a.motion.enabled = stoppedGate
+			s.motion = stoppedGate
 			s.insert(0, 53000, 80, BMSStateActive)
 			s.insert(1, 49000, 40, BMSStateIdle)
 			s.run(6)

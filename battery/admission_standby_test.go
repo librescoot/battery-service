@@ -101,7 +101,6 @@ func TestNonDriveAdmissionDoesNotRequireMotion(t *testing.T) {
 	for _, state := range nonDriveTestStates {
 		t.Run(string(state), func(t *testing.T) {
 			a := samplingPolicy()
-			a.motion.enabled = true
 			a.setVehicle(state)
 			for step := 0; step < 3; step++ {
 				deliverPair(t, a, admissionTestTime.Add(time.Duration(step)*admissionPollInterval), 52001)

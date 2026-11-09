@@ -109,7 +109,7 @@ func (a *packAdmission) setVehicle(state VehicleState) {
 func (a *packAdmission) setVehicleAt(state VehicleState, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.vehicle != state && !(nonDrivingVehicle(a.vehicle) && nonDrivingVehicle(state)) && !a.stoppedMotionFreshLocked(now) {
+	if a.vehicle != state && !(nonDrivingVehicle(a.vehicle) && nonDrivingVehicle(state)) {
 		a.cancelRoundLocked("vehicle changed")
 		for i := range a.slots {
 			a.slots[i].history = nil
@@ -479,12 +479,31 @@ func (a *packAdmission) needsPoll() bool {
 	return a.needsPollLocked()
 }
 
+// decisionOpenLocked reports whether a paired reading could still change an
+// admission or isolation decision. Rounds are demand-driven: two packs that are
+// both running and already paired need no further sampling, and any event that
+// invalidates the pairing (tag, role, vehicle state, OFF command) reopens the
+// decision. A drive-start request polls independently of this.
+func (a *packAdmission) decisionOpenLocked() bool {
+	if a.isolation != nil || a.hasInactiveCandidateLocked() {
+		return true
+	}
+	for _, s := range a.slots {
+		if s.offPending || (s.eligible && !s.absent && s.requiresAdmission) {
+			return true
+		}
+	}
+	bothRunning := a.slots[0].held && a.slots[0].active && a.slots[1].held && a.slots[1].active
+	return bothRunning && a.sampling.pairedID == 0
+}
+
 func (a *packAdmission) needsPollLocked() bool {
 	if !a.coordinated {
 		return false
 	}
 	if a.sampling.enabled {
-		return a.slots[0].monitored && a.slots[1].monitored && (a.slots[0].eligible || a.slots[1].eligible)
+		return a.slots[0].monitored && a.slots[1].monitored && (a.slots[0].eligible || a.slots[1].eligible) &&
+			a.decisionOpenLocked()
 	}
 	if !nonDrivingVehicle(a.vehicle) {
 		return false

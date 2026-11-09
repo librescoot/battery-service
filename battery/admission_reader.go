@@ -26,6 +26,7 @@ func (r *BatteryReader) admitCommandPolicy(cmd fsm.BMSCommand, now time.Time, co
 	}
 	switch cmd {
 	case fsm.BMSCmdOn:
+		r.service.sampleECUMotion(now)
 		ok, reason := a.requestOn(r.index, now, r.service.config.MaxVoltageDelta.Load())
 		if reason != r.lastAdmissionReason {
 			r.service.logger.Info(fmt.Sprintf("Battery %d activation decision: allowed=%t reason=%q", r.index, ok, reason))

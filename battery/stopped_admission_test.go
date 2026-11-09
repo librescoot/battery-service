@@ -1,11 +1,13 @@
 package battery
 
 import (
-	"errors"
 	"sync"
 	"testing"
 	"time"
 )
+
+// The setting is obsolete and ignored; tests still set it to prove that.
+const stoppedAdmissionSetting = "experimental.battery.dual-pack-admission-while-stopped"
 
 func feedStoppedMotion(a *packAdmission, until time.Time) {
 	for at := a.motion.at.Add(100 * time.Millisecond); !at.After(until); at = at.Add(100 * time.Millisecond) {
@@ -19,7 +21,6 @@ func feedStoppedMotion(a *packAdmission, until time.Time) {
 func readyStoppedPolicy(t *testing.T) (*packAdmission, time.Time) {
 	t.Helper()
 	a := samplingPolicy()
-	a.motion.enabled = true
 	a.setVehicle(VehicleStateReadyToDrive)
 	at := admissionTestTime.Add(-100 * time.Millisecond)
 	a.observeMotion(true, at, at)
@@ -32,34 +33,10 @@ func readyStoppedPolicy(t *testing.T) (*packAdmission, time.Time) {
 	return a, admissionTestTime.Add(6200 * time.Millisecond)
 }
 
-func TestStationaryQualificationCannotBeDisabledBySettings(t *testing.T) {
-	for _, base := range []string{"false", "true"} {
-		for _, stopped := range []string{"", "false", "true", "TRUE", "1", "invalid"} {
-			t.Run(base+"/"+stopped, func(t *testing.T) {
-				s, _ := admissionSettingService(t, map[string]string{
-					"settings/experimental.battery.dual-pack-admission": base,
-					"settings/" + stoppedAdmissionSetting:               stopped,
-				})
-				s.loadAdmissionSetting()
-				got := s.admission != nil && s.admission.motion.enabled
-				if !got {
-					t.Fatalf("stopped admission=%t", got)
-				}
-			})
-		}
-	}
-	s, hook := admissionSettingService(t, nil)
-	hook.err = errors.New("Redis unavailable")
-	s.loadAdmissionSetting()
-	if !s.admission.motion.enabled {
-		t.Fatal("read failure disabled stationary qualification")
-	}
-}
-
 func TestStoppedAdmissionWaitsForParkedWithFreshQualifiedPair(t *testing.T) {
 	a, now := readyStoppedPolicy(t)
 	requireAdmission(t, a, 1, now, false)
-	a.setVehicleAt(VehicleStateParked, now)
+	now = requalifyAfterParking(t, a, now)
 	requireAdmission(t, a, 1, now, true)
 	if !a.slots[1].held || a.slots[1].active {
 		t.Fatal("ON was not reserved pending confirmation")
@@ -74,7 +51,6 @@ func TestStoppedAdmissionWaitsForParkedWithFreshQualifiedPair(t *testing.T) {
 
 func TestStoppedSettingDoesNotRequireMotionForParkedAdmission(t *testing.T) {
 	a := samplingPolicy()
-	a.motion.enabled = true
 	for i := 0; i < 3; i++ {
 		deliverPair(t, a, admissionTestTime.Add(time.Duration(i)*admissionPollInterval), 52001+uint(i%2))
 	}
@@ -84,14 +60,13 @@ func TestStoppedSettingDoesNotRequireMotionForParkedAdmission(t *testing.T) {
 func TestDriveStateRejectsNewSupplyAcrossEvidenceFailures(t *testing.T) {
 	for _, scenario := range []string{
 		"qualified", "disabled", "no motion", "throttle or movement", "post-read motion missing", "motion gap", "motion stale", "future motion",
-		"out of order", "no pair", "mixed round", "before stop", "stale pack", "high load", "voltage drift", "voltage mismatch",
+		"out of order", "no pair", "mixed round", "stale pack", "high load", "voltage drift", "voltage mismatch",
 		"no running peer", "peer OFF", "own OFF", "inactive role", "shutdown",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			a, now := readyStoppedPolicy(t)
 			switch scenario {
 			case "disabled":
-				a.motion.enabled = false
 			case "no motion":
 				a.invalidateMotion()
 			case "throttle or movement":
@@ -112,8 +87,6 @@ func TestDriveStateRejectsNewSupplyAcrossEvidenceFailures(t *testing.T) {
 				a.sampling.pairedID = 0
 			case "mixed round":
 				a.slots[1].observedRound++
-			case "before stop":
-				a.motion.since = a.sampling.pairedAt.Add(time.Nanosecond)
 			case "stale pack":
 				a.slots[1].observed = now.Add(-admissionMaxAge - time.Nanosecond)
 			case "high load":
@@ -140,37 +113,6 @@ func TestDriveStateRejectsNewSupplyAcrossEvidenceFailures(t *testing.T) {
 			if !a.slots[0].held {
 				t.Fatal("failed admission released running supply reservation")
 			}
-		})
-	}
-}
-
-func TestStoppedPairEvidenceTimingBoundaries(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		age    time.Duration
-		motion bool
-		want   bool
-	}{
-		{"motion exact", stoppedMotionMaxAge, true, true},
-		{"motion expired", stoppedMotionMaxAge + time.Nanosecond, true, false},
-		{"pair exact", stoppedPairMaxAge, false, true},
-		{"pair expired", stoppedPairMaxAge + time.Nanosecond, false, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			a, now := readyStoppedPolicy(t)
-			if tc.motion {
-				now = a.motion.at.Add(tc.age)
-			} else {
-				now = a.sampling.pairedAt.Add(tc.age)
-				feedStoppedMotion(a, now)
-			}
-			a.mu.Lock()
-			ready := a.stoppedPairReadyLocked(now)
-			a.mu.Unlock()
-			if ready != tc.want {
-				t.Fatalf("stopped pair evidence = %t, want %t", ready, tc.want)
-			}
-			requireAdmission(t, a, 1, now, false)
 		})
 	}
 }
@@ -214,7 +156,7 @@ func TestStoppedAdmissionConcurrentMotionAndGate(t *testing.T) {
 
 func TestStoppedAdmissionDoesNotInterruptExistingSupply(t *testing.T) {
 	a, now := readyStoppedPolicy(t)
-	a.setVehicleAt(VehicleStateParked, now)
+	now = requalifyAfterParking(t, a, now)
 	requireAdmission(t, a, 1, now, true)
 	a.slots[1].active = true
 	a.setVehicleAt(VehicleStateReadyToDrive, now)
@@ -226,5 +168,30 @@ func TestStoppedAdmissionDoesNotInterruptExistingSupply(t *testing.T) {
 		if !a.slots[i].held || a.slots[i].offPending {
 			t.Fatal("lost existing supply")
 		}
+	}
+}
+
+func TestECUStoppedParsesPublishedState(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		values      []any
+		stopped, ok bool
+	}{
+		{"stopped", []any{"0", "0", "off"}, true, true},
+		{"moving", []any{"0", "3", "off"}, false, true},
+		{"spinning", []any{"120", "0", "off"}, false, true},
+		{"throttle", []any{"0", "0", "on"}, false, true},
+		{"missing rpm", []any{nil, "0", "off"}, false, false},
+		{"missing throttle", []any{"0", "0", nil}, false, false},
+		{"bad throttle", []any{"0", "0", "maybe"}, false, false},
+		{"bad speed", []any{"0", "fast", "off"}, false, false},
+		{"speed overflow", []any{"0", "300", "off"}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stopped, ok := ecuStopped(tc.values)
+			if stopped != tc.stopped || ok != tc.ok {
+				t.Fatalf("got stopped=%t ok=%t", stopped, ok)
+			}
+		})
 	}
 }

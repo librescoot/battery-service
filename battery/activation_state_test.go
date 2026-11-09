@@ -78,7 +78,6 @@ func TestFreshMotionOverridesStationaryVehicleState(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/strict=%t", state, strict), func(t *testing.T) {
 				a := samplingPolicy()
 				a.conservative = strict
-				a.motion.enabled = true
 				a.setVehicle(state)
 				for i := 0; i < 3; i++ {
 					deliverPair(t, a, admissionTestTime.Add(time.Duration(i)*admissionPollInterval), 52001+uint(i%2))
@@ -107,7 +106,6 @@ func TestStationarySecondSupplyCannotBypassVehicleState(t *testing.T) {
 	for _, state := range []VehicleState{VehicleStateReadyToDrive, VehicleStateOther, ""} {
 		t.Run(string(state), func(t *testing.T) {
 			a := samplingPolicy()
-			a.motion.enabled = true
 			a.setVehicle(state)
 			a.observeMotion(true, admissionTestTime.Add(-time.Millisecond), admissionTestTime.Add(-time.Millisecond))
 			for i := 0; i < 3; i++ {
@@ -119,20 +117,24 @@ func TestStationarySecondSupplyCannotBypassVehicleState(t *testing.T) {
 			now := admissionTestTime.Add(6200 * time.Millisecond)
 			requireAdmission(t, a, 1, now, false)
 			a.setVehicleAt(VehicleStateParked, now)
+			requireAdmission(t, a, 1, now, false)
+			now = requalifyAfterParking(t, a, now)
 			requireAdmission(t, a, 1, now, true)
 		})
 	}
 }
 
-func TestQualifiedStationaryWindowSurvivesVehicleChanges(t *testing.T) {
+func TestLeavingDriveStateDiscardsQualification(t *testing.T) {
 	for _, state := range []VehicleState{VehicleStateParked, VehicleStateStandby, VehicleStateOther, ""} {
 		t.Run(string(state), func(t *testing.T) {
 			a, now := readyStoppedPolicy(t)
-			id := a.sampling.pairedID
 			a.setVehicleAt(state, now)
-			if a.sampling.pairedID != id {
-				t.Fatal("vehicle state discarded valid stationary qualification")
+			if a.sampling.pairedID != 0 {
+				t.Fatal("drive-state qualification survived the vehicle change")
 			}
+			requireAdmission(t, a, 1, now, false)
+			now = requalifyAfterParking(t, a, now)
+			a.setVehicleAt(state, now)
 			requireAdmission(t, a, 1, now, nonDrivingVehicle(state))
 		})
 	}
