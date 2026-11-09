@@ -12,7 +12,7 @@ func TestStorageReaderFailureDoesNotStarveActivation(t *testing.T) {
 			t.Run(fmt.Sprintf("strict=%t/%s", strict, state), func(t *testing.T) {
 				a := storagePeerPolicy()
 				a.conservative, a.sampling.enabled = strict, true
-				a.setVehicle(state)
+				a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 				frame := admissionFrame(57400, BMSStateIdle)
 				observeWritten(a, 0, frame, admissionTestTime.Add(-2*admissionMaxAge))
 				for tick := 0; tick < 10; tick++ {

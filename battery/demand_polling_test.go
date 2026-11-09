@@ -10,7 +10,7 @@ func runningPair(t *testing.T) *packAdmission {
 	a := runningSwapPolicy()
 	a.sampling.enabled = true
 	a.maxDelta = nil // the default limit
-	a.setVehicle(VehicleStateStandby)
+	a.setVehicleAt(VehicleStateStandby, admissionTestTime.Add(-time.Hour))
 	return a
 }
 
@@ -124,7 +124,7 @@ func TestIdlePackSamplingFollowsVoltageProximity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a := runningPair(t)
 			a.conservative = tc.conservative
-			a.setVehicle(tc.vehicle)
+			a.setVehicleAt(tc.vehicle, admissionTestTime.Add(-time.Hour))
 			a.slots[1].held, a.slots[1].active = false, false
 			a.slots[1].frame.Voltage = tc.idleMV
 			a.slots[1].frame.State = BMSStateIdle
@@ -162,12 +162,28 @@ func TestBaselineSamplesNearIdlePackOnce(t *testing.T) {
 	if a.sampling.pairedID != id {
 		t.Fatal("pair not accepted")
 	}
-	for i := 1; i <= 10; i++ {
+	for i := 1; i <= 9; i++ {
 		requireBeginRound(t, a, now.Add(time.Duration(i)*admissionPollInterval), false)
 	}
 	a.setVehicleAt(VehicleStateStandby, now) // not a change between non-drive states
-	requireBeginRound(t, a, now.Add(time.Minute), false)
+	requireBeginRound(t, a, now.Add(admissionRetryInterval-time.Second), false)
 	a.tag(1, []byte{9}) // an event invalidates the pairing
 	a.slots[1].valid, a.slots[1].haveFrame = true, true
 	requireBeginRound(t, a, now.Add(2*time.Minute), true)
+}
+
+// A pack that was read and still did not join is looked at again later.
+func TestUnadmittedIdlePackIsReadAgainAfterTheRetryInterval(t *testing.T) {
+	a := runningPair(t)
+	a.conservative = false
+	a.slots[1].held, a.slots[1].active = false, false
+	a.slots[1].frame.State = BMSStateIdle
+	now := admissionTestTime.Add(time.Second)
+	id := requireBeginRound(t, a, now, true)
+	for i := 0; i < 2; i++ {
+		a.claimRound(i, now)
+		a.observeAcquisition(i, id, acquisition{start: now, end: now.Add(50 * time.Millisecond), complete: now.Add(100 * time.Millisecond), data: admissionFrame(55000, a.slots[i].frame.State)})
+	}
+	requireBeginRound(t, a, now.Add(admissionRetryInterval-time.Second), false)
+	requireBeginRound(t, a, now.Add(admissionRetryInterval+time.Second), true)
 }

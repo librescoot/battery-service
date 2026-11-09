@@ -19,7 +19,7 @@ func TestNonDriveCompatiblePacksJoinInEitherOrder(t *testing.T) {
 			for _, active := range []int{0, 1} {
 				t.Run(fmt.Sprintf("%s/%s/active%d", state, mode, active), func(t *testing.T) {
 					s := newAdmissionSimulation(t, mode)
-					s.a.setVehicle(state)
+					s.a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 					s.insert(active, 53000, 80, BMSStateActive)
 					s.insert(1-active, 52500, 70, BMSStateIdle)
 					s.run(10)
@@ -37,7 +37,7 @@ func TestNonDriveRetainsAdmissionSafetyGates(t *testing.T) {
 		for _, gate := range []string{"unconfirmed tag", "stale read", "read failure", "no pair", "skew", "load", "voltage", "own OFF", "peer OFF", "unknown peer", "role", "driving", "unknown state", "missing state"} {
 			t.Run(fmt.Sprintf("%s/%s", state, gate), func(t *testing.T) {
 				a := samplingPolicy()
-				a.setVehicle(state)
+				a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 				for step := 0; step < 3; step++ {
 					deliverPair(t, a, admissionTestTime.Add(time.Duration(step)*admissionPollInterval), 52001)
 				}
@@ -55,7 +55,7 @@ func TestNonDriveRetainsAdmissionSafetyGates(t *testing.T) {
 				case "skew":
 					a.slots[1].observed = now.Add(-admissionMaxSkew - time.Second)
 				case "load":
-					a.slots[0].history[1].data.Current = admissionMaxCurrent + 1
+					a.slots[0].history[0].data.Current = admissionMaxCurrent + 1
 				case "voltage":
 					a.slots[1].frame.Voltage = 50000
 				case "own OFF":
@@ -68,11 +68,11 @@ func TestNonDriveRetainsAdmissionSafetyGates(t *testing.T) {
 				case "role":
 					a.setRole(1, false)
 				case "driving":
-					a.setVehicle(VehicleStateReadyToDrive)
+					a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 				case "unknown state":
-					a.setVehicle(VehicleStateOther)
+					a.setVehicleAt(VehicleStateOther, admissionTestTime.Add(-time.Hour))
 				case "missing state":
-					a.setVehicle("")
+					a.setVehicleAt("", admissionTestTime.Add(-time.Hour))
 				}
 				requireAdmission(t, a, 1, now, false)
 			})
@@ -85,7 +85,7 @@ func TestNonDriveHandoverRequiresOldPackOff(t *testing.T) {
 		for _, old := range []int{0, 1} {
 			t.Run(fmt.Sprintf("%s/old%d", state, old), func(t *testing.T) {
 				s := newAdmissionSimulation(t, "experimental")
-				s.a.setVehicle(state)
+				s.a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 				s.insert(old, 51000, 50, BMSStateActive)
 				s.insert(1-old, 55000, 90, BMSStateIdle)
 				s.run(12)
@@ -101,7 +101,7 @@ func TestNonDriveAdmissionDoesNotRequireMotion(t *testing.T) {
 	for _, state := range nonDriveTestStates {
 		t.Run(string(state), func(t *testing.T) {
 			a := samplingPolicy()
-			a.setVehicle(state)
+			a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 			for step := 0; step < 3; step++ {
 				deliverPair(t, a, admissionTestTime.Add(time.Duration(step)*admissionPollInterval), 52001)
 			}

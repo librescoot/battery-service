@@ -13,7 +13,7 @@ func TestFirstQualifiedSupplyAllowsReadyToDrive(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/slot%d", state, slot), func(t *testing.T) {
 				a := newAdmissionTestPolicy()
 				a.sampling.enabled = true
-				a.setVehicle(state)
+				a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 				a.tag(slot, []byte{byte(slot + 1)})
 				observeWritten(a, slot, admissionFrame(55000, BMSStateIdle), admissionTestTime)
 				a.observeAbsent(1-slot, admissionTestTime)
@@ -28,7 +28,7 @@ func TestRTDFirstSupplyStillRequiresQualification(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			a := newAdmissionTestPolicy()
 			a.sampling.enabled = true
-			a.setVehicle(VehicleStateReadyToDrive)
+			a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 			data := admissionFrame(55000, BMSStateIdle)
 			a.tag(0, []byte{1})
 			observeWritten(a, 0, data, admissionTestTime)
@@ -65,7 +65,7 @@ func TestSingleReaderStillRequiresOwnQualifiedData(t *testing.T) {
 		{Index: 0, Enabled: true, Role: BatteryRoleActive},
 		{Index: 1, Enabled: false, Role: BatteryRoleInactive},
 	}})
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	requireAdmission(t, a, 0, admissionTestTime, false)
 	a.tag(0, []byte{1})
 	observeWritten(a, 0, admissionFrame(55000, BMSStateIdle), admissionTestTime)
@@ -78,7 +78,7 @@ func TestFreshMotionOverridesStationaryVehicleState(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/strict=%t", state, strict), func(t *testing.T) {
 				a := samplingPolicy()
 				a.conservative = strict
-				a.setVehicle(state)
+				a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 				for i := 0; i < 3; i++ {
 					deliverPair(t, a, admissionTestTime.Add(time.Duration(i)*admissionPollInterval), 52001+uint(i%2))
 				}
@@ -106,7 +106,7 @@ func TestStationarySecondSupplyCannotBypassVehicleState(t *testing.T) {
 	for _, state := range []VehicleState{VehicleStateReadyToDrive, VehicleStateOther, ""} {
 		t.Run(string(state), func(t *testing.T) {
 			a := samplingPolicy()
-			a.setVehicle(state)
+			a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 			a.observeMotion(true, admissionTestTime.Add(-time.Millisecond), admissionTestTime.Add(-time.Millisecond))
 			for i := 0; i < 3; i++ {
 				at := admissionTestTime.Add(time.Duration(i) * admissionPollInterval)

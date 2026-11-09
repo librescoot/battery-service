@@ -11,7 +11,7 @@ func storagePeerPolicy() *packAdmission {
 		{Index: 0, Enabled: true, Role: BatteryRoleActive},
 		{Index: 1, Enabled: true, Role: BatteryRoleInactive},
 	}})
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	return a
 }
 

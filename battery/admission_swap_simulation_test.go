@@ -65,7 +65,7 @@ func TestSimulationDriveContactLossPreservesEstablishedSupply(t *testing.T) {
 		for index := 0; index < 2; index++ {
 			t.Run(fmt.Sprintf("%s/slot%d", mode, index), func(t *testing.T) {
 				s := runningDualSimulation(t, mode)
-				s.a.setVehicle(VehicleStateReadyToDrive)
+				s.a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 				// RF loss is not evidence of electrical disconnection.
 				s.a.observeAbsent(index, s.now)
 				s.a.tag(index, []byte{byte(index + 1), s.generation[index]})
@@ -79,7 +79,7 @@ func TestSimulationDriveContactLossPreservesEstablishedSupply(t *testing.T) {
 						s.fail("RF loss cut established drive supply")
 					}
 				}
-				s.a.setVehicle(VehicleStateParked)
+				s.a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 				if ok, _ := s.a.requestOn(index, s.now, s.limit); !ok {
 					s.fail("parking revoked established supply permission")
 				}

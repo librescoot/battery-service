@@ -111,7 +111,7 @@ func TestSeatboxInvalidationPreservesSupplyAcrossParking(t *testing.T) {
 	for _, reader := range s.readers {
 		reader.seatboxLockChan = make(chan bool, 1)
 	}
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	s.handleSeatboxUpdate()
 	values["vehicle/seatbox:lock"] = "open"
 	s.handleSeatboxUpdate()
@@ -121,7 +121,7 @@ func TestSeatboxInvalidationPreservesSupplyAcrossParking(t *testing.T) {
 		}
 		requireAdmission(t, a, i, admissionTestTime.Add(time.Second), true)
 	}
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	for i := range a.slots {
 		requireAdmission(t, a, i, admissionTestTime.Add(2*time.Second), true)
 	}
@@ -166,7 +166,7 @@ func TestReplacementMustPassFreshPairedVoltageGate(t *testing.T) {
 						if !a.sampling.pairedAt.IsZero() {
 							t.Fatal("ON retained pre-command pair")
 						}
-						a.setVehicle(VehicleStateReadyToDrive)
+						a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 						requireAdmission(t, a, index, now.Add(time.Minute), true)
 					}
 				})
@@ -192,7 +192,7 @@ func TestSwapRetainsUnresolvedOff(t *testing.T) {
 func TestSeatboxKeepsSerialIdentityWhileDiscardingFrames(t *testing.T) {
 	a := runningSwapPolicy()
 	a.setSeatbox(true)
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	a.setSeatbox(false)
 	replacement := admissionFrame(50000, BMSStateActive)
 	replacement.SerialNumber = "replacement"
@@ -203,7 +203,7 @@ func TestSeatboxKeepsSerialIdentityWhileDiscardingFrames(t *testing.T) {
 
 func TestSamePackRediscoveryRetainsRunningHeartbeat(t *testing.T) {
 	a := runningSwapPolicy()
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	a.invalidate(1)
 	a.tag(1, []byte{2})
 	requireAdmission(t, a, 0, admissionTestTime.Add(time.Second), true)

@@ -13,7 +13,7 @@ func newAdmissionTestPolicy() *packAdmission {
 		{Index: 0, Enabled: true, Role: BatteryRoleActive},
 		{Index: 1, Enabled: true, Role: BatteryRoleActive},
 	}})
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	// Most tests drive rounds by hand regardless of how far apart the packs are.
 	a.maxDelta = func() uint64 { return 0 }
 	return a
@@ -169,24 +169,13 @@ func TestAdmissionRequiresStableLowLoadWindow(t *testing.T) {
 	}
 }
 
-func TestAdmissionNotOnOnePassingSample(t *testing.T) {
-	a := newAdmissionTestPolicy()
-	observeWritten(a, 0, admissionFrame(53000, BMSStateActive), admissionTestTime)
-	observeWritten(a, 1, admissionFrame(52500, BMSStateIdle), admissionTestTime)
-	requireAdmission(t, a, 1, admissionTestTime, false)
-	// Reusing observations cannot manufacture a stable window.
-	requireAdmission(t, a, 1, admissionTestTime.Add(admissionStableTime), false)
-}
-
-func TestAdmissionRejectsSagAndStaleData(t *testing.T) {
-	for _, kind := range []string{"sag", "stale", "skew", "read failure", "tag rediscovery"} {
+func TestAdmissionRejectsStaleData(t *testing.T) {
+	for _, kind := range []string{"stale", "skew", "read failure", "tag rediscovery"} {
 		t.Run(kind, func(t *testing.T) {
 			a := newAdmissionTestPolicy()
 			stablePair(a, 0, 53000, 52500, 0, admissionTestTime)
 			now := admissionTestTime.Add(admissionStableTime)
 			switch kind {
-			case "sag":
-				a.observe(0, admissionFrame(52800, BMSStateActive), now)
 			case "stale":
 				now = now.Add(admissionMaxAge + time.Second)
 			case "skew":
@@ -229,7 +218,7 @@ func TestAdmissionFirstSupplyPendingOnSurvivesVehicleChange(t *testing.T) {
 	observeWritten(a, 0, admissionFrame(53000, BMSStateIdle), admissionTestTime)
 	a.observeAbsent(1, admissionTestTime)
 	requireAdmission(t, a, 0, admissionTestTime, true)
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	requireAdmission(t, a, 0, admissionTestTime.Add(time.Second), true)
 	a.observe(0, admissionFrame(53000, BMSStateActive), admissionTestTime.Add(time.Second))
 	requireAdmission(t, a, 0, admissionTestTime.Add(time.Second), true)
@@ -238,16 +227,16 @@ func TestAdmissionFirstSupplyPendingOnSurvivesVehicleChange(t *testing.T) {
 func TestAdmissionVehicleBoundaries(t *testing.T) {
 	for _, state := range []VehicleState{VehicleStateReadyToDrive, VehicleStateOther, ""} {
 		a := newAdmissionTestPolicy()
-		a.setVehicle(state)
+		a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 		stablePair(a, 0, 53000, 52500, 0, admissionTestTime)
 		requireAdmission(t, a, 0, admissionTestTime.Add(admissionStableTime), true)
 		requireAdmission(t, a, 1, admissionTestTime.Add(admissionStableTime), false)
 	}
 	a := newAdmissionTestPolicy()
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	stablePair(a, 0, 53000, 52500, 0, admissionTestTime)
 	now := admissionTestTime.Add(admissionStableTime)
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	requireAdmission(t, a, 1, now, false)
 	stablePair(a, 0, 53000, 52500, 0, now.Add(time.Second))
 	requireAdmission(t, a, 1, now.Add(time.Second+admissionStableTime), true)
@@ -257,7 +246,7 @@ func TestAdmissionPreservesBothRunningPacks(t *testing.T) {
 	a := newAdmissionTestPolicy()
 	observeWritten(a, 0, admissionFrame(55000, BMSStateActive), admissionTestTime)
 	observeWritten(a, 1, admissionFrame(51000, BMSStateActive), admissionTestTime)
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	for _, index := range []int{0, 1} {
 		a.invalidate(index)
 		requireAdmission(t, a, index, admissionTestTime.Add(time.Hour), true)
@@ -268,12 +257,12 @@ func TestAdmissionUnexpectedDeactivationRequiresNewAdmission(t *testing.T) {
 	a := newAdmissionTestPolicy()
 	observeWritten(a, 0, admissionFrame(55000, BMSStateActive), admissionTestTime)
 	observeWritten(a, 1, admissionFrame(51000, BMSStateActive), admissionTestTime)
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	now := admissionTestTime.Add(time.Second)
 	a.observe(1, admissionFrame(51000, BMSStateIdle), now)
 	requireAdmission(t, a, 1, now, false)
 	requireAdmission(t, a, 0, now, true)
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	stablePair(a, 0, 55000, 51000, 0, now)
 	requireAdmission(t, a, 1, now.Add(admissionStableTime), false)
 }
@@ -341,7 +330,7 @@ func TestAdmissionSingleModeUsesObservedPeerState(t *testing.T) {
 		{Index: 0, Enabled: true, Role: BatteryRoleActive},
 		{Index: 1, Enabled: true, Role: BatteryRoleInactive},
 	}})
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	observeWritten(a, 0, admissionFrame(53000, BMSStateIdle), admissionTestTime)
 	a.observeAbsent(1, admissionTestTime)
 	requireAdmission(t, a, 0, admissionTestTime, true)
@@ -355,7 +344,7 @@ func TestAdmissionEnableDuringSinglePackOn(t *testing.T) {
 		{Index: 0, Enabled: true, Role: BatteryRoleActive},
 		{Index: 1, Enabled: true, Role: BatteryRoleInactive},
 	}})
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	observeWritten(a, 0, admissionFrame(51000, BMSStateIdle), admissionTestTime)
 	observeWritten(a, 1, admissionFrame(55000, BMSStateIdle), admissionTestTime)
 	requireAdmission(t, a, 0, admissionTestTime, true)
@@ -370,7 +359,7 @@ func TestAdmissionSinglePresentPackDoesNotAccelerateStandbyPolling(t *testing.T)
 	observeWritten(a, 0, admissionFrame(53000, BMSStateActive), admissionTestTime)
 	a.observeAbsent(1, admissionTestTime)
 	for _, state := range []VehicleState{VehicleStateStandby, VehicleStateParked} {
-		a.setVehicle(state)
+		a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 		if a.needsPoll() {
 			t.Fatalf("single active pack with an absent peer requests polling in %s", state)
 		}
@@ -382,11 +371,11 @@ func TestAdmissionPolling(t *testing.T) {
 	if !a.needsPoll() {
 		t.Fatal("initial selection needs polling")
 	}
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	if a.needsPoll() {
 		t.Fatal("driving must not accelerate admission polling")
 	}
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	for i := 0; i < 2; i++ {
 		observeWritten(a, i, admissionFrame(53000, BMSStateActive), admissionTestTime)
 	}
@@ -397,4 +386,35 @@ func TestAdmissionPolling(t *testing.T) {
 	if !a.needsPoll() {
 		t.Fatal("an inactive pack needs parked retries")
 	}
+}
+
+// Time offsets the tests use to move past earlier readings.
+const (
+	admissionStableTime  = 6 * time.Second
+	admissionVoltageSpan = 100
+)
+
+// At rest one fresh, low-load reading of both packs decides; it is not reused
+// once stale.
+func TestAdmissionOnOneFreshLowLoadReading(t *testing.T) {
+	a := newAdmissionTestPolicy()
+	observeWritten(a, 0, admissionFrame(53000, BMSStateActive), admissionTestTime)
+	observeWritten(a, 1, admissionFrame(52500, BMSStateIdle), admissionTestTime)
+	requireAdmission(t, a, 1, admissionTestTime, true)
+}
+
+func TestAdmissionOneReadingIsNotReusedWhenStale(t *testing.T) {
+	a := newAdmissionTestPolicy()
+	observeWritten(a, 0, admissionFrame(53000, BMSStateActive), admissionTestTime)
+	observeWritten(a, 1, admissionFrame(52500, BMSStateIdle), admissionTestTime)
+	requireAdmission(t, a, 1, admissionTestTime.Add(admissionMaxAge+time.Second), false)
+}
+
+func TestAdmissionRejectsHighLoadReading(t *testing.T) {
+	a := newAdmissionTestPolicy()
+	loaded := admissionFrame(53000, BMSStateActive)
+	loaded.Current = admissionMaxCurrent + 1
+	observeWritten(a, 0, loaded, admissionTestTime)
+	observeWritten(a, 1, admissionFrame(52500, BMSStateIdle), admissionTestTime)
+	requireAdmission(t, a, 1, admissionTestTime, false)
 }

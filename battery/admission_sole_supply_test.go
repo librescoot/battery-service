@@ -3,6 +3,7 @@ package battery
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"battery-service/battery/fsm"
 )
@@ -12,7 +13,7 @@ func TestFirstSupplyAtReaderBoundaryInRTD(t *testing.T) {
 		for _, moving := range []bool{false, true} {
 			t.Run(fmt.Sprintf("slot%d/moving=%t", slot, moving), func(t *testing.T) {
 				a := newAdmissionTestPolicy()
-				a.setVehicle(VehicleStateReadyToDrive)
+				a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 				a.tag(slot, []byte{byte(slot + 1)})
 				data := admissionFrame(55000, BMSStateIdle)
 				observeWritten(a, slot, data, admissionTestTime)
@@ -36,7 +37,7 @@ func TestRTDSelectsExactlyOneOfTwoInactivePacks(t *testing.T) {
 			t.Run(fmt.Sprintf("strict=%t/higher=%d", strict, higher), func(t *testing.T) {
 				a := newAdmissionTestPolicy()
 				a.conservative = strict
-				a.setVehicle(VehicleStateReadyToDrive)
+				a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 				for slot := 0; slot < 2; slot++ {
 					voltage := uint(54000)
 					if slot == higher {

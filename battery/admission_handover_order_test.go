@@ -15,7 +15,7 @@ func TestHandoverKeepaliveRequiresNewOffAndSettling(t *testing.T) {
 		if !a.shouldIsolate(old, now, 1000) || !a.isolationOffAttempt(old, now) {
 			t.Fatal("handover failed to start")
 		}
-		a.setVehicle(VehicleStateReadyToDrive)
+		a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 		now = now.Add(time.Second)
 		a.observe(old, admissionFrame(51001, BMSStateActive), now)
 		now = now.Add(100 * time.Millisecond)
@@ -30,7 +30,7 @@ func TestHandoverKeepaliveRequiresNewOffAndSettling(t *testing.T) {
 		if a.isolationOffAttempt(old, now) {
 			t.Fatal("corrective OFF while driving")
 		}
-		a.setVehicle(VehicleStateParked)
+		a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 		now = now.Add(time.Second)
 		if !a.isolationOffAttempt(old, now) || !a.slots[old].offAt.After(lastOn) {
 			t.Fatal("new parked OFF was not ordered after the keepalive")

@@ -16,7 +16,7 @@ func keepActiveAdmissionService(t *testing.T, conservative bool) (*Service, map[
 	// Both readers are active, as with the dual-battery setting enabled.
 	s.batteryConfig.Readers[1].Role = BatteryRoleActive
 	s.loadAdmissionSetting()
-	s.admission.setVehicle(VehicleStateParked)
+	s.admission.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	for i, reader := range s.readers {
 		reader.seatboxLockChan = make(chan bool, 1)
 		s.admission.tag(i, []byte{byte(i + 1)})
@@ -66,7 +66,7 @@ func TestSeatboxDoesNotRevokeRunningPermissionWhenParking(t *testing.T) {
 		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
 			s, values := keepActiveAdmissionService(t, true)
 			a := s.admission
-			a.setVehicle(VehicleStateReadyToDrive)
+			a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 			values["vehicle/seatbox:lock"] = "open"
 			s.handleSeatboxUpdate()
 			for i := range a.slots {
@@ -74,7 +74,7 @@ func TestSeatboxDoesNotRevokeRunningPermissionWhenParking(t *testing.T) {
 			}
 			// The AUX override can change without another seatbox notification.
 			s.config.AuxLowKeepActive.Store(enabled)
-			a.setVehicle(VehicleStateParked)
+			a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 			for i := range a.slots {
 				if a.slots[i].valid {
 					t.Fatal("parking reused pre-seatbox measurement evidence")

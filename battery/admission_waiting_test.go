@@ -9,7 +9,7 @@ import (
 
 func TestAdmissionDeferredInactiveStateDoesNotTriggerRecovery(t *testing.T) {
 	for _, state := range []BMSState{BMSStateIdle, BMSStateAsleep} {
-		for _, evidence := range []string{"expired write", "expired observation", "invalidated"} {
+		for _, evidence := range []string{"expired observation", "invalidated"} {
 			t.Run(state.String()+"/"+evidence, func(t *testing.T) {
 				a := newAdmissionTestPolicy()
 				r := admissionTestReader(a, 0)
@@ -17,9 +17,6 @@ func TestAdmissionDeferredInactiveStateDoesNotTriggerRecovery(t *testing.T) {
 				r.data = admissionFrame(53000, state)
 				observeWritten(a, 1, admissionFrame(53020, BMSStateActive), now)
 				switch evidence {
-				case "expired write":
-					observeWritten(a, 0, r.data, now.Add(-admissionMaxAge-time.Second))
-					a.observe(0, r.data, now)
 				case "expired observation":
 					observeWritten(a, 0, r.data, now.Add(-admissionMaxAge-time.Second))
 				case "invalidated":

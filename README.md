@@ -160,21 +160,22 @@ The shared rules are:
 
 Admission uses complete NFC reads acquired within the last 10 seconds, after
 one-time confirmation of the selected tag, not cached Redis voltage. Missing, stale, truncated or substituted data cannot
-admit a pack. While a decision is open, sampling rounds prompt both reader FSMs
-every 3 seconds. A decision is open while a pack is inactive and eligible, an OFF
-command or isolation is pending, a pack awaits (re)qualification, or two running
-packs have not yet been paired since the last tag, role, vehicle-state or OFF
-event. Two running, paired packs and a single pack are not sampled in between;
-their regular heartbeats continue, and a heartbeat read outside a round does not
-reopen the decision. An idle pack next to a running one is read by its own heartbeat. No round
-runs while their voltages differ by more than `scooter.max-voltage-delta`; once
-the heartbeat readings bring them within it (or a voltage is unknown) one paired
-round decides. In the baseline mode that single paired reading is enough and no
-further round follows until an event invalidates it. Conservative qualification
-needs several paired samples and keeps sampling until the pack joins. With
-experimental selection enabled, a higher-voltage idle pack always counts as
-reachable. A round runs as a normal heartbeat cycle and restarts the
-heartbeat timer, so it can only bring the next heartbeat forward.
+admit a pack. When a decision is open, a round prompts both reader FSMs to read
+their packs together. A decision is open while an OFF command or isolation is
+pending, a pack awaits (re)qualification, two running packs have not been read
+together since the last tag, role, vehicle-state or OFF event, or an idle pack
+could join. Two running packs and a single pack are not read in between; their
+regular heartbeats and status reads continue, and a heartbeat read outside a
+round does not reopen the decision.
+
+An idle pack next to a running one is read by its own heartbeat. No round runs
+while their voltages differ by more than `scooter.max-voltage-delta`. Once they
+are within it (or a voltage is unknown) and the vehicle has stood in a non-drive
+state for 5 seconds, one round reads both packs and decides. A pack that was read
+and did not join is read again after 30 seconds. With experimental selection
+enabled, a higher-voltage idle pack always counts as reachable. A round runs as a
+normal heartbeat cycle and restarts the heartbeat timer, so it can only bring the
+next heartbeat forward.
 A `vehicle[drive-start-status]` value of `waiting-battery` requests an immediate
 round instead of waiting for that tick. Requests coalesce with an in-progress
 round and remain pending through BMS commands and their settling delays. Newly
@@ -189,13 +190,11 @@ new activation. Second-pack admission always requires stationary qualification.
 The baseline guard requires a fresh paired acquisition within the configured
 voltage limit before a second pack can join. Pending second-pack ON retries
 recheck admission and retain their reservation even when a write fails.
-With conservative qualification enabled, a second pack needs three paired
-samples over 6 seconds: successful NFC acquisition age ≤10 seconds,
-STATUS0 acquisition skew ≤1 second, absolute current ≤1000 mA, and voltage
-variation ≤100 mV per pack.
-Conservative qualification also requires the voltage difference to stay within
-`scooter.max-voltage-delta` minus 10% (capped at 100 mV). The baseline accepts the
-configured limit itself. A limit of 0 disables only the voltage check.
+With conservative qualification enabled, the same single reading must also show
+absolute current ≤1000 mA on both packs, STATUS0 acquisition skew ≤1 second and a
+voltage difference within `scooter.max-voltage-delta` minus 10% (capped at 100 mV).
+The baseline accepts the configured limit itself. A limit of 0 disables only the
+voltage check.
 Inactive-role readers remain sampled so disabling a slot cannot hide a live
 supply or discard an outstanding OFF command. Even an unconfirmed ACTIVE frame
 ends the storage-only exemption. A storage pack with unreadable or zero status
@@ -300,7 +299,7 @@ The first qualified supply does not require motion evidence, including in
 `ready-to-drive`. In a known non-drive state, a fresh movement/throttle report
 (at most 500 ms old) blocks
 second-pack admission. Movement and throttle transitions discard old paired
-measurements; the voltage and optional conservative stability checks above
+measurements; the voltage and optional conservative checks above
 still apply when the vehicle returns to `parked`.
 
 The gate is checked immediately before every command write attempt, including
@@ -379,9 +378,9 @@ logged pack voltages/currents and bus voltage. Do not infer continuity from Redi
    Record command order, settling intervals, heartbeat spacing and OFF confirmation.
 2. Enable the experimental flag and both readers, restart the service, and capture
    service debug logs alongside NFC traces and electrical measurements. Verify
-   STATUS0 interval bounds, round/frame deadlines and three successful rounds
-   spanning at least 6 seconds of acquisition starts before parked second-pack
-   admission. Include discovery delays longer than one scheduler tick.
+   STATUS0 interval bounds, round/frame deadlines and one successful round after
+   5 seconds of stand-still before parked second-pack admission. Include
+   discovery delays longer than one scheduler tick.
 3. Exercise reader delay, arbiter busy, discovery, dropped reads, unchanged tag
    data and removal of either pack. Verify missed/late rounds are rejected without
    tight retries, cross-round pairing, lost supply reservations or sampling-induced

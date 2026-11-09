@@ -21,7 +21,7 @@ func feedStoppedMotion(a *packAdmission, until time.Time) {
 func readyStoppedPolicy(t *testing.T) (*packAdmission, time.Time) {
 	t.Helper()
 	a := samplingPolicy()
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	at := admissionTestTime.Add(-100 * time.Millisecond)
 	a.observeMotion(true, at, at)
 	for i := 0; i < 3; i++ {
@@ -60,7 +60,7 @@ func TestStoppedSettingDoesNotRequireMotionForParkedAdmission(t *testing.T) {
 func TestDriveStateRejectsNewSupplyAcrossEvidenceFailures(t *testing.T) {
 	for _, scenario := range []string{
 		"qualified", "disabled", "no motion", "throttle or movement", "post-read motion missing", "motion gap", "motion stale", "future motion",
-		"out of order", "no pair", "mixed round", "stale pack", "high load", "voltage drift", "voltage mismatch",
+		"out of order", "no pair", "mixed round", "stale pack", "high load", "voltage mismatch",
 		"no running peer", "peer OFF", "own OFF", "inactive role", "shutdown",
 	} {
 		t.Run(scenario, func(t *testing.T) {
@@ -90,9 +90,7 @@ func TestDriveStateRejectsNewSupplyAcrossEvidenceFailures(t *testing.T) {
 			case "stale pack":
 				a.slots[1].observed = now.Add(-admissionMaxAge - time.Nanosecond)
 			case "high load":
-				a.slots[0].history[1].data.Current = admissionMaxCurrent + 1
-			case "voltage drift":
-				a.slots[1].history[1].data.Voltage += admissionVoltageSpan + 1
+				a.slots[0].history[0].data.Current = admissionMaxCurrent + 1
 			case "voltage mismatch":
 				a.slots[1].frame.Voltage += 2000
 				for i := range a.slots[1].history {
@@ -117,22 +115,15 @@ func TestDriveStateRejectsNewSupplyAcrossEvidenceFailures(t *testing.T) {
 	}
 }
 
-func TestStoppedAdmissionRequalifiesAfterThrottlePulse(t *testing.T) {
+func TestThrottlePulseDiscardsTheReading(t *testing.T) {
 	a, now := readyStoppedPolicy(t)
-	a.setVehicleAt(VehicleStateParked, now)
+	now = requalifyAfterParking(t, a, now)
 	a.observeMotion(false, now.Add(100*time.Millisecond), now.Add(100*time.Millisecond))
 	a.observeMotion(true, now.Add(200*time.Millisecond), now.Add(200*time.Millisecond))
 	requireAdmission(t, a, 1, now.Add(200*time.Millisecond), false)
-	for i := 3; i < 6; i++ {
-		start := admissionTestTime.Add(time.Duration(i) * admissionPollInterval)
-		feedStoppedMotion(a, start)
-		deliverPair(t, a, start, 52001+uint(i%2))
-		feedStoppedMotion(a, start.Add(200*time.Millisecond))
-		if i < 5 {
-			requireAdmission(t, a, 1, start.Add(200*time.Millisecond), false)
-		}
-	}
-	requireAdmission(t, a, 1, admissionTestTime.Add(15200*time.Millisecond), true)
+	at := now.Add(admissionStillTime)
+	deliverPair(t, a, at, 52001)
+	requireAdmission(t, a, 1, at.Add(200*time.Millisecond), true)
 }
 
 func TestStoppedAdmissionConcurrentMotionAndGate(t *testing.T) {

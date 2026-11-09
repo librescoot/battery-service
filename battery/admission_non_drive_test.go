@@ -57,7 +57,7 @@ func TestOnlyAdditionalSupplyWaitsForParked(t *testing.T) {
 								s.config.AuxLowKeepActive.Store(keep == "aux")
 								s.loadAdmissionSetting()
 								a = s.admission
-								a.setVehicle(VehicleStateReadyToDrive)
+								a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 								a.tag(target, []byte{byte(target + 1)})
 								observeWritten(a, target, admissionFrame(55000, BMSStateIdle), admissionTestTime)
 								a.observeAbsent(1-target, admissionTestTime)

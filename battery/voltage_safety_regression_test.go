@@ -3,6 +3,7 @@ package battery
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"battery-service/battery/fsm"
 )
@@ -25,7 +26,7 @@ func TestMandatoryVoltageGuardBothInsertionOrders(t *testing.T) {
 						voltages[1-running] = 49000
 					}
 					if s.admission != nil {
-						s.admission.setVehicle(VehicleStateParked)
+						s.admission.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 						stablePair(s.admission, running, voltages[0], voltages[1], 0, admissionTestTime)
 					}
 					now := admissionTestTime.Add(admissionStableTime)

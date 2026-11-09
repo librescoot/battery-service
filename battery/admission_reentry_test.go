@@ -18,7 +18,7 @@ func TestRunningSupplySurvivesRapidVehicleReentry(t *testing.T) {
 							s.config.KeepActiveOnSeatboxOpen.Store(keep)
 							s.loadAdmissionSetting()
 							a := s.admission
-							a.setVehicle(VehicleStateParked)
+							a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 							a.setSeatbox(true)
 							for i := range a.slots {
 								if !both && i != slot {
@@ -32,27 +32,27 @@ func TestRunningSupplySurvivesRapidVehicleReentry(t *testing.T) {
 								observeWritten(a, i, data, admissionTestTime)
 							}
 							now := admissionTestTime.Add(time.Second)
-							a.setVehicle(VehicleStateReadyToDrive)
+							a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 							switch event {
 							case "drive-seatbox":
 								a.setSeatbox(false)
 								a.setSeatbox(true)
-								a.setVehicle(VehicleStateParked)
+								a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 							case "drive-rf-return":
 								data := a.slots[slot].frame
 								a.observeAbsent(slot, now)
 								a.tag(slot, []byte{byte(slot + 1)})
 								observeWritten(a, slot, data, now.Add(time.Second))
 								now = now.Add(time.Second)
-								a.setVehicle(VehicleStateParked)
+								a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 							case "parked-seatbox":
-								a.setVehicle(VehicleStateParked)
+								a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 								a.setSeatbox(false)
 								a.setSeatbox(true)
 							}
 							// Vehicle's established drive-entry contract accepts present ACTIVE
 							// packs. A rapid stand cycle must not then withdraw their heartbeats.
-							a.setVehicle(VehicleStateReadyToDrive)
+							a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 							requireAdmission(t, a, slot, now, true)
 							if both {
 								requireAdmission(t, a, 1-slot, now, true)

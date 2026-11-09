@@ -17,7 +17,7 @@ func stoppedSwapPolicy(t *testing.T, strict, stopped bool, keep string, target i
 	s.config.AuxLowKeepActive.Store(keep == "aux")
 	s.loadAdmissionSetting()
 	a := s.admission
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	a.setSeatbox(true)
 	var frames [2]BMSData
 	for i := range frames {
@@ -30,7 +30,7 @@ func stoppedSwapPolicy(t *testing.T, strict, stopped bool, keep string, target i
 		a.tag(i, []byte{byte(i + 1)})
 		observeWritten(a, i, frames[i], admissionTestTime)
 	}
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	now := admissionTestTime.Add(time.Second)
 	a.observeMotion(true, now.Add(-100*time.Millisecond), now.Add(-100*time.Millisecond))
 	window := func(start time.Time, checkEarly bool) time.Time {
@@ -153,8 +153,8 @@ func TestStoppedSwapKeepActiveCannotBypassEvidence(t *testing.T) {
 	}
 }
 
-// Qualification gathered in a drive state does not carry over to parking: the
-// vehicle change discards it and a fresh paired window must be read.
+// Readings taken in a drive state do not carry over to parking: the vehicle
+// change discards them, and after a short stand-still both packs are read again.
 func requalifyAfterParking(t *testing.T, a *packAdmission, now time.Time) time.Time {
 	t.Helper()
 	a.setVehicleAt(VehicleStateParked, now)
@@ -164,20 +164,14 @@ func requalifyAfterParking(t *testing.T, a *packAdmission, now time.Time) time.T
 		}
 	}
 	frames := [2]BMSData{a.slots[0].frame, a.slots[1].frame}
-	var end time.Time
-	for tick := 0; tick < 3; tick++ {
-		at := now.Add(time.Duration(tick+1) * admissionPollInterval)
-		a.sampling.pairedID = 0
-		id, _ := a.beginRound(at)
-		for i := range frames {
-			if id == 0 || a.claimRound(i, at) != id {
-				t.Fatal("fresh pair not claimed after parking")
-			}
-			data := frames[i]
-			data.Voltage += uint(tick % 2)
-			a.observeAcquisition(i, id, acquisition{start: at, end: at.Add(100 * time.Millisecond), complete: at.Add(200 * time.Millisecond), data: data})
+	at := now.Add(admissionStillTime + time.Second)
+	a.sampling.pairedID = 0
+	id, _ := a.beginRound(at)
+	for i := range frames {
+		if id == 0 || a.claimRound(i, at) != id {
+			t.Fatal("fresh round not opened after the stand-still")
 		}
-		end = at.Add(200 * time.Millisecond)
+		a.observeAcquisition(i, id, acquisition{start: at, end: at.Add(100 * time.Millisecond), complete: at.Add(200 * time.Millisecond), data: frames[i]})
 	}
-	return end
+	return at.Add(200 * time.Millisecond)
 }

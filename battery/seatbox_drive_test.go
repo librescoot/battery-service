@@ -161,7 +161,7 @@ func TestDriveSeatboxLatchPreservesOffDecisions(t *testing.T) {
 				if !a.shouldIsolate(0, now, DefaultMaxVoltageDeltaMV) || !a.isolationOffAttempt(0, now) {
 					t.Fatal("failed to start parked isolation")
 				}
-				a.setVehicle(VehicleStateReadyToDrive)
+				a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 				r.service.admission = a
 				r.service.config.MaxVoltageDelta.Store(DefaultMaxVoltageDeltaMV)
 			}

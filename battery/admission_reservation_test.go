@@ -12,7 +12,7 @@ func TestSingleRoleDoesNotIgnoreRunningPeer(t *testing.T) {
 			{Index: 1, Enabled: true, Role: BatteryRoleInactive},
 		}})
 		a.conservative = false
-		a.setVehicle(VehicleStateParked)
+		a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 		observeWritten(a, 0, admissionFrame(51000, BMSStateIdle), admissionTestTime)
 		observeWritten(a, 1, admissionFrame(55000, BMSStateActive), admissionTestTime)
 		if pendingOff {
@@ -65,7 +65,7 @@ func TestPausedHandoverRequiresNewOffAfterKeepalive(t *testing.T) {
 	if !a.shouldIsolate(0, now, 1000) || !a.isolationOffAttempt(0, now) {
 		t.Fatal("handover did not begin")
 	}
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	requireAdmission(t, a, 0, now.Add(100*time.Millisecond), false)
 	a.observe(0, admissionFrame(51001, BMSStateActive), now.Add(time.Second))
 	a.observe(1, admissionFrame(55001, BMSStateIdle), now.Add(time.Second))
@@ -75,7 +75,7 @@ func TestPausedHandoverRequiresNewOffAfterKeepalive(t *testing.T) {
 		t.Fatal("an old OFF confirmed after a newer keepalive")
 	}
 	requireAdmission(t, a, 1, now.Add(3*time.Second), false)
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	if !a.isolationOffAttempt(0, now.Add(4*time.Second)) {
 		t.Fatal("new parked OFF was denied")
 	}
@@ -93,7 +93,7 @@ func TestIsolationOffRetryWaitsWhileDriving(t *testing.T) {
 	}
 	// A failed or ambiguous write cannot justify another OFF while moving,
 	// nor may its unresolved reservation be reset to permit another ON.
-	a.setVehicle(VehicleStateReadyToDrive)
+	a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 	if a.isolationOffAttempt(1, admissionTestTime.Add(time.Second)) {
 		t.Fatal("OFF retry authorized while ready-to-drive")
 	}
@@ -102,7 +102,7 @@ func TestIsolationOffRetryWaitsWhileDriving(t *testing.T) {
 	if !a.slots[1].held || !a.slots[1].offPending {
 		t.Fatal("driving erased the unresolved OFF")
 	}
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	if !a.isolationOffAttempt(1, admissionTestTime.Add(2*time.Second)) {
 		t.Fatal("parked OFF retry did not resume")
 	}

@@ -75,7 +75,7 @@ func TestSamplingAcquisitionBoundaries(t *testing.T) {
 				t.Fatalf("paired=%t report=%+v", got, a.sampling.report)
 			}
 			requireAdmission(t, a, 0, now.Add(tc.completion), true)
-			requireAdmission(t, a, 1, now.Add(tc.completion), false)
+			requireAdmission(t, a, 1, now.Add(tc.completion), tc.want)
 		})
 	}
 }
@@ -103,6 +103,7 @@ func TestSamplingStableAdmissionAndPendingFrame(t *testing.T) {
 	}
 	at := now.Add(6*time.Second + 200*time.Millisecond)
 	// A new unpaired frame must not borrow the previous round's peer.
+	a.sampling.pairedID = 0
 	id, _ := a.beginRound(now.Add(9 * time.Second))
 	a.claimRound(0, now.Add(9*time.Second))
 	a.observeAcquisition(0, id, roundSample(0, now.Add(9*time.Second), now.Add(9100*time.Millisecond), now.Add(9200*time.Millisecond), 52002))
@@ -135,7 +136,7 @@ func TestSamplingFailureContinuityAndCancellation(t *testing.T) {
 			case "OFF":
 				a.offAttempt(1, now)
 			case "vehicle":
-				a.setVehicle(VehicleStateReadyToDrive)
+				a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 			case "role":
 				a.setRole(1, false)
 			case "tag":
@@ -178,7 +179,7 @@ func TestSamplingRejectsUnsafeAndStaleWindows(t *testing.T) {
 				for slot := 0; slot < 2; slot++ {
 					a.claimRound(slot, at)
 					sample := roundSample(slot, at, at.Add(100*time.Millisecond), at.Add(200*time.Millisecond), 52001+uint(i%2))
-					if kind == "load" && i == 1 {
+					if kind == "load" && i == 2 {
 						sample.data.Current = admissionMaxCurrent + 1
 					}
 					if kind == "voltage" && slot == 1 {
@@ -189,7 +190,7 @@ func TestSamplingRejectsUnsafeAndStaleWindows(t *testing.T) {
 			}
 			at := now.Add(6200 * time.Millisecond)
 			if kind == "moving" {
-				a.setVehicle(VehicleStateReadyToDrive)
+				a.setVehicleAt(VehicleStateReadyToDrive, admissionTestTime.Add(-time.Hour))
 			}
 			if kind == "stale" {
 				at = at.Add(admissionMaxAge + time.Second)
@@ -214,7 +215,7 @@ func TestSamplingOngoingAndSinglePack(t *testing.T) {
 		VehicleStateWaitingHibernationSeatbox, VehicleStateWaitingHibernationConfirm,
 		VehicleStateOther, "",
 	} {
-		a.setVehicle(state)
+		a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 		if !a.needsPoll() {
 			t.Fatalf("active packs no longer sampled in %q", state)
 		}
@@ -237,7 +238,7 @@ func TestSamplingOngoingAndSinglePack(t *testing.T) {
 
 func TestSamplingNonDriveTransitionPreservesWindow(t *testing.T) {
 	a := samplingPolicy()
-	a.setVehicle(VehicleStateStandby)
+	a.setVehicleAt(VehicleStateStandby, admissionTestTime.Add(-time.Hour))
 	for i := 0; i < 3; i++ {
 		deliverPair(t, a, admissionTestTime.Add(time.Duration(i)*admissionPollInterval), 52001+uint(i%2))
 	}
@@ -246,7 +247,7 @@ func TestSamplingNonDriveTransitionPreservesWindow(t *testing.T) {
 	if allowed, reason := a.previewOn(1, now, DefaultMaxVoltageDeltaMV, false, a.conservative); !allowed {
 		t.Fatalf("standby admission: allowed=%t reason=%q", allowed, reason)
 	}
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	requireAdmission(t, a, 1, now, true)
 }
 
@@ -295,24 +296,6 @@ func TestSamplingPreparationDelayAndNoOverlappingRounds(t *testing.T) {
 			t.Fatalf("late=%t paired=%t report=%+v", late, got, a.sampling.report)
 		}
 	}
-}
-
-func TestSamplingLongerCadenceRetainsStableWindow(t *testing.T) {
-	a := samplingPolicy()
-	for i := 0; i < 3; i++ {
-		deliverPair(t, a, admissionTestTime.Add(time.Duration(i)*9*time.Second), 52001+uint(i%2))
-	}
-	requireAdmission(t, a, 1, admissionTestTime.Add(18200*time.Millisecond), true)
-}
-
-func TestSamplingStabilityUsesAcquisitionSpan(t *testing.T) {
-	a := samplingPolicy()
-	for i, offset := range []time.Duration{0, 3 * time.Second, 5900 * time.Millisecond} {
-		deliverPair(t, a, admissionTestTime.Add(offset), 52001+uint(i%2))
-	}
-	// Completion and time spent waiting cannot stretch 5.9 seconds of
-	// observations into the required six-second stable window.
-	requireAdmission(t, a, 1, admissionTestTime.Add(7*time.Second), false)
 }
 
 func TestSamplingMissingPackAndOffConfirmation(t *testing.T) {

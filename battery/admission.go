@@ -11,10 +11,14 @@ const (
 	admissionPollInterval = 3 * time.Second
 	admissionMaxAge       = 10 * time.Second
 	admissionMaxSkew      = 3 * time.Second
-	admissionStableTime   = 6 * time.Second
-	admissionMaxCurrent   = 1000 // mA
-	admissionVoltageSpan  = 100  // mV per pack over the stable window
-	admissionOnSettle     = 10 * time.Second
+	// admissionStillTime is how long the vehicle must have stood in a non-drive
+	// admissionRetryInterval is how long a candidate that was read but not
+	// admitted waits before it is read again.
+	admissionRetryInterval = 30 * time.Second
+	// state before a second pack is read for admission.
+	admissionStillTime  = 5 * time.Second
+	admissionMaxCurrent = 1000 // mA
+	admissionOnSettle   = 10 * time.Second
 )
 
 type admissionSample struct {
@@ -68,6 +72,7 @@ type packAdmission struct {
 	conservative bool
 	isolation    *isolationEpisode
 	vehicle      VehicleState
+	vehicleSince time.Time
 	slots        [2]admissionSlot
 	sampling     samplingRounds
 	motion       stoppedAdmission
@@ -112,6 +117,7 @@ func (a *packAdmission) setVehicleAt(state VehicleState, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.vehicle != state && !(nonDrivingVehicle(a.vehicle) && nonDrivingVehicle(state)) {
+		a.vehicleSince = now
 		a.cancelRoundLocked("vehicle changed")
 		for i := range a.slots {
 			a.slots[i].history = nil
@@ -275,16 +281,10 @@ func (a *packAdmission) observeLocked(index int, data BMSData, now time.Time) {
 	s.appendHistory(data, now)
 }
 
+// Only the latest complete reading is kept: at rest one reading of both packs
+// decides.
 func (s *admissionSlot) appendHistory(data BMSData, now time.Time) {
-	if len(s.history) > 0 && now.Sub(s.history[len(s.history)-1].at) > admissionMaxAge {
-		s.history = nil
-	}
-	s.history = append(s.history, admissionSample{data: data, at: now})
-	// Keep at least three samples and the sample just before the window
-	// boundary, including when discovery lengthens the sampling cadence.
-	for len(s.history) > 3 && now.Sub(s.history[1].at) >= admissionStableTime {
-		s.history = s.history[1:]
-	}
+	s.history = []admissionSample{{data: data, at: now}}
 }
 
 func (s *admissionSlot) fresh(now time.Time) bool {
@@ -295,19 +295,13 @@ func (s *admissionSlot) usable() bool {
 	return s.eligible && s.frame.FaultCode == 0 && !(s.frame.LowSOC && s.frame.Charge == 0)
 }
 
+// stable reports whether the latest complete reading was taken under low load.
 func (s *admissionSlot) stable(now time.Time) bool {
-	if !s.fresh(now) || len(s.history) < 3 || s.history[len(s.history)-1].at.Sub(s.history[0].at) < admissionStableTime {
+	if !s.fresh(now) || len(s.history) == 0 {
 		return false
 	}
-	minV, maxV := s.frame.Voltage, s.frame.Voltage
-	for _, sample := range s.history {
-		if sample.data.Current < -admissionMaxCurrent || sample.data.Current > admissionMaxCurrent {
-			return false
-		}
-		minV = min(minV, sample.data.Voltage)
-		maxV = max(maxV, sample.data.Voltage)
-	}
-	return maxV-minV <= admissionVoltageSpan
+	current := s.history[len(s.history)-1].data.Current
+	return current >= -admissionMaxCurrent && current <= admissionMaxCurrent
 }
 
 func voltageDistance(v0, v1 uint) uint64 {
@@ -487,7 +481,7 @@ func (a *packAdmission) needsPoll() bool {
 // invalidates the pairing (tag, role, vehicle state, OFF command) reopens the
 // decision. A drive-start request polls independently of this. Heartbeats and
 // their status reads continue regardless.
-func (a *packAdmission) decisionOpenLocked() bool {
+func (a *packAdmission) decisionOpenLocked(now time.Time) bool {
 	if a.isolation != nil {
 		return true
 	}
@@ -499,7 +493,7 @@ func (a *packAdmission) decisionOpenLocked() bool {
 	if a.slots[0].held && a.slots[0].active && a.slots[1].held && a.slots[1].active {
 		return !a.sampling.settled
 	}
-	return a.candidateWantsRoundLocked()
+	return a.candidateWantsRoundLocked(now)
 }
 
 // candidateWantsRoundLocked reports whether an idle pack could be admitted on
@@ -509,7 +503,7 @@ func (a *packAdmission) decisionOpenLocked() bool {
 // the baseline mode one paired reading decides, so no further round follows
 // until an event invalidates it. Conservative qualification needs several
 // paired samples and keeps sampling until the pack joins.
-func (a *packAdmission) candidateWantsRoundLocked() bool {
+func (a *packAdmission) candidateWantsRoundLocked(now time.Time) bool {
 	for i := range a.slots {
 		c, peer := &a.slots[i], &a.slots[1-i]
 		if !c.eligible || c.absent || c.held || c.offPending || c.active || a.sampling.stopped {
@@ -533,7 +527,13 @@ func (a *packAdmission) candidateWantsRoundLocked() bool {
 		if limit != 0 && voltageDistance(peer.frame.Voltage, c.frame.Voltage) > limit {
 			continue
 		}
-		if a.conservative || a.sampling.pairedID == 0 {
+		// A second supply is read once the vehicle has stood still for a moment.
+		if now.Sub(a.vehicleSince) < admissionStillTime {
+			continue
+		}
+		// One reading decides. A pack that was read and still did not join
+		// (load, fault, a pending command) is looked at again later.
+		if a.sampling.pairedID == 0 || now.Sub(a.sampling.pairedAt) >= admissionRetryInterval {
 			return true
 		}
 	}
@@ -546,7 +546,7 @@ func (a *packAdmission) needsPollLocked(now time.Time) bool {
 	}
 	if a.sampling.enabled {
 		return a.slots[0].monitored && a.slots[1].monitored && (a.slots[0].eligible || a.slots[1].eligible) &&
-			a.decisionOpenLocked()
+			a.decisionOpenLocked(now)
 	}
 	if !nonDrivingVehicle(a.vehicle) {
 		return false

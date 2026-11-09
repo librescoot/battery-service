@@ -73,7 +73,7 @@ func TestSingleModeCannotEraseOffOrEligibility(t *testing.T) {
 		{Index: 0, Enabled: true, Role: BatteryRoleActive},
 		{Index: 1, Enabled: true, Role: BatteryRoleInactive},
 	}})
-	a.setVehicle(VehicleStateParked)
+	a.setVehicleAt(VehicleStateParked, admissionTestTime.Add(-time.Hour))
 	observeWritten(a, 0, admissionFrame(53000, BMSStateIdle), admissionTestTime)
 	a.observeAbsent(1, admissionTestTime)
 	requireAdmission(t, a, 1, admissionTestTime, false)
@@ -149,7 +149,7 @@ func TestIsolationLatchesOneVictimAndRequiresOffProof(t *testing.T) {
 func TestIsolationNeedsFreshPairAndSafeVehicle(t *testing.T) {
 	for _, state := range []VehicleState{VehicleStateParked, VehicleStateStandby, VehicleStateReadyToDrive} {
 		a := newAdmissionTestPolicy()
-		a.setVehicle(state)
+		a.setVehicleAt(state, admissionTestTime.Add(-time.Hour))
 		a.sampling.enabled = true
 		frames := [2]BMSData{admissionFrame(55000, BMSStateActive), admissionFrame(51000, BMSStateActive)}
 		for i, frame := range frames {
