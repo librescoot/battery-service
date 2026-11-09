@@ -32,7 +32,6 @@ type samplingRounds struct {
 	next             uint64
 	round            *samplingRound
 	pairedAt         time.Time
-	lastRound        time.Time
 	// settled records that two running packs have been paired since the last
 	// event that could change the decision. Ordinary heartbeat reads outside a
 	// round do not clear it.
@@ -59,7 +58,6 @@ func (a *packAdmission) beginRound(now time.Time) (uint64, samplingReport) {
 	}
 	a.sampling.next++
 	a.sampling.round = &samplingRound{id: a.sampling.next, opened: now}
-	a.sampling.lastRound = now
 	return a.sampling.next, report
 }
 

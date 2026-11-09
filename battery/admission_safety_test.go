@@ -12,6 +12,7 @@ import (
 
 func safetyPair(t *testing.T, a *packAdmission, now time.Time, frames [2]BMSData) time.Time {
 	t.Helper()
+	a.sampling.pairedID = 0
 	id, _ := a.beginRound(now)
 	if id == 0 {
 		t.Fatal("no sampling round")

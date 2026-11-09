@@ -30,8 +30,11 @@ func roundSample(slot int, start, end, complete time.Time, voltage uint) acquisi
 	return acquisition{start: start, end: end, complete: complete, data: admissionFrame(voltage, state)}
 }
 
+// deliverPair forces a round: the baseline mode stops sampling after one paired
+// reading, but the qualification tests need several.
 func deliverPair(t *testing.T, a *packAdmission, now time.Time, voltage uint) {
 	t.Helper()
+	a.sampling.pairedID = 0
 	id, _ := a.beginRound(now)
 	for i := 0; i < 2; i++ {
 		if got := a.claimRound(i, now); got != id || id == 0 {

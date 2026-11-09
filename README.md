@@ -166,11 +166,14 @@ command or isolation is pending, a pack awaits (re)qualification, or two running
 packs have not yet been paired since the last tag, role, vehicle-state or OFF
 event. Two running, paired packs and a single pack are not sampled in between;
 their regular heartbeats continue, and a heartbeat read outside a round does not
-reopen the decision. An idle pack next to a running one is read once per
-heartbeat period (40 seconds) while their voltages are clearly apart, and every
-3 seconds once the gap is within twice `scooter.max-voltage-delta` or either
-voltage is unknown. With experimental selection enabled, a higher-voltage idle pack
-always counts as near. A round runs as a normal heartbeat cycle and restarts the
+reopen the decision. An idle pack next to a running one is read by its own heartbeat. No round
+runs while their voltages differ by more than `scooter.max-voltage-delta`; once
+the heartbeat readings bring them within it (or a voltage is unknown) one paired
+round decides. In the baseline mode that single paired reading is enough and no
+further round follows until an event invalidates it. Conservative qualification
+needs several paired samples and keeps sampling until the pack joins. With
+experimental selection enabled, a higher-voltage idle pack always counts as
+reachable. A round runs as a normal heartbeat cycle and restarts the
 heartbeat timer, so it can only bring the next heartbeat forward.
 A `vehicle[drive-start-status]` value of `waiting-battery` requests an immediate
 round instead of waiting for that tick. Requests coalesce with an in-progress

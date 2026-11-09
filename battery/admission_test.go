@@ -14,6 +14,8 @@ func newAdmissionTestPolicy() *packAdmission {
 		{Index: 1, Enabled: true, Role: BatteryRoleActive},
 	}})
 	a.setVehicle(VehicleStateParked)
+	// Most tests drive rounds by hand regardless of how far apart the packs are.
+	a.maxDelta = func() uint64 { return 0 }
 	return a
 }
 

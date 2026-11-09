@@ -15,12 +15,6 @@ const (
 	admissionMaxCurrent   = 1000 // mA
 	admissionVoltageSpan  = 100  // mV per pack over the stable window
 	admissionOnSettle     = 10 * time.Second
-	// admissionIdleInterval is the sampling period for an idle pack that is
-	// clearly out of range of the running one: the active heartbeat period.
-	admissionIdleInterval = 40 * time.Second
-	// A pack counts as approaching once the voltage gap is within this multiple
-	// of the configured limit.
-	admissionNearFactor = 2
 )
 
 type admissionSample struct {
@@ -491,14 +485,9 @@ func (a *packAdmission) needsPoll() bool {
 // admission or isolation decision. Rounds are demand-driven: two packs that are
 // both running and already paired need no further sampling, and any event that
 // invalidates the pairing (tag, role, vehicle state, OFF command) reopens the
-// decision. A drive-start request polls independently of this.
-//
-// A pack that stays idle next to a running one cannot join until their
-// voltages are within the admission limit. While they are clearly apart it is
-// read once per heartbeat period, like the running pack; once the running pack
-// approaches the idle pack's last measured voltage, rounds run at the
-// admission cadence.
-func (a *packAdmission) decisionOpenLocked(now time.Time) bool {
+// decision. A drive-start request polls independently of this. Heartbeats and
+// their status reads continue regardless.
+func (a *packAdmission) decisionOpenLocked() bool {
 	if a.isolation != nil {
 		return true
 	}
@@ -510,37 +499,41 @@ func (a *packAdmission) decisionOpenLocked(now time.Time) bool {
 	if a.slots[0].held && a.slots[0].active && a.slots[1].held && a.slots[1].active {
 		return !a.sampling.settled
 	}
-	if !a.hasInactiveCandidateLocked() {
-		return false
-	}
-	return a.candidateNearLocked() || a.sampling.lastRound.IsZero() || now.Sub(a.sampling.lastRound) >= admissionIdleInterval
+	return a.candidateWantsRoundLocked()
 }
 
-// candidateNearLocked reports whether an idle pack is, or may soon be, within
-// reach of admission. Unknown voltages count as near so the first readings are
-// not delayed.
-func (a *packAdmission) candidateNearLocked() bool {
+// candidateWantsRoundLocked reports whether an idle pack could be admitted on
+// a paired reading. An idle pack next to a running one is already read by its
+// own heartbeat, so nothing is polled while the two voltages are too far apart;
+// the round runs once the heartbeat readings bring them within the limit. In
+// the baseline mode one paired reading decides, so no further round follows
+// until an event invalidates it. Conservative qualification needs several
+// paired samples and keeps sampling until the pack joins.
+func (a *packAdmission) candidateWantsRoundLocked() bool {
 	for i := range a.slots {
 		c, peer := &a.slots[i], &a.slots[1-i]
-		if !c.eligible || c.absent || c.held || c.offPending || c.active {
+		if !c.eligible || c.absent || c.held || c.offPending || c.active || a.sampling.stopped {
 			continue
 		}
 		if !c.valid || !c.haveFrame {
 			return true
 		}
 		if !peer.held || !peer.active || !peer.haveFrame {
+			// First supply: nothing is running yet.
+			return true
+		}
+		if a.conservative && c.frame.Voltage > peer.frame.Voltage {
+			// Experimental selection can hand the supply to a higher-voltage pack.
 			return true
 		}
 		limit := uint64(DefaultMaxVoltageDeltaMV)
 		if a.maxDelta != nil {
 			limit = a.maxDelta()
 		}
-		if limit == 0 || voltageDistance(peer.frame.Voltage, c.frame.Voltage) <= admissionNearFactor*limit {
-			return true
+		if limit != 0 && voltageDistance(peer.frame.Voltage, c.frame.Voltage) > limit {
+			continue
 		}
-		// Experimental selection can hand the supply over to a higher-voltage
-		// idle pack, however far apart they are.
-		if a.conservative && c.frame.Voltage > peer.frame.Voltage {
+		if a.conservative || a.sampling.pairedID == 0 {
 			return true
 		}
 	}
@@ -553,7 +546,7 @@ func (a *packAdmission) needsPollLocked(now time.Time) bool {
 	}
 	if a.sampling.enabled {
 		return a.slots[0].monitored && a.slots[1].monitored && (a.slots[0].eligible || a.slots[1].eligible) &&
-			a.decisionOpenLocked(now)
+			a.decisionOpenLocked()
 	}
 	if !nonDrivingVehicle(a.vehicle) {
 		return false

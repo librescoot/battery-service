@@ -39,6 +39,7 @@ func stoppedSwapPolicy(t *testing.T, strict, stopped bool, keep string, target i
 		for tick := 0; tick < 3; tick++ {
 			at := start.Add(time.Duration(tick) * admissionPollInterval)
 			feedStoppedMotion(a, at)
+			a.sampling.pairedID = 0
 			id, _ := a.beginRound(at)
 			for i := range frames {
 				if id == 0 || a.claimRound(i, at) != id {
@@ -166,6 +167,7 @@ func requalifyAfterParking(t *testing.T, a *packAdmission, now time.Time) time.T
 	var end time.Time
 	for tick := 0; tick < 3; tick++ {
 		at := now.Add(time.Duration(tick+1) * admissionPollInterval)
+		a.sampling.pairedID = 0
 		id, _ := a.beginRound(at)
 		for i := range frames {
 			if id == 0 || a.claimRound(i, at) != id {
