@@ -43,7 +43,9 @@ func newAdmissionSimulation(t *testing.T, mode string) *admissionSimulation {
 	a.conservative = mode == "experimental"
 	a.sampling.enabled = true
 	a.setVehicle(VehicleStateParked)
-	return &admissionSimulation{t: t, a: a, now: admissionTestTime, limit: 1000}
+	sim := &admissionSimulation{t: t, a: a, now: admissionTestTime, limit: 1000}
+	a.maxDelta = func() uint64 { return sim.limit }
+	return sim
 }
 
 func (s *admissionSimulation) record(format string, args ...any) {

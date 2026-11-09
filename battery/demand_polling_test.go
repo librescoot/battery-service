@@ -34,7 +34,7 @@ func TestRunningPairIsSampledOnceThenLeftAlone(t *testing.T) {
 		data := admissionFrame(55000, BMSStateActive)
 		a.observeAcquisition(i, id, acquisition{start: now, end: now.Add(50 * time.Millisecond), complete: now.Add(100 * time.Millisecond), data: data})
 	}
-	if a.sampling.pairedID != id {
+	if a.sampling.pairedID != id || !a.sampling.settled {
 		t.Fatal("pair not accepted")
 	}
 	for i := 1; i <= 20; i++ {
@@ -53,7 +53,7 @@ func TestPairingEventsReopenSampling(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			a := runningPair(t)
 			now := admissionTestTime.Add(time.Second)
-			a.sampling.pairedID, a.sampling.pairedAt = 7, now
+			a.sampling.settled = true
 			requireBeginRound(t, a, now, false)
 			event(a, now)
 			requireBeginRound(t, a, now.Add(time.Second), true)
@@ -71,7 +71,7 @@ func TestOpenDecisionsKeepSampling(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := runningPair(t)
-			a.sampling.pairedID, a.sampling.pairedAt = 7, now
+			a.sampling.settled = true
 			setup(a)
 			requireBeginRound(t, a, now, true)
 		})
@@ -84,4 +84,51 @@ func TestAbsentSecondPackNeedsNoSampling(t *testing.T) {
 	a.slots[1].held, a.slots[1].active = false, false
 	a.observeAbsent(1, admissionTestTime)
 	requireBeginRound(t, a, admissionTestTime.Add(time.Second), false)
+}
+
+// A heartbeat read outside any round replaces the slot's frame but does not
+// reopen the decision for two running packs.
+func TestHeartbeatReadDoesNotReopenSettledPair(t *testing.T) {
+	a := runningPair(t)
+	now := admissionTestTime.Add(time.Second)
+	id := requireBeginRound(t, a, now, true)
+	for i := 0; i < 2; i++ {
+		a.claimRound(i, now)
+		a.observeAcquisition(i, id, acquisition{start: now, end: now.Add(50 * time.Millisecond), complete: now.Add(100 * time.Millisecond), data: admissionFrame(55000, BMSStateActive)})
+	}
+	later := now.Add(40 * time.Second)
+	a.observeAcquisition(0, 0, acquisition{start: later, end: later.Add(50 * time.Millisecond), complete: later.Add(100 * time.Millisecond), data: admissionFrame(55000, BMSStateActive)})
+	requireBeginRound(t, a, later.Add(time.Second), false)
+}
+
+// An idle pack far from the running one is read once per heartbeat period; one
+// within reach is read at the admission cadence.
+func TestIdlePackSamplingFollowsVoltageProximity(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		idleMV          uint
+		conservative    bool
+		fast, slowAfter bool
+	}{
+		{"far below", 40000, false, false, true},
+		{"within window", 53500, false, true, true},
+		{"above, plain", 60000, false, false, true},
+		{"above, experimental handover", 60000, true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := runningPair(t)
+			a.conservative = tc.conservative
+			a.slots[1].held, a.slots[1].active = false, false
+			a.slots[1].frame.Voltage = tc.idleMV
+			a.slots[1].frame.State = BMSStateIdle
+			a.slots[0].frame.Voltage = 55000
+			a.slots[1].valid, a.slots[1].haveFrame = true, true
+			now := admissionTestTime.Add(time.Second)
+			requireBeginRound(t, a, now, true) // the first round is always allowed
+			a.cancelRoundLocked("test")
+			requireBeginRound(t, a, now.Add(admissionPollInterval), tc.fast)
+			a.cancelRoundLocked("test")
+			requireBeginRound(t, a, now.Add(admissionIdleInterval), tc.slowAfter)
+		})
+	}
 }

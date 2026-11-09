@@ -32,8 +32,13 @@ type samplingRounds struct {
 	next             uint64
 	round            *samplingRound
 	pairedAt         time.Time
-	pairedID         uint64
-	report           samplingReport
+	lastRound        time.Time
+	// settled records that two running packs have been paired since the last
+	// event that could change the decision. Ordinary heartbeat reads outside a
+	// round do not clear it.
+	settled  bool
+	pairedID uint64
+	report   samplingReport
 }
 
 // All round state shares the admission mutex. No round waits for a reader or
@@ -49,11 +54,12 @@ func (a *packAdmission) beginRound(now time.Time) (uint64, samplingReport) {
 	}
 	report := a.sampling.report
 	a.sampling.report = samplingReport{}
-	if !a.sampling.enabled || a.sampling.stopped || !a.slots[0].monitored || !a.slots[1].monitored || !a.needsPollLocked() {
+	if !a.sampling.enabled || a.sampling.stopped || !a.slots[0].monitored || !a.slots[1].monitored || !a.needsPollLocked(now) {
 		return 0, report
 	}
 	a.sampling.next++
 	a.sampling.round = &samplingRound{id: a.sampling.next, opened: now}
+	a.sampling.lastRound = now
 	return a.sampling.next, report
 }
 
@@ -75,6 +81,7 @@ func (a *packAdmission) cancelRoundLocked(reason string) {
 	}
 	a.sampling.pairedAt = time.Time{}
 	a.sampling.pairedID = 0
+	a.sampling.settled = false
 	if a.sampling.enabled {
 		for i := range a.slots {
 			a.slots[i].history = nil
@@ -131,7 +138,9 @@ func (a *packAdmission) observeAcquisition(index int, id uint64, sample acquisit
 	}
 	r := a.sampling.round
 	if id == 0 || r == nil || id != r.id || !r.claimed[index] {
+		settled := a.sampling.settled
 		a.cancelRoundLocked("unpaired or late result")
+		a.sampling.settled = settled
 		return
 	}
 	if !r.samples[index].complete.IsZero() {
@@ -171,6 +180,7 @@ func (a *packAdmission) observeAcquisition(index int, id uint64, sample acquisit
 	}
 	a.sampling.pairedAt = start
 	a.sampling.pairedID = r.id
+	a.sampling.settled = a.slots[0].held && a.slots[0].active && a.slots[1].held && a.slots[1].active
 	a.sampling.report = roundReport(r, "paired")
 	a.sampling.round = nil
 	return a.hasInactiveCandidateLocked()

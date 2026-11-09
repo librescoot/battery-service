@@ -15,6 +15,12 @@ const (
 	admissionMaxCurrent   = 1000 // mA
 	admissionVoltageSpan  = 100  // mV per pack over the stable window
 	admissionOnSettle     = 10 * time.Second
+	// admissionIdleInterval is the sampling period for an idle pack that is
+	// clearly out of range of the running one: the active heartbeat period.
+	admissionIdleInterval = 40 * time.Second
+	// A pack counts as approaching once the voltage gap is within this multiple
+	// of the configured limit.
+	admissionNearFactor = 2
 )
 
 type admissionSample struct {
@@ -63,14 +69,16 @@ func (s *admissionSlot) replaceIdentity(uid string) {
 // Once dual operation has been enabled, protection remains engaged even
 // when its setting is disabled: an OFF command still needs confirmation.
 type packAdmission struct {
-	mu            sync.Mutex
-	coordinated   bool
-	conservative  bool
-	isolation     *isolationEpisode
-	vehicle       VehicleState
-	slots         [2]admissionSlot
-	sampling      samplingRounds
-	motion        stoppedAdmission
+	mu           sync.Mutex
+	coordinated  bool
+	conservative bool
+	isolation    *isolationEpisode
+	vehicle      VehicleState
+	slots        [2]admissionSlot
+	sampling     samplingRounds
+	motion       stoppedAdmission
+	// maxDelta supplies the configured voltage limit; nil means the default.
+	maxDelta      func() uint64
 	seatboxKnown  bool
 	seatboxClosed bool
 }
@@ -476,7 +484,7 @@ func (a *packAdmission) waiting(index int, state BMSState) bool {
 func (a *packAdmission) needsPoll() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.needsPollLocked()
+	return a.needsPollLocked(time.Now())
 }
 
 // decisionOpenLocked reports whether a paired reading could still change an
@@ -484,8 +492,14 @@ func (a *packAdmission) needsPoll() bool {
 // both running and already paired need no further sampling, and any event that
 // invalidates the pairing (tag, role, vehicle state, OFF command) reopens the
 // decision. A drive-start request polls independently of this.
-func (a *packAdmission) decisionOpenLocked() bool {
-	if a.isolation != nil || a.hasInactiveCandidateLocked() {
+//
+// A pack that stays idle next to a running one cannot join until their
+// voltages are within the admission limit. While they are clearly apart it is
+// read once per heartbeat period, like the running pack; once the running pack
+// approaches the idle pack's last measured voltage, rounds run at the
+// admission cadence.
+func (a *packAdmission) decisionOpenLocked(now time.Time) bool {
+	if a.isolation != nil {
 		return true
 	}
 	for _, s := range a.slots {
@@ -493,17 +507,53 @@ func (a *packAdmission) decisionOpenLocked() bool {
 			return true
 		}
 	}
-	bothRunning := a.slots[0].held && a.slots[0].active && a.slots[1].held && a.slots[1].active
-	return bothRunning && a.sampling.pairedID == 0
+	if a.slots[0].held && a.slots[0].active && a.slots[1].held && a.slots[1].active {
+		return !a.sampling.settled
+	}
+	if !a.hasInactiveCandidateLocked() {
+		return false
+	}
+	return a.candidateNearLocked() || a.sampling.lastRound.IsZero() || now.Sub(a.sampling.lastRound) >= admissionIdleInterval
 }
 
-func (a *packAdmission) needsPollLocked() bool {
+// candidateNearLocked reports whether an idle pack is, or may soon be, within
+// reach of admission. Unknown voltages count as near so the first readings are
+// not delayed.
+func (a *packAdmission) candidateNearLocked() bool {
+	for i := range a.slots {
+		c, peer := &a.slots[i], &a.slots[1-i]
+		if !c.eligible || c.absent || c.held || c.offPending || c.active {
+			continue
+		}
+		if !c.valid || !c.haveFrame {
+			return true
+		}
+		if !peer.held || !peer.active || !peer.haveFrame {
+			return true
+		}
+		limit := uint64(DefaultMaxVoltageDeltaMV)
+		if a.maxDelta != nil {
+			limit = a.maxDelta()
+		}
+		if limit == 0 || voltageDistance(peer.frame.Voltage, c.frame.Voltage) <= admissionNearFactor*limit {
+			return true
+		}
+		// Experimental selection can hand the supply over to a higher-voltage
+		// idle pack, however far apart they are.
+		if a.conservative && c.frame.Voltage > peer.frame.Voltage {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *packAdmission) needsPollLocked(now time.Time) bool {
 	if !a.coordinated {
 		return false
 	}
 	if a.sampling.enabled {
 		return a.slots[0].monitored && a.slots[1].monitored && (a.slots[0].eligible || a.slots[1].eligible) &&
-			a.decisionOpenLocked()
+			a.decisionOpenLocked(now)
 	}
 	if !nonDrivingVehicle(a.vehicle) {
 		return false

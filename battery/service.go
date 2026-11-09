@@ -528,6 +528,7 @@ func (s *Service) recomputeAuxLowKeepActive(allowRestart bool) {
 func (s *Service) loadAdmissionSetting() {
 	s.admission = newPackAdmission(s.batteryConfig)
 	s.admission.conservative = false
+	s.admission.maxDelta = s.config.MaxVoltageDelta.Load
 	s.admission.sampling.enabled = true
 	const key = "experimental.battery.dual-pack-admission"
 	raw, err := s.redis.HGet(s.ctx, "settings", key).Result()
