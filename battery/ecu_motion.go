@@ -6,7 +6,10 @@ import (
 	"time"
 )
 
-const ecuMotionReadTimeout = 250 * time.Millisecond
+const (
+	ecuMotionReadTimeout = 250 * time.Millisecond
+	ecuMotionMaxAge      = 2 * time.Second
+)
 
 // sampleECUMotion records whether the ECU's published state shows movement or
 // throttle. It reads the engine-ecu hash once, when a decision needs it. The
@@ -24,8 +27,8 @@ func (s *Service) sampleECUMotion(now time.Time) {
 		a.invalidateMotion()
 		return
 	}
-	values, err := s.redis.HMGet(ctx, "engine-ecu", "rpm", "raw-speed", "throttle").Result()
-	if err != nil || len(values) != 3 {
+	values, err := s.redis.HMGet(ctx, "engine-ecu", "rpm", "raw-speed", "throttle", "updated-at").Result()
+	if err != nil || len(values) != 4 || !ecuMotionFresh(values[3], now) {
 		a.invalidateMotion()
 		return
 	}
@@ -35,6 +38,19 @@ func (s *Service) sampleECUMotion(now time.Time) {
 		return
 	}
 	a.observeMotion(stopped, now, now)
+}
+
+func ecuMotionFresh(value any, now time.Time) bool {
+	text, ok := value.(string)
+	if !ok {
+		return false
+	}
+	ms, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || ms <= 0 {
+		return false
+	}
+	age := now.Sub(time.UnixMilli(ms))
+	return age >= 0 && age <= ecuMotionMaxAge
 }
 
 func ecuStopped(values []any) (stopped, ok bool) {

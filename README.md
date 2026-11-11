@@ -294,8 +294,8 @@ isolation OFF deferrals are logged separately by the readers.
 `experimental.battery.dual-pack-admission-while-stopped` is obsolete and ignored.
 Stationary qualification cannot be disabled by either experimental setting.
 Adding another supply requires standstill: a known non-drive state that has held
-for 5 seconds, or, in `ready-to-drive`, an unbroken run of ECU samples with zero
-rpm, zero speed and throttle off lasting 5 seconds. Unknown states never qualify.
+for 5 seconds, or, in `ready-to-drive`, a series of fresh ECU samples with zero
+rpm, zero speed and throttle off spanning 5 seconds. Unknown states never qualify.
 The first qualified supply needs no motion evidence, including in
 `ready-to-drive`. A fresh movement or throttle report vetoes second-pack
 admission in every state and discards earlier readings; the voltage and optional
@@ -309,11 +309,13 @@ supply reservation. Once positively confirmed active, an admitted supply keeps i
 heartbeats across state changes and motion telemetry loss.
 
 Motion evidence comes from the ECU's published `engine-ecu` state (`rpm`,
-`raw-speed`, `throttle`) and only counts while `vehicle[engine-power]` is `on`;
-the hash keeps its last values while the ECU is unpowered. It is read whenever an
-ON command is considered, and every 3 seconds while an idle pack within the
-voltage limit waits for standstill in `ready-to-drive`. Unreadable, missing or
-malformed values are no evidence: they do not block in a known non-drive state
+`raw-speed`, `throttle`) and only counts while `vehicle[engine-power]` is `on`
+and `engine-ecu[updated-at]` is no more than 2 seconds old. The timestamp comes
+from a received motion frame; cached values alone do not establish freshness.
+The hash is read whenever an ON command is considered, and every 3 seconds
+while an idle pack within the voltage limit waits for standstill in
+`ready-to-drive`. Unreadable, missing, stale or malformed values are no evidence:
+they do not block in a known non-drive state
 and do not qualify in `ready-to-drive`. Battery-service opens no CAN socket and
 has no live motion subscription.
 Readings gathered in a drive state do not carry over: changing between a drive
