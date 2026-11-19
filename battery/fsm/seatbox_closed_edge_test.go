@@ -50,7 +50,8 @@ func TestSeatboxClosedLeavesInsertedOpen(t *testing.T) {
 }
 
 func TestSeatboxClosedWaitsOutCommandInterval(t *testing.T) {
-	actions := &offTestActions{statusStates: []OffState{OffStateInactive}, sendOn: true}
+	// Model a slow NFC close write; its duration is not part of the pack's processing interval.
+	actions := &offTestActions{statusStates: []OffState{OffStateInactive}, sendOn: true, closeWriteDelay: 150 * time.Millisecond}
 	sm, cancel := startOffTestMachine(t, actions)
 	defer cancel()
 	waitFor(t, 2*time.Second, func() bool { return sm.State() == StateSendOpened }, "reached send_opened")

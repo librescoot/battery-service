@@ -22,13 +22,14 @@ type offTestActions struct {
 	seatboxClosed bool
 	// lastCmd models the reader's command timestamp so wait_last_cmd can be
 	// exercised; commands records what the FSM asked the pack to do.
-	lastCmd      time.Time
-	commands     []BMSCommand
-	commandTimes []time.Time
-	openedTime   time.Duration
-	sendOn       bool
-	readStarted  chan struct{}
-	readRelease  chan struct{}
+	lastCmd         time.Time
+	commands        []BMSCommand
+	commandTimes    []time.Time
+	openedTime      time.Duration
+	closeWriteDelay time.Duration
+	sendOn          bool
+	readStarted     chan struct{}
+	readRelease     chan struct{}
 }
 
 func (a *offTestActions) GetSeatboxLockClosed() bool {
@@ -72,6 +73,9 @@ func (a *offTestActions) GetRemainingCmdTime() time.Duration {
 }
 
 func (a *offTestActions) WriteCommand(cmd BMSCommand) {
+	if cmd == BMSCmdSeatboxClosed {
+		time.Sleep(a.closeWriteDelay)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.commands = append(a.commands, cmd)

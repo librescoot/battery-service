@@ -506,10 +506,11 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// Send Closed - send seatbox closed command
 		State(StateSendClosed,
 			librefsm.WithParent(StateHeartbeatActions),
-			librefsm.WithTimeout(timeCmd, EvClosedTimeout),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				d.actions.WriteCommand(BMSCmdSeatboxClosed)
+				// NFC discovery and retries must not consume the pack's processing time.
+				c.StartTimer("closed", timeCmd, librefsm.Event{ID: EvClosedTimeout})
 				return nil
 			}),
 		).
@@ -570,10 +571,10 @@ func buildDefinition(data *fsmData) *librefsm.Definition {
 		// Send Inserted Closed - send inserted command when state incorrect
 		State(StateSendInsertedClosed,
 			librefsm.WithParent(StateHeartbeatActions),
-			librefsm.WithTimeout(timeCmd, EvInsertedClosedTimeout),
 			librefsm.WithOnEnter(func(c *librefsm.Context) error {
 				d := c.Data.(*fsmData)
 				d.actions.WriteCommand(BMSCmdInsertedInScooter)
+				c.StartTimer("inserted_closed", timeCmd, librefsm.Event{ID: EvInsertedClosedTimeout})
 				return nil
 			}),
 		).
